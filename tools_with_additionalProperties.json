@@ -1,0 +1,190 @@
+{
+  "name": "operate_nifi_objects",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "operations": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "A list of operation request dictionaries, each containing:\n- object_type: The type of object ('processor', 'port', 'process_group', or 'controller_service')\n- object_id: The UUID of the object to operate on  \n- operation_type: The operation to perform ('start', 'stop', 'enable', or 'disable')\n- name (optional): A descriptive name for the object (used in logging/results)"
+      }
+    },
+    "required": [
+      "operations"
+    ]
+  }
+}
+{
+  "name": "update_controller_service_properties",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "controller_service_id": {
+        "type": "string",
+        "description": "The UUID of the controller service to update."
+      },
+      "controller_service_properties": {
+        "additionalProperties": true,
+        "type": "object",
+        "description": "A complete dictionary representing the desired final state of all properties. Cannot be empty."
+      }
+    },
+    "required": [
+      "controller_service_id",
+      "controller_service_properties"
+    ]
+  }
+}
+{
+  "name": "delete_nifi_objects",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "objects": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "A list of deletion request dictionaries, each containing:\n- object_type: The type of the object to delete ('processor', 'connection', 'port', 'process_group', 'controller_service')\n- object_id: The UUID of the object to delete\n- name (optional): A descriptive name for the object (used in logging/results)"
+      }
+    },
+    "required": [
+      "objects"
+    ]
+  }
+}
+{
+  "name": "update_nifi_processors_properties",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "updates": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of property update dictionaries, each containing:\n- processor_id: UUID of the processor to update\n- properties: Dictionary of properties to update\n- name (optional): Descriptive name for logging"
+      }
+    },
+    "required": [
+      "updates"
+    ]
+  }
+}
+{
+  "name": "create_nifi_processors",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "processors": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of processor definitions. Each dictionary must contain:\n- processor_type (str): Fully qualified Java class name of the processor\n- name (str): The desired name for the processor instance\n- position_x (int) OR position (dict): X coordinate OR nested position object {\"x\": 100, \"y\": 200}\n- position_y (int): Y coordinate (only if using position_x format)\n- process_group_id (str, optional): UUID of the target process group\n- properties (dict, optional): Configuration properties for the processor"
+      }
+    },
+    "required": [
+      "processors"
+    ]
+  }
+}
+{
+  "name": "create_nifi_ports",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "ports": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of port definitions. Each dictionary must contain:\n- port_type (str): Either \"input\" or \"output\"\n- name (str): The desired name for the port instance\n- position_x (int) OR position (dict): X coordinate OR nested position object {\"x\": 100, \"y\": 200}\n- position_y (int): Y coordinate (only if using position_x format)\n- process_group_id (str, optional): UUID of the target process group"
+      }
+    },
+    "required": [
+      "ports"
+    ]
+  }
+}
+{
+  "name": "create_controller_services",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "controller_services": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of controller service definitions, each containing:\n- service_type: The fully qualified Java class name (required)\n- name: The desired name for the controller service (required)\n- properties: Dict of configuration properties (optional)"
+      },
+      "process_group_id": {
+        "type": "string",
+        "description": "The UUID of the process group where services should be created (required)"
+      }
+    },
+    "required": [
+      "controller_services",
+      "process_group_id"
+    ]
+  }
+}
+{
+  "name": "create_complete_nifi_flow",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "nifi_objects": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of objects to create. Supported types:\n- controller_service: {type, service_type, name, properties}\n- processor: {type, processor_type, name, position, properties}  \n- connection: {type, source, target, relationships} (optional here)"
+      },
+      "process_group_id": {
+        "description": "Target process group ID (defaults to root)"
+      },
+      "create_process_group": {
+        "description": "Optional new process group config"
+      },
+      "connections": {
+        "description": "Optional separate list of connections (alternative to including in nifi_objects)"
+      }
+    },
+    "required": [
+      "nifi_objects"
+    ]
+  }
+}
+{
+  "name": "create_nifi_connections",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "connections": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of connection definitions using component names OR UUIDs. Each dictionary must contain:\n- source_name (str): Name OR UUID of the source component (UUIDs take precedence)\n- target_name (str): Name OR UUID of the target component (UUIDs take precedence)\n- relationships (list): List of relationship names to connect\n- process_group_id (str, optional): Process group to search in (defaults to parameter)"
+      },
+      "process_group_id": {
+        "description": "Default process group to search for components (optional)"
+      }
+    },
+    "required": [
+      "connections"
+    ]
+  }
+}

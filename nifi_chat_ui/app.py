@@ -5,7 +5,7 @@ import time # Added for timing tracking
 from loguru import logger # Import logger directly
 from st_copy_to_clipboard import st_copy_to_clipboard # Import the new component
 from typing import List, Dict
-from chat_manager import calculate_input_tokens  # Import for smart pruning
+from nifi_chat_ui.llm.chat_manager import ChatManager  # Import for smart pruning
 
 # Set page config MUST be the first Streamlit call
 st.set_page_config(page_title="NiFi Chat UI", layout="wide")
@@ -51,9 +51,9 @@ except ImportError:
 # ---------------------
 
 # Restore imports
-from chat_manager import get_llm_response, get_formatted_tool_definitions, calculate_input_tokens
-from chat_manager import configure_llms, is_initialized
-from mcp_handler import get_available_tools, execute_mcp_tool, get_nifi_servers
+from nifi_chat_ui.llm.chat_manager import ChatManager
+from nifi_chat_ui.llm.utils.token_counter import TokenCounter
+from nifi_chat_ui.mcp_handler import get_available_tools, execute_mcp_tool, get_nifi_servers
 # Import config from the new location
 try:
     # Add parent directory to Python path so we can import config
@@ -70,10 +70,34 @@ except ImportError:
     st.error("Configuration loading failed. Application cannot start.")
     st.stop()
 
-# Initialize LLM clients after page config
-if not is_initialized:
-    logger.info("Initializing LLM clients...")
-    configure_llms()
+# Initialize ChatManager and TokenCounter after page config
+if "chat_manager" not in st.session_state:
+    logger.info("Initializing ChatManager...")
+    config_dict = {
+        'openai': {
+            'api_key': config.OPENAI_API_KEY,
+            'models': config.OPENAI_MODELS
+        },
+        'gemini': {
+            'api_key': config.GOOGLE_API_KEY,
+            'models': config.GEMINI_MODELS
+        },
+        'anthropic': {
+            'api_key': config.ANTHROPIC_API_KEY,
+            'models': config.ANTHROPIC_MODELS
+        },
+        'perplexity': {
+            'api_key': config.PERPLEXITY_API_KEY,
+            'models': config.PERPLEXITY_MODELS
+        },
+        # Add flat keys for Gemini for compatibility
+        'GOOGLE_API_KEY': config.GOOGLE_API_KEY,
+        'GEMINI_MODELS': config.GEMINI_MODELS,
+        'GEMINI_DEFAULT_MODEL': getattr(config, 'GEMINI_DEFAULT_MODEL', 'gemini-1.5-pro'),
+    }
+    st.session_state.chat_manager = ChatManager(config_dict)
+    st.session_state.token_counter = TokenCounter()
+    logger.info("ChatManager and TokenCounter initialized")
 
 # --- Constants ---
 MAX_LOOP_ITERATIONS = 10 # Safety break for the execution loop
@@ -565,14 +589,18 @@ Keep this concise but informative.
         bound_logger.info("Requesting automated status report from LLM")
         
         # Call LLM for status report (no tools needed)
-        status_response = get_llm_response(
-            messages=status_messages,
-            system_prompt=system_prompt,
-            tools=None,  # No tools for status report
-            provider=provider,
-            model_name=model_name,
-            user_request_id=user_req_id
-        )
+        chat_manager = st.session_state.get("chat_manager")
+        if chat_manager:
+            status_response = chat_manager.get_llm_response(
+                messages=status_messages,
+                system_prompt=system_prompt,
+                provider=provider,
+                model_name=model_name,
+                user_request_id=user_req_id,
+                selected_nifi_server_id=st.session_state.get("selected_nifi_server_id")
+            )
+        else:
+            status_response = {"error": "ChatManager not available"}
         
         if status_response and status_response.get("content"):
             # Display the status report
@@ -1290,11 +1318,16 @@ def smart_prune_messages(messages: List[Dict], max_tokens: int, provider: str, m
     
     # Calculate current tokens
     try:
-        current_tokens = calculate_input_tokens(messages, provider, model_name, tools)
-        logger.info(f"SMART_PRUNE_DEBUG: Initial tokens: {current_tokens}, Limit: {max_tokens}, Messages: {len(messages)}")
-        if current_tokens <= max_tokens:
-            logger.info("SMART_PRUNE_DEBUG: Already under limit, no pruning needed")
-            return messages  # No pruning needed
+        token_counter = st.session_state.get("token_counter")
+        if token_counter:
+            current_tokens = token_counter.calculate_input_tokens(messages, provider, model_name, tools)
+            logger.info(f"SMART_PRUNE_DEBUG: Initial tokens: {current_tokens}, Limit: {max_tokens}, Messages: {len(messages)}")
+            if current_tokens <= max_tokens:
+                logger.info("SMART_PRUNE_DEBUG: Already under limit, no pruning needed")
+                return messages  # No pruning needed
+        else:
+            logger.error("TokenCounter not available")
+            return messages
     except Exception as e:
         logger.error(f"Error calculating tokens during smart pruning: {e}")
         return messages  # Return original on error
@@ -1443,9 +1476,14 @@ def smart_prune_messages(messages: List[Dict], max_tokens: int, provider: str, m
         
         # Check if we're now under the limit
         try:
-            new_tokens = calculate_input_tokens(pruned_messages, provider, model_name, tools)
-            logger.debug(f"After removing group: {new_tokens} tokens (limit: {max_tokens})")
-            if new_tokens <= max_tokens:
+            token_counter = st.session_state.get("token_counter")
+            if token_counter:
+                new_tokens = token_counter.calculate_input_tokens(pruned_messages, provider, model_name, tools)
+                logger.debug(f"After removing group: {new_tokens} tokens (limit: {max_tokens})")
+                if new_tokens <= max_tokens:
+                    break
+            else:
+                logger.error("TokenCounter not available")
                 break
         except Exception as e:
             logger.error(f"Error calculating tokens after removal: {e}")
@@ -1528,7 +1566,11 @@ def smart_prune_messages(messages: List[Dict], max_tokens: int, provider: str, m
                 
                 # More aggressive pruning when severely over limit (same logic as initial pass)
                 try:
-                    recalc_tokens = calculate_input_tokens(pruned_messages, provider, model_name, tools)
+                    token_counter = st.session_state.get("token_counter")
+                    if token_counter:
+                        recalc_tokens = token_counter.calculate_input_tokens(pruned_messages, provider, model_name, tools)
+                    else:
+                        recalc_tokens = 0
                 except Exception:
                     recalc_tokens = max_tokens * 2  # Assume severe if we can't calculate
                 
@@ -1552,8 +1594,12 @@ def smart_prune_messages(messages: List[Dict], max_tokens: int, provider: str, m
         return messages
     
     try:
-        final_tokens = calculate_input_tokens(pruned_messages, provider, model_name, tools)
-        logger.info(f"Smart pruning complete: {len(messages)} → {len(pruned_messages)} messages, {current_tokens} → {final_tokens} tokens")
+        token_counter = st.session_state.get("token_counter")
+        if token_counter:
+            final_tokens = token_counter.calculate_input_tokens(pruned_messages, provider, model_name, tools)
+            logger.info(f"Smart pruning complete: {len(messages)} → {len(pruned_messages)} messages, {current_tokens} → {final_tokens} tokens")
+        else:
+            logger.warning("TokenCounter not available for final token calculation")
     except Exception:
         pass
     
@@ -1698,19 +1744,24 @@ def run_execution_loop(provider: str, model_name: str, base_sys_prompt: str, use
             current_loop_logger.debug(f"Formatting tools for provider: {provider}")
             if filtered_raw_tools_list:
                  try:
-                      formatted_tools = get_formatted_tool_definitions(
-                          provider=provider, 
-                          raw_tools=filtered_raw_tools_list, 
-                          user_request_id=user_req_id
-                      ) 
-                      if formatted_tools:
-                           current_loop_logger.debug(f"Tools successfully formatted for {provider} ({len(formatted_tools)} tools).")
+                      chat_manager = st.session_state.get("chat_manager")
+                      if chat_manager:
+                          formatted_tools = chat_manager.get_tools(
+                              provider=provider, 
+                              user_request_id=user_req_id,
+                              selected_nifi_server_id=current_nifi_server_id
+                          ) 
+                          if formatted_tools:
+                               current_loop_logger.debug(f"Tools successfully formatted for {provider} ({len(formatted_tools)} tools).")
+                          else:
+                               current_loop_logger.warning(f"ChatManager.get_tools returned None/empty for {provider}.")
                       else:
-                           current_loop_logger.warning(f"get_formatted_tool_definitions returned None/empty for {provider}.")
+                          current_loop_logger.warning("ChatManager not available")
+                          formatted_tools = None
                  except Exception as fmt_e:
                       st.error(f"Error formatting tools for {provider} in loop: {fmt_e}")
                       current_loop_logger.error(f"Error formatting tools for {provider}: {fmt_e}", exc_info=True)
-                      formatted_tools = None 
+                      formatted_tools = None
             # --------------------------------------------------
                 
             # 2. Initialize LLM context messages (AFTER tool prep, BEFORE pruning)
@@ -1805,13 +1856,18 @@ def run_execution_loop(provider: str, model_name: str, base_sys_prompt: str, use
                 
                 # CRITICAL FIX: Use smart pruning instead of naive pruning
                 try:
-                    current_tokens = calculate_input_tokens(
-                        llm_context_messages, 
-                        provider, 
-                        model_name, 
-                        tools=formatted_tools
-                    )
-                    current_loop_logger.info(f"DEBUG: Current token count (incl. tools): {current_tokens}, Limit: {max_tokens}")
+                    token_counter = st.session_state.get("token_counter")
+                    if token_counter:
+                        current_tokens = token_counter.calculate_input_tokens(
+                            llm_context_messages, 
+                            provider, 
+                            model_name, 
+                            tools=formatted_tools
+                        )
+                        current_loop_logger.info(f"DEBUG: Current token count (incl. tools): {current_tokens}, Limit: {max_tokens}")
+                    else:
+                        current_loop_logger.warning("TokenCounter not available")
+                        current_tokens = 0
                     
                     if current_tokens > max_tokens:
                         current_loop_logger.info(f"DEBUG: Token limit exceeded ({current_tokens} > {max_tokens}). Applying smart pruning...")
@@ -1831,13 +1887,17 @@ def run_execution_loop(provider: str, model_name: str, base_sys_prompt: str, use
                         current_loop_logger.info(f"DEBUG: Smart pruning results: {original_count} → {final_count} messages")
                         
                         try:
-                            final_tokens = calculate_input_tokens(llm_context_messages, provider, model_name, tools=formatted_tools)
-                            current_loop_logger.info(f"DEBUG: Smart pruning token results: {current_tokens} → {final_tokens} tokens")
-                            
-                            if final_tokens > max_tokens:
-                                current_loop_logger.warning(f"DEBUG: Smart pruning failed to get under limit! Still at {final_tokens} tokens")
+                            token_counter = st.session_state.get("token_counter")
+                            if token_counter:
+                                final_tokens = token_counter.calculate_input_tokens(llm_context_messages, provider, model_name, tools=formatted_tools)
+                                current_loop_logger.info(f"DEBUG: Smart pruning token results: {current_tokens} → {final_tokens} tokens")
+                                
+                                if final_tokens > max_tokens:
+                                    current_loop_logger.warning(f"DEBUG: Smart pruning failed to get under limit! Still at {final_tokens} tokens")
+                                else:
+                                    current_loop_logger.info(f"DEBUG: Smart pruning successful! Now at {final_tokens} tokens")
                             else:
-                                current_loop_logger.info(f"DEBUG: Smart pruning successful! Now at {final_tokens} tokens")
+                                current_loop_logger.warning("TokenCounter not available for final token calculation")
                                 
                         except Exception as verify_e:
                             current_loop_logger.warning(f"Could not verify final token count after smart pruning: {verify_e}")
@@ -1862,14 +1922,18 @@ def run_execution_loop(provider: str, model_name: str, base_sys_prompt: str, use
             response_data = None
             with st.spinner(f"Thinking... (Step {loop_count}/{max_iterations}) / Tokens: ~{current_tokens if 'current_tokens' in locals() else 'N/A'}"):
                 current_loop_logger.info(f"Calling LLM ({provider} - {model_name})...")
-                response_data = get_llm_response(
-                    messages=llm_context_messages, 
-                    system_prompt=effective_system_prompt,
-                    tools=formatted_tools,
-                    provider=provider,
-                    model_name=model_name,
-                    user_request_id=user_req_id
-                )
+                chat_manager = st.session_state.get("chat_manager")
+                if chat_manager:
+                    response_data = chat_manager.get_llm_response(
+                        messages=llm_context_messages, 
+                        system_prompt=effective_system_prompt,
+                        provider=provider,
+                        model_name=model_name,
+                        user_request_id=user_req_id,
+                        selected_nifi_server_id=current_nifi_server_id
+                    )
+                else:
+                    response_data = {"error": "ChatManager not available"}
                 if response_data is None:
                      st.error("LLM response was empty.")
                      current_loop_logger.error("LLM response data was None.")

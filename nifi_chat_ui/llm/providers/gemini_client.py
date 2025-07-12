@@ -7,6 +7,7 @@ which provides built-in MCP support and eliminates manual schema conversion issu
 
 from typing import List, Dict, Any, Optional
 import json
+import uuid
 from loguru import logger
 
 from ..base import LLMProvider, LLMResponse
@@ -28,8 +29,15 @@ class GeminiClient(LLMProvider):
     """Gemini LLM Provider implementation using Google ADK for MCP integration."""
     
     def __init__(self, config: Dict[str, Any]):
+        # Support both flat and nested config keys for compatibility
         api_key = config.get("GOOGLE_API_KEY")
-        model_name = config.get("GEMINI_DEFAULT_MODEL", "gemini-1.5-pro")
+        if not api_key and "gemini" in config and isinstance(config["gemini"], dict):
+            api_key = config["gemini"].get("api_key")
+        model_name = config.get("GEMINI_DEFAULT_MODEL")
+        if not model_name and "gemini" in config and isinstance(config["gemini"], dict):
+            model_name = config["gemini"].get("default_model")
+        if not model_name:
+            model_name = "gemini-1.5-pro"
         super().__init__(api_key, model_name)
         
         if not api_key:
@@ -37,7 +45,11 @@ class GeminiClient(LLMProvider):
         
         self.token_counter = TokenCounter()
         self.logger = logger.bind(provider="Gemini")
-        self.available_models = config.get("GEMINI_MODELS", ["gemini-1.5-pro", "gemini-1.5-flash"])
+        self.available_models = config.get("GEMINI_MODELS")
+        if not self.available_models and "gemini" in config and isinstance(config["gemini"], dict):
+            self.available_models = config["gemini"].get("models", ["gemini-1.5-pro", "gemini-1.5-flash"])
+        if not self.available_models:
+            self.available_models = ["gemini-1.5-pro", "gemini-1.5-flash"]
         
         # Initialize ADK agent if available
         self.adk_agent = None
@@ -47,13 +59,18 @@ class GeminiClient(LLMProvider):
     def _initialize_adk_agent(self, config: Dict[str, Any]):
         """Initialize the ADK agent with MCP toolset."""
         try:
-            # Note: Our MCP server is HTTP-based (FastAPI), not stdio-based
-            # ADK's MCPToolset expects stdio servers, so we'll use the manual implementation
-            # for now and let ADK handle the Gemini model integration
-            self.logger.info("MCP server is HTTP-based, using manual implementation with ADK Gemini model")
+            if not ADK_AVAILABLE:
+                self.logger.warning("Google ADK not available, using manual implementation")
+                self.adk_agent = None
+                return
             
-            # For now, we'll use the manual implementation but with ADK's model
-            # This gives us the benefits of ADK's model handling while working with our HTTP MCP server
+            # Import ADK components
+            from google.adk.agents import LlmAgent
+            from google.adk.tools import APIHubToolset
+            
+            # For now, we'll use the manual implementation since ADK doesn't have direct MCP support
+            # The manual implementation with proper protobuf handling should work fine
+            self.logger.info("Using manual Gemini implementation (ADK MCP support not available)")
             self.adk_agent = None
             
         except Exception as e:
@@ -202,21 +219,28 @@ class GeminiClient(LLMProvider):
         tool_calls = []
         
         try:
-            # ADK response structure may vary, try different approaches
-            if hasattr(response, 'tool_calls'):
+            # ADK should return tool calls in a clean format
+            if hasattr(response, 'tool_calls') and response.tool_calls:
                 for tool_call in response.tool_calls:
                     tool_calls.append({
-                        "id": str(tool_call.get("id", "")),
+                        "id": str(uuid.uuid4()),
                         "type": "function",
                         "function": {
-                            "name": tool_call.get("name", ""),
-                            "arguments": json.dumps(tool_call.get("arguments", {}))
+                            "name": tool_call.name if hasattr(tool_call, 'name') else tool_call.get("name", ""),
+                            "arguments": json.dumps(tool_call.args if hasattr(tool_call, 'args') else tool_call.get("args", {}))
                         }
                     })
-            elif hasattr(response, 'content') and isinstance(response.content, str):
-                # Try to parse tool calls from content if they're embedded
-                # This is a fallback for when ADK doesn't provide structured tool calls
-                pass
+            elif hasattr(response, 'function_calls') and response.function_calls:
+                # Alternative field name
+                for tool_call in response.function_calls:
+                    tool_calls.append({
+                        "id": str(uuid.uuid4()),
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.name if hasattr(tool_call, 'name') else tool_call.get("name", ""),
+                            "arguments": json.dumps(tool_call.args if hasattr(tool_call, 'args') else tool_call.get("args", {}))
+                        }
+                    })
                 
         except Exception as e:
             self.logger.warning(f"Failed to extract tool calls from ADK response: {e}")
@@ -239,4 +263,6 @@ class GeminiClient(LLMProvider):
     
     def supports_tools(self) -> bool:
         """Check if this provider supports function calling/tools."""
-        return ADK_AVAILABLE and self.adk_agent is not None 
+        # Gemini supports tools through both ADK and manual implementation
+        return True
+    

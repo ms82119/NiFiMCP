@@ -160,7 +160,7 @@ def setup_test_environment():
     os.environ["TESTING"] = "true"
     
     # Mock critical imports that might not be available in test environment
-    with patch('nifi_chat_ui.chat_manager.get_llm_response'), \
+    with patch('nifi_chat_ui.llm.chat_manager.ChatManager.get_llm_response'), \
          patch('nifi_chat_ui.mcp_handler.get_available_tools'), \
          patch('nifi_chat_ui.mcp_handler.execute_mcp_tool'):
         yield

@@ -160,15 +160,16 @@ class ChatManager:
         """
         return self.mcp_client.execute_tool(tool_name, arguments, user_request_id)
     
-    def get_tools(self, provider: str, user_request_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_tools(self, provider: str, user_request_id: Optional[str] = None, selected_nifi_server_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Get tools for a specific provider with schema validation.
         
         Args:
             provider: LLM provider name
             user_request_id: Optional user request ID for logging
+            selected_nifi_server_id: Optional NiFi server ID
             
         Returns:
             List of tool definitions with provider-specific schema validation
         """
-        return self.mcp_client.get_tools_for_provider(provider, user_request_id) 
+        return self.mcp_client.get_tools_for_provider(provider, user_request_id, selected_nifi_server_id) 

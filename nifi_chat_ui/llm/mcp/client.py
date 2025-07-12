@@ -67,12 +67,13 @@ class MCPClient:
             self.logger.error(f"Error getting tools from MCP server: {e}")
             return []
     
-    def get_tools(self, user_request_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_tools(self, user_request_id: Optional[str] = None, selected_nifi_server_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Get MCP tools without provider-specific validation (for backward compatibility).
         
         Args:
             user_request_id: Optional user request ID for logging
+            selected_nifi_server_id: Optional NiFi server ID
             
         Returns:
             List of tool definitions
@@ -82,7 +83,10 @@ class MCPClient:
             return []
         
         try:
-            tools = get_available_tools(user_request_id=user_request_id)
+            tools = get_available_tools(
+                user_request_id=user_request_id,
+                selected_nifi_server_id=selected_nifi_server_id
+            )
             self.logger.info(f"Retrieved {len(tools)} tools from MCP server")
             return tools
         except Exception as e:

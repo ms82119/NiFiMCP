@@ -21,6 +21,7 @@ from nifi_mcp_server.workflows.definitions.unguided_mimic import (
     create_unguided_mimic_workflow
 )
 from nifi_mcp_server.workflows.core.executor import GuidedWorkflowExecutor
+from nifi_chat_ui.llm.chat_manager import ChatManager
 
 
 class TestContractValidation:
@@ -28,17 +29,17 @@ class TestContractValidation:
     
     def test_get_llm_response_contract(self):
         """Test that workflow calls get_llm_response with correct signature."""
-        from nifi_chat_ui.chat_manager import get_llm_response
+        from nifi_chat_ui.llm.chat_manager import ChatManager
         import inspect
         
-        # Get actual function signature
-        sig = inspect.signature(get_llm_response)
+        # Get actual method signature
+        sig = inspect.signature(ChatManager.get_llm_response)
         param_names = list(sig.parameters.keys())
         
         # Verify workflow code matches expected parameters
-        expected_params = ['messages', 'system_prompt', 'tools', 'provider', 'model_name', 'user_request_id']
+        expected_params = ['messages', 'system_prompt', 'provider', 'model_name', 'user_request_id', 'action_id', 'selected_nifi_server_id']
         for param in expected_params:
-            assert param in param_names, f"get_llm_response missing expected parameter: {param}"
+            assert param in param_names, f"ChatManager.get_llm_response missing expected parameter: {param}"
     
     def test_execute_mcp_tool_contract(self):
         """Test that workflow calls execute_mcp_tool with correct signature."""
@@ -171,7 +172,7 @@ class TestParameterValidationWithAutospec:
         """Set up test fixtures."""
         self.node = InitializeExecutionNode()
     
-    @patch('nifi_chat_ui.chat_manager.get_llm_response', autospec=True)
+    @patch('nifi_chat_ui.llm.chat_manager.ChatManager.get_llm_response', autospec=True)
     @patch('nifi_chat_ui.mcp_handler.get_available_tools', autospec=True) 
     def test_function_called_with_correct_parameters(self, mock_get_tools, mock_llm_response):
         """Test that functions are called with correct parameter names and types."""

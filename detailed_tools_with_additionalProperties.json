@@ -1,0 +1,199 @@
+{
+  "name": "operate_nifi_objects",
+  "description": "Performs start, stop, enable, or disable operations on multiple NiFi objects in batch.\n\nThis tool provides efficient batch processing for object state operations, reducing the number\nof individual tool calls required. Each operation is processed independently, so failure of \none operation does not prevent others from completing.\n\n**Example:**\n```python\noperations = [\n    {\n        \"object_type\": \"processor\",\n        \"object_id\": \"123e4567-e89b-12d3-a456-426614174000\", \n        \"operation_type\": \"start\",\n        \"name\": \"MyProcessor\"\n    },\n    {\n        \"object_type\": \"controller_service\",\n        \"object_id\": \"456e7890-e89b-12d3-a456-426614174001\",\n        \"operation_type\": \"enable\",\n        \"name\": \"MyControllerService\"\n    },\n    {\n        \"object_type\": \"process_group\",\n        \"object_id\": \"789e1234-e89b-12d3-a456-426614174002\", \n        \"operation_type\": \"stop\"\n    }\n]\nresult = operate_nifi_objects(operations)\n```\n\n\n\n**Returns:**\nA list of dictionaries, each indicating success or failure for the corresponding operation request.\nEach result includes:\n    - status: 'success', 'warning', or 'error'\n    - message: Descriptive message about the operation result\n    - entity: The updated NiFi entity (if successful)\n    - object_type: Type of object operated on\n    - object_id: ID of object operated on  \n    - operation_type: Operation that was performed\n    - object_name: Name of object (if provided)\n    - request_index: Index of request in the input list",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "operations": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "A list of operation request dictionaries, each containing:\n- object_type: The type of object ('processor', 'port', 'process_group', or 'controller_service')\n- object_id: The UUID of the object to operate on  \n- operation_type: The operation to perform ('start', 'stop', 'enable', or 'disable')\n- name (optional): A descriptive name for the object (used in logging/results)"
+      }
+    },
+    "required": [
+      "operations"
+    ]
+  }
+}
+{
+  "name": "update_controller_service_properties",
+  "description": "Updates a controller service's configuration properties by replacing the existing property dictionary.\n\nAutomatically disables enabled controller services, then performs the update.\nIf the controller service was originally enabled and the update is valid, automatically re-enables it.\n\n**Returns:**\nA dictionary with enhanced status information including property update and restart status.\nPossible status values: \"success\", \"partial_success\", \"warning\", \"error\"",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "controller_service_id": {
+        "type": "string",
+        "description": "The UUID of the controller service to update."
+      },
+      "controller_service_properties": {
+        "additionalProperties": true,
+        "type": "object",
+        "description": "A complete dictionary representing the desired final state of all properties. Cannot be empty."
+      }
+    },
+    "required": [
+      "controller_service_id",
+      "controller_service_properties"
+    ]
+  }
+}
+{
+  "name": "delete_nifi_objects",
+  "description": "Deletes multiple NiFi objects (processors, connections, ports, process groups, or controller services) in batch.\n\nAttempts Auto-Stop for running processors if enabled.\nAttempts Auto-Delete for processors with connections if enabled.\nAttempts Auto-Purge for connections with queued data if enabled.\nAttempts Auto-Disable for enabled controller services.\n\n**Example:**\n```python\n[\n    {\n        \"object_type\": \"processor\",\n        \"object_id\": \"123e4567-e89b-12d3-a456-426614174000\",\n        \"name\": \"MyProcessor\"\n    },\n    {\n        \"object_type\": \"connection\", \n        \"object_id\": \"456e7890-e89b-12d3-a456-426614174001\"\n    },\n    {\n        \"object_type\": \"controller_service\",\n        \"object_id\": \"789e1234-e89b-12d3-a456-426614174002\",\n        \"name\": \"MyControllerService\"\n    }\n]\n```\n\n\n\n**Returns:**\nA list of dictionaries, each indicating success or failure for the corresponding deletion request.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "objects": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "A list of deletion request dictionaries, each containing:\n- object_type: The type of the object to delete ('processor', 'connection', 'port', 'process_group', 'controller_service')\n- object_id: The UUID of the object to delete\n- name (optional): A descriptive name for the object (used in logging/results)"
+      }
+    },
+    "required": [
+      "objects"
+    ]
+  }
+}
+{
+  "name": "update_nifi_processors_properties",
+  "description": "Updates one or more processors' properties efficiently.\n\nThis tool handles both single processor updates and batch updates, automatically\noptimizing the operation for the number of processors provided.\n\n**Example:**\n```python\nupdates = [\n    {\n        \"processor_id\": \"abc-123\",\n        \"properties\": {\"Log Level\": \"info\", \"Yield Duration\": \"1 sec\"},\n        \"name\": \"LogRawInput\"\n    },\n    {\n        \"processor_id\": \"def-456\", \n        \"properties\": {\"Log Level\": \"info\"},\n        \"name\": \"LogResponse\"\n    }\n]\n```\n\n\n\n**Returns:**\nList of update results, one per processor.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "updates": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of property update dictionaries, each containing:\n- processor_id: UUID of the processor to update\n- properties: Dictionary of properties to update\n- name (optional): Descriptive name for logging"
+      }
+    },
+    "required": [
+      "updates"
+    ]
+  }
+}
+{
+  "name": "create_nifi_processors",
+  "description": "Creates one or more NiFi processors in batch.\n\n**Returns:**\nList of result dictionaries, one per processor creation attempt.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "processors": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of processor definitions. Each dictionary must contain:\n- processor_type (str): Fully qualified Java class name of the processor\n- name (str): The desired name for the processor instance\n- position_x (int) OR position (dict): X coordinate OR nested position object {\"x\": 100, \"y\": 200}\n- position_y (int): Y coordinate (only if using position_x format)\n- process_group_id (str, optional): UUID of the target process group\n- properties (dict, optional): Configuration properties for the processor"
+      }
+    },
+    "required": [
+      "processors"
+    ]
+  }
+}
+{
+  "name": "create_nifi_ports",
+  "description": "Creates one or more NiFi ports in batch.\n\n**Returns:**\nList of result dictionaries, one per port creation attempt.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "ports": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of port definitions. Each dictionary must contain:\n- port_type (str): Either \"input\" or \"output\"\n- name (str): The desired name for the port instance\n- position_x (int) OR position (dict): X coordinate OR nested position object {\"x\": 100, \"y\": 200}\n- position_y (int): Y coordinate (only if using position_x format)\n- process_group_id (str, optional): UUID of the target process group"
+      }
+    },
+    "required": [
+      "ports"
+    ]
+  }
+}
+{
+  "name": "create_controller_services",
+  "description": "Creates one or more controller services in batch within a specified process group.\n\n**Example:**\n```python\ncontroller_services = [{\n    \"service_type\": \"org.apache.nifi.dbcp.DBCPConnectionPool\",\n    \"name\": \"DatabaseConnectionPool\",\n    \"properties\": {\n        \"Database Connection URL\": \"jdbc:postgresql://localhost:5432/mydb\",\n        \"Database Driver Class Name\": \"org.postgresql.Driver\"\n    }\n}]\nprocess_group_id = \"process-group-uuid\"\nresult = create_controller_services(controller_services, process_group_id)\n```\n\n\n\n**Returns:**\nList of results, one per controller service creation attempt.\nIncludes enhanced error handling with available types when invalid types are provided.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "controller_services": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of controller service definitions, each containing:\n- service_type: The fully qualified Java class name (required)\n- name: The desired name for the controller service (required)\n- properties: Dict of configuration properties (optional)"
+      },
+      "process_group_id": {
+        "type": "string",
+        "description": "The UUID of the process group where services should be created (required)"
+      }
+    },
+    "required": [
+      "controller_services",
+      "process_group_id"
+    ]
+  }
+}
+{
+  "name": "create_complete_nifi_flow",
+  "description": "Creates a complete NiFi flow with controller services, processors, and connections.\n\nThis enhanced flow creation tool provides comprehensive support for:\n- Controller services with automatic enabling\n- Processors with @ServiceName reference resolution\n- Connections with name-based mapping\n- Automatic flow validation\n- Simplified input schema\n- Atomic operations with rollback on failure (Phase 1B)\n\nExample (Method 1 - All in nifi_objects):\n```python\nnifi_objects = [\n    {\n        \"type\": \"controller_service\",\n        \"service_type\": \"org.apache.nifi.json.JsonTreeReader\", \n        \"name\": \"JsonReader\",\n        \"properties\": {\"Schema Access Strategy\": \"Use Schema Name Property\"}\n    },\n    {\n        \"type\": \"processor\",\n        \"processor_type\": \"org.apache.nifi.processors.standard.HandleHttpRequest\",\n        \"name\": \"ReceiveHTTP\", \n        \"position\": {\"x\": 100, \"y\": 100},\n        \"properties\": {\n            \"Listening Port\": \"8080\",\n            \"HTTP Context Map\": \"@HttpContextMap\"\n        }\n    },\n    {\n        \"type\": \"connection\",\n        \"source\": \"ReceiveHTTP\",\n        \"target\": \"ProcessData\", \n        \"relationships\": [\"success\"]\n    }\n]\n```\n\nExample (Method 2 - Separate connections):\n```python\nnifi_objects = [\n    # controller services and processors only\n]\nconnections = [\n    {\n        \"source\": \"ReceiveHTTP\",\n        \"target\": \"ProcessData\", \n        \"relationships\": [\"success\"]\n    }\n]\n```\n\n**Returns:**\nComprehensive results including created objects, validation status, and summary",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "nifi_objects": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of objects to create. Supported types:\n- controller_service: {type, service_type, name, properties}\n- processor: {type, processor_type, name, position, properties}  \n- connection: {type, source, target, relationships} (optional here)"
+      },
+      "process_group_id": {
+        "description": "Target process group ID (defaults to root)"
+      },
+      "create_process_group": {
+        "description": "Optional new process group config"
+      },
+      "connections": {
+        "description": "Optional separate list of connections (alternative to including in nifi_objects)"
+      }
+    },
+    "required": [
+      "nifi_objects"
+    ]
+  }
+}
+{
+  "name": "create_nifi_connections",
+  "description": "Creates NiFi connections using component names OR UUIDs with automatic resolution.\n\nThis unified tool accepts multiple input formats and automatically handles the complexity\nof UUID resolution, duplicate name detection, and component mapping. No manual UUID lookup required.\n\nINPUT FORMATS SUPPORTED:\n1. **UUIDs** (PREFERRED): Direct component UUIDs - always unambiguous\n2. **Component Names**: Resolved to UUIDs automatically\n3. **Type-Specific Names**: \"name:type\" format for disambiguation\n\nDUPLICATE NAME HANDLING:\n- UUIDs always take precedence (no ambiguity possible)\n- Same-type duplicates (e.g., two processors named \"LogData\") → Error with clear message\n- Cross-type duplicates (e.g., processor and port both named \"DataInput\") → Auto-resolved with type-specific keys\n- Ambiguous cases → Suggests using UUIDs or \"name:type\" format\n\n**Example:**\n```python\nconnections = [\n    {\n        \"source_name\": \"HandleHttpRequest\",  # Use component name\n        \"target_name\": \"LogRawInput\", \n        \"relationships\": [\"success\"]\n    },\n    {\n        \"source_name\": \"123e4567-e89b-12d3-a456-426614174000\",  # Use UUID directly\n        \"target_name\": \"ExecuteScript\",\n        \"relationships\": [\"success\"]\n    },\n    {\n        \"source_name\": \"DataInput:processor\",  # Disambiguate by type if needed\n        \"target_name\": \"456e7890-e89b-12d3-a456-426614174001\",  # Mix names and UUIDs\n        \"relationships\": [\"success\"]\n    }\n]\n        result = create_nifi_connections(connections, process_group_id=\"root\")\n```\n\n\n\n**Returns:**\nList of connection creation results with smart resolution details.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "connections": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "type": "array",
+        "description": "List of connection definitions using component names OR UUIDs. Each dictionary must contain:\n- source_name (str): Name OR UUID of the source component (UUIDs take precedence)\n- target_name (str): Name OR UUID of the target component (UUIDs take precedence)\n- relationships (list): List of relationship names to connect\n- process_group_id (str, optional): Process group to search in (defaults to parameter)"
+      },
+      "process_group_id": {
+        "description": "Default process group to search for components (optional)"
+      }
+    },
+    "required": [
+      "connections"
+    ]
+  }
+}

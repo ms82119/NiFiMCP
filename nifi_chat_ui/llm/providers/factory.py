@@ -132,10 +132,11 @@ class LLMProviderFactory:
                 logger.debug(f"Found API key for {provider_name} in flat config")
                 return True
             
-            # Special case for Gemini which uses GOOGLE_API_KEY
+            # Special case for Gemini which uses GOOGLE_API_KEY (flat) or gemini['api_key'] (nested)
             if provider_name.lower() == "gemini":
-                if "GOOGLE_API_KEY" in config and config["GOOGLE_API_KEY"]:
-                    logger.debug(f"Found GOOGLE_API_KEY for gemini in flat config")
+                if ("GOOGLE_API_KEY" in config and config["GOOGLE_API_KEY"]) or (
+                    "gemini" in config and isinstance(config["gemini"], dict) and config["gemini"].get("api_key")):
+                    logger.debug(f"Found GOOGLE_API_KEY or gemini['api_key'] for gemini in config")
                     return True
             
             logger.warning(f"Missing required API key for {provider_name}")

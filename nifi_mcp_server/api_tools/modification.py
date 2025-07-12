@@ -1,5 +1,6 @@
 import asyncio
-from typing import List, Dict, Optional, Any, Union, Literal
+from typing import List, Dict, Optional, Any, Union, Literal, Tuple
+from typing_extensions import TypedDict
 
 # Import necessary components from parent/utils
 from loguru import logger
@@ -1386,12 +1387,17 @@ async def update_nifi_connection(
         return {"status": "error", "message": f"An unexpected error occurred during connection update: {e}", "entity": None}
 
 
+class DeleteRequest(TypedDict):
+    object_type: Literal["processor", "connection", "port", "process_group", "controller_service"]
+    object_id: str
+    name: Optional[str]  # Optional descriptive name
+
 @smart_parameter_validation
 @mcp.tool()
 @tool_phases(["Modify"])
 @handle_nifi_errors
 async def delete_nifi_objects(
-    objects: List[Dict[str, Any]]
+    objects: List[DeleteRequest]
 ) -> List[Dict]:
     """
     Deletes multiple NiFi objects (processors, connections, ports, process groups, or controller services) in batch.
@@ -1957,11 +1963,16 @@ async def _delete_single_nifi_object(
         return {"status": "error", "message": f"An unexpected error occurred during deletion: {e}"}
 
 
+class ProcessorPropertyUpdate(TypedDict):
+    processor_id: str
+    properties: Dict[str, Any]  # Dictionary of properties to update
+    name: Optional[str]  # Optional descriptive name for logging
+
 @smart_parameter_validation
 @mcp.tool()
 @tool_phases(["Modify"])
 async def update_nifi_processors_properties(
-    updates: List[Dict[str, Any]]
+    updates: List[ProcessorPropertyUpdate]
 ) -> List[Dict]:
     """
     Updates one or more processors' properties efficiently.

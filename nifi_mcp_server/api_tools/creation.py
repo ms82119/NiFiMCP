@@ -1,5 +1,6 @@
 import asyncio
 from typing import List, Dict, Optional, Any, Union, Literal, Tuple
+from typing_extensions import TypedDict
 
 # Import necessary components from parent/utils
 from loguru import logger
@@ -610,10 +611,70 @@ async def _create_controller_service_single(
 
 # --- Plural batch tools ---
 
+class ProcessorDefinition(TypedDict):
+    processor_type: str  # Fully qualified Java class name
+    name: str  # Desired name for the processor instance
+    position_x: Optional[int]  # X coordinate (alternative to position)
+    position_y: Optional[int]  # Y coordinate (alternative to position)
+    position: Optional[Dict[str, int]]  # Nested position object {"x": 100, "y": 200}
+    process_group_id: Optional[str]  # UUID of target process group
+    properties: Optional[Dict[str, Any]]  # Configuration properties
+
+class PortDefinition(TypedDict):
+    port_type: Literal["input", "output"]
+    name: str  # Desired name for the port instance
+    position_x: Optional[int]  # X coordinate (alternative to position)
+    position_y: Optional[int]  # Y coordinate (alternative to position)
+    position: Optional[Dict[str, int]]  # Nested position object {"x": 100, "y": 200}
+    process_group_id: Optional[str]  # UUID of target process group
+
+class ControllerServiceDefinition(TypedDict):
+    service_type: str  # Fully qualified Java class name
+    name: str  # Desired name for the controller service
+    properties: Optional[Dict[str, Any]]  # Configuration properties
+
+class ConnectionDefinition(TypedDict):
+    source_name: str  # Name OR UUID of source component
+    target_name: str  # Name OR UUID of target component
+    relationships: List[str]  # List of relationship names
+    process_group_id: Optional[str]  # Process group to search in
+
+class NifiObjectDefinition(TypedDict):
+    type: Literal["controller_service", "processor", "connection"]
+    # For controller_service
+    service_type: Optional[str]  # Required only if type="controller_service"
+    name: str  # Required for all
+    properties: Optional[Dict[str, Any]]  # Optional for all
+    # For processor  
+    processor_type: Optional[str]  # Required only if type="processor"
+    position: Optional[Dict[str, int]]  # Optional for processor
+    position_x: Optional[int]  # Alternative to position
+    position_y: Optional[int]  # Alternative to position
+    process_group_id: Optional[str]  # Optional for all
+    # For connection
+    source_name: Optional[str]  # Required only if type="connection"
+    target_name: Optional[str]  # Required only if type="connection"  
+    relationships: Optional[List[str]]  # Required only if type="connection"
+
+# Legacy TypedDict for backward compatibility (commented out)
+# class NifiObjectDefinition(TypedDict):
+#     type: Literal["controller_service", "processor", "connection"]
+#     # For controller_service
+#     service_type: Optional[str]  # Fully qualified Java class name
+#     name: str  # Desired name
+#     properties: Optional[Dict[str, Any]]  # Configuration properties
+#     # For processor
+#     processor_type: Optional[str]  # Fully qualified Java class name
+#     position: Optional[Dict[str, int]]  # Position object {"x": 100, "y": 200}
+#     # For connection
+#     source: Optional[str]  # Source component name
+#     target: Optional[str]  # Target component name
+#     relationships: Optional[List[str]]  # List of relationship names
+
 @mcp.tool()
 @tool_phases(["Modify"])
 async def create_nifi_processors(
-    processors: List[Dict[str, Any]]
+    processors: List[ProcessorDefinition]
 ) -> List[Dict]:
     """
     Creates one or more NiFi processors in batch.
@@ -696,7 +757,7 @@ async def _create_nifi_connections_legacy(
 @mcp.tool()
 @tool_phases(["Modify"])
 async def create_nifi_ports(
-    ports: List[Dict[str, Any]]
+    ports: List[PortDefinition]
 ) -> List[Dict]:
     """
     Creates one or more NiFi ports in batch.
@@ -738,7 +799,7 @@ async def create_nifi_ports(
 @mcp.tool()
 @tool_phases(["Modify"])
 async def create_controller_services(
-    controller_services: List[Dict[str, Any]],
+    controller_services: List[ControllerServiceDefinition],
     process_group_id: str
 ) -> List[Dict]:
     """
@@ -1115,10 +1176,10 @@ async def create_nifi_flow(
 @mcp.tool()
 @tool_phases(["Build"])
 async def create_complete_nifi_flow(
-    nifi_objects: List[Dict[str, Any]],
+    nifi_objects: List[NifiObjectDefinition],
     process_group_id: str | None = None,
     create_process_group: Optional[Dict[str, Any]] = None,
-    connections: Optional[List[Dict[str, Any]]] = None
+    connections: Optional[List[ConnectionDefinition]] = None
 ) -> Dict[str, Any]:
     """
     Creates a complete NiFi flow with controller services, processors, and connections.
@@ -3587,7 +3648,7 @@ async def _validate_processor_properties_upfront(processor_type: str, properties
 @mcp.tool()
 @tool_phases(["Create"])
 async def create_nifi_connections(
-    connections: List[Dict[str, Any]],
+    connections: List[ConnectionDefinition],
     process_group_id: Optional[str] = None
 ) -> List[Dict]:
     """

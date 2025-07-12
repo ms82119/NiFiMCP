@@ -95,8 +95,32 @@ async def lifespan(app: FastAPI):
     
     # Configure LLM clients for workflow execution
     try:
-        from nifi_chat_ui.chat_manager import configure_llms
-        configure_llms()
+        from nifi_chat_ui.llm.chat_manager import ChatManager
+        # Initialize ChatManager with config (import config as needed)
+        from config import settings as config
+        config_dict = {
+            'openai': {
+                'api_key': config.OPENAI_API_KEY,
+                'models': config.OPENAI_MODELS
+            },
+            'gemini': {
+                'api_key': config.GOOGLE_API_KEY,
+                'models': config.GEMINI_MODELS
+            },
+            'anthropic': {
+                'api_key': config.ANTHROPIC_API_KEY,
+                'models': config.ANTHROPIC_MODELS
+            },
+            'perplexity': {
+                'api_key': config.PERPLEXITY_API_KEY,
+                'models': config.PERPLEXITY_MODELS
+            },
+            # Add flat keys for Gemini for compatibility
+            'GOOGLE_API_KEY': config.GOOGLE_API_KEY,
+            'GEMINI_MODELS': config.GEMINI_MODELS,
+            'GEMINI_DEFAULT_MODEL': getattr(config, 'GEMINI_DEFAULT_MODEL', 'gemini-1.5-pro'),
+        }
+        _chat_manager = ChatManager(config_dict)
         logger.info("LLM clients configured for workflow execution")
     except Exception as e:
         logger.error(f"Failed to configure LLM clients: {e}", exc_info=True)

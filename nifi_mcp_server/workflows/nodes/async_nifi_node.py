@@ -30,7 +30,7 @@ from ..core.event_system import (
     emit_message_added,
     EventTypes
 )
-from nifi_chat_ui.chat_manager import get_llm_response, get_formatted_tool_definitions
+from nifi_chat_ui.llm.chat_manager import ChatManager
 from nifi_chat_ui.mcp_handler import get_available_tools, execute_mcp_tool
 
 
@@ -91,7 +91,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             
             # Define the sync function to call in executor
             def call_sync_llm():
-                return get_llm_response(
+                return ChatManager.get_llm_response(
                     messages=non_system_messages,
                     system_prompt=system_prompt,
                     tools=tools,
@@ -275,7 +275,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             
             # Get formatted tools for LLM
             provider = execution_state.get("provider", "openai")
-            formatted_tools = get_formatted_tool_definitions(
+            formatted_tools = ChatManager.get_formatted_tool_definitions(
                 provider=provider,
                 raw_tools=tools,
                 user_request_id=execution_state.get("user_request_id")

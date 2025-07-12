@@ -1,5 +1,6 @@
 import asyncio
-from typing import List, Dict, Optional, Any, Union, Literal
+from typing import List, Dict, Optional, Any, Union, Literal, Tuple
+from typing_extensions import TypedDict
 import httpx
 import json
 
@@ -435,11 +436,17 @@ async def _operate_single_nifi_object(
         }
 
 
+class OperationRequest(TypedDict):
+    object_type: Literal["processor", "port", "process_group", "controller_service"]
+    object_id: str
+    operation_type: Literal["start", "stop", "enable", "disable"]
+    name: Optional[str]  # Optional descriptive name
+
 @smart_parameter_validation
 @mcp.tool()
 @tool_phases(["Operate"])
 async def operate_nifi_objects(
-    operations: List[Dict[str, Any]]
+    operations: List[OperationRequest]
 ) -> List[Dict]:
     """
     Performs start, stop, enable, or disable operations on multiple NiFi objects in batch.

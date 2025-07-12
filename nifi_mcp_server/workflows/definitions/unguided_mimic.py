@@ -12,9 +12,18 @@ from loguru import logger
 
 from ..nodes.nifi_node import NiFiWorkflowNode
 from ..registry import WorkflowDefinition, register_workflow
-from nifi_chat_ui.chat_manager import get_llm_response, get_formatted_tool_definitions
 from nifi_chat_ui.mcp_handler import get_available_tools, execute_mcp_tool
 from config.logging_setup import request_context
+
+# Function to get chat manager instance
+def get_chat_manager():
+    """Get the global chat manager instance from the server."""
+    try:
+        from nifi_mcp_server.server import _chat_manager
+        return _chat_manager
+    except ImportError:
+        logger.error("Chat manager not available")
+        return None
 
 
 class InitializeExecutionNode(NiFiWorkflowNode):
@@ -134,11 +143,14 @@ class InitializeExecutionNode(NiFiWorkflowNode):
             
             # Get formatted tools for LLM using the actual provider from execution state
             provider = execution_state.get("provider", "openai")  # Use actual provider
-            formatted_tools = get_formatted_tool_definitions(
-                provider=provider,
-                raw_tools=tools,
-                user_request_id=execution_state.get("user_request_id")
-            )
+            chat_manager = get_chat_manager()
+            if chat_manager:
+                formatted_tools = chat_manager.get_tools(
+                    provider=provider,
+                    user_request_id=execution_state.get("user_request_id")
+                )
+            else:
+                formatted_tools = []
             
             # Handle case where formatting returns None (e.g., Anthropic not available)
             if formatted_tools is None:
@@ -164,15 +176,19 @@ class InitializeExecutionNode(NiFiWorkflowNode):
             # Extract non-system messages for the LLM call
             non_system_messages = [msg for msg in messages if msg.get("role") != "system"]
             
-            response_data = get_llm_response(
-                messages=non_system_messages,
-                system_prompt=system_prompt,
-                tools=tools,
-                provider=provider,
-                model_name=model_name,
-                user_request_id=user_request_id,
-                action_id=action_id  # Pass workflow context action ID
-            )
+            chat_manager = get_chat_manager()
+            if chat_manager:
+                response_data = chat_manager.get_llm_response(
+                    messages=non_system_messages,
+                    system_prompt=system_prompt,
+                    provider=provider,
+                    model_name=model_name,
+                    user_request_id=user_request_id,
+                    action_id=action_id,  # Pass workflow context action ID
+                    selected_nifi_server_id=execution_state.get("nifi_server_id")
+                )
+            else:
+                response_data = {"error": "Chat manager not available"}
             
             return response_data
             
@@ -566,11 +582,14 @@ class LLMIterationNode(NiFiWorkflowNode):
                 self.bound_logger.warning("No raw tools available")
                 return []
                 
-            formatted_tools = get_formatted_tool_definitions(
-                provider=provider,
-                raw_tools=raw_tools_list,
-                user_request_id=user_request_id
-            )
+            chat_manager = get_chat_manager()
+            if chat_manager:
+                formatted_tools = chat_manager.get_tools(
+                    provider=provider,
+                    user_request_id=user_request_id
+                )
+            else:
+                formatted_tools = []
             
             # Handle case where formatting returns None
             if formatted_tools is None:
@@ -597,15 +616,19 @@ class LLMIterationNode(NiFiWorkflowNode):
             
             self.bound_logger.info(f"Calling LLM ({provider} - {model_name}) with action ID: {action_id}")
             
-            response_data = get_llm_response(
-                messages=messages,
-                system_prompt=system_prompt,
-                tools=tools,
-                provider=provider,
-                model_name=model_name,
-                user_request_id=user_req_id,
-                action_id=action_id  # Pass workflow context action ID
-            )
+            chat_manager = get_chat_manager()
+            if chat_manager:
+                response_data = chat_manager.get_llm_response(
+                    messages=messages,
+                    system_prompt=system_prompt,
+                    provider=provider,
+                    model_name=model_name,
+                    user_request_id=user_req_id,
+                    action_id=action_id,  # Pass workflow context action ID
+                    selected_nifi_server_id=execution_state.get("nifi_server_id")
+                )
+            else:
+                response_data = {"error": "Chat manager not available"}
             
             if response_data is None:
                 return {"error": "LLM response was empty"}
