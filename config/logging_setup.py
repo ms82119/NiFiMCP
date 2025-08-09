@@ -233,18 +233,24 @@ def setup_logging(context: str | None = None):
 
     # --- Interface Debug File Sinks (Conditional) ---
     if get_interface_debug_enabled():
-        # Common format for interface logs
+        # Common format for interface logs (LLM/MCP)
         interface_format = """
 {time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {extra[interface]}-{extra[direction]} | Req:{extra[user_request_id]} | Act:{extra[action_id]}
 {extra[json_data]}
 --------
 """
+        
+        # Workflow-specific format (no direction field needed)
+        workflow_format = """
+{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {extra[interface]} | Req:{extra[user_request_id]} | Wf:{extra[workflow_id]} | Step:{extra[step_id]}
+{extra[json_data]}
+--------
+"""
+        
         # Configure LLM and MCP logs if enabled, regardless of context
         for interface_key, interface_name in [
             ('llm_debug_file', 'llm'),
             ('mcp_debug_file', 'mcp'),
-            ('workflow_debug_file', 'workflow'),
-            # ('nifi_debug_file', 'nifi') # Keep NiFi server-side only
         ]:
             debug_config = config.get(interface_key, {})
             if debug_config: # Check if config block exists
@@ -264,13 +270,35 @@ def setup_logging(context: str | None = None):
                     debug_path,
                     level=debug_level.upper(),
                     filter=sink_filter,
-                    format=interface_format,  # Use the simple format string that accesses json_data
+                    format=interface_format,  # Use the interface format with direction
                     mode="w", # Changed back to write/overwrite
                     encoding='utf8',
                     enqueue=use_enqueue, # Configurable for LLM logs to resolve pickle issues
                     backtrace=False,  # Disable backtrace for cleaner logs
                     diagnose=False # Disable traceback to avoid recursion issues
                 )
+        
+        # Configure workflow logs separately with workflow-specific format
+        workflow_config = config.get('workflow_debug_file', {})
+        if workflow_config: # Check if config block exists
+            workflow_level = workflow_config.get('level', 'DEBUG')
+            workflow_path_tmpl = workflow_config.get('path', "{log_directory}/workflow.log")
+            workflow_path = log_dir / Path(workflow_path_tmpl.format(log_directory=log_dir.name)).name
+
+            # Filter to only log messages from workflow interface
+            workflow_filter = lambda record: record["extra"].get("interface") == "workflow"
+
+            logger.add(
+                workflow_path,
+                level=workflow_level.upper(),
+                filter=workflow_filter,
+                format=workflow_format,  # Use the workflow format without direction
+                mode="w", # Changed back to write/overwrite
+                encoding='utf8',
+                enqueue=False, # Disabled to fix macOS semaphore issues
+                backtrace=False,  # Disable backtrace for cleaner logs
+                diagnose=False # Disable traceback to avoid recursion issues
+            )
 
         # Configure NiFi log ONLY in server context
         if context == 'server':
@@ -288,7 +316,7 @@ def setup_logging(context: str | None = None):
                     debug_path,
                     level=debug_level.upper(),
                     filter=sink_filter,
-                    format=interface_format,  # Use the simple format string that accesses json_data
+                    format=interface_format,  # Use the interface format with direction
                     mode="w", # Changed back to write/overwrite
                     encoding='utf8',
                     enqueue=False, # Disabled to fix macOS semaphore issues

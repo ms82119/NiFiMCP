@@ -8,18 +8,23 @@ and support for both sync and async workflows.
 import sys
 import os
 import asyncio
-import importlib.util
-from typing import Dict, Any, Optional, List, Callable, Union
+from typing import Dict, Any, Optional, List, Callable, Union, TYPE_CHECKING
 
-# Import PocketFlow async classes
-pocketflow_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'docs', 'pocketflow examples')
-sys.path.append(pocketflow_path)
-
-# Import AsyncFlow from the pocketflow examples __init__.py
-spec = importlib.util.spec_from_file_location("pocketflow_init", os.path.join(pocketflow_path, "__init__.py"))
-pocketflow_init = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(pocketflow_init)
-AsyncFlow = pocketflow_init.AsyncFlow
+# Import PocketFlow async classes from the installed package
+try:
+    from pocketflow import AsyncFlow
+except ImportError:
+    # Fallback for development - try to import from local examples
+    pocketflow_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'docs', 'libdocs', 'pocketflow examples')
+    if os.path.exists(pocketflow_path):
+        sys.path.append(pocketflow_path)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pocketflow_init", os.path.join(pocketflow_path, "__init__.py"))
+        pocketflow_init = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pocketflow_init)
+        AsyncFlow = pocketflow_init.AsyncFlow
+    else:
+        raise ImportError("PocketFlow package not found and local examples not available")
 
 from loguru import logger
 from config.logging_setup import request_context
@@ -27,13 +32,19 @@ from ..core.event_system import get_event_emitter, emit_workflow_start, EventTyp
 from ..nodes.base_node import WorkflowNode
 from ..nodes.async_nifi_node import AsyncNiFiWorkflowNode
 
+# Type checking imports
+if TYPE_CHECKING:
+    from pocketflow import AsyncFlow as AsyncFlowType
+else:
+    AsyncFlowType = Any
+
 
 class AsyncWorkflowExecutor:
     """
     Async executor for both sync and async workflows with real-time events.
     """
     
-    def __init__(self, workflow_name: str, workflow: Union[List[WorkflowNode], AsyncFlow]):
+    def __init__(self, workflow_name: str, workflow: Union[List[WorkflowNode], AsyncFlowType]):
         """
         Initialize the async workflow executor.
         
@@ -45,7 +56,7 @@ class AsyncWorkflowExecutor:
         self.workflow = workflow
         self.event_emitter = get_event_emitter()
         self.is_async_workflow = isinstance(workflow, AsyncFlow)
-        
+    
     @property
     def bound_logger(self):
         """Get a logger bound with current context."""
@@ -87,9 +98,11 @@ class AsyncWorkflowExecutor:
             
             if self.is_async_workflow:
                 # Execute async workflow
+                self.bound_logger.info(f"Executing async workflow: {self.workflow_name}")
                 result = await self._execute_async_workflow(shared_state)
             else:
                 # Execute sync workflow in thread pool
+                self.bound_logger.info(f"Executing sync workflow in thread pool: {self.workflow_name}")
                 result = await self._execute_sync_workflow_async(shared_state)
             
             # Emit workflow completion event
@@ -139,7 +152,10 @@ class AsyncWorkflowExecutor:
         # Import sync executor
         from .executor import GuidedWorkflowExecutor
         
-        # Create sync executor
+        # Create sync executor - workflow should be a list of nodes for sync workflows
+        if not isinstance(self.workflow, list):
+            raise ValueError(f"Sync workflow {self.workflow_name} must be a list of nodes, got {type(self.workflow)}")
+        
         sync_executor = GuidedWorkflowExecutor(self.workflow_name, self.workflow)
         
         # Run in thread pool to avoid blocking

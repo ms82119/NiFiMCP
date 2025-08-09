@@ -8,6 +8,7 @@ for real-time workflow progress updates to the UI.
 import time
 import uuid
 import asyncio
+import threading
 from typing import Dict, Any, List, Callable, Optional
 from dataclasses import dataclass
 from loguru import logger
@@ -31,7 +32,7 @@ class EventEmitter:
     def __init__(self):
         self.events: List[WorkflowEvent] = []
         self.callbacks: List[Callable[[WorkflowEvent], None]] = []
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()  # Use threading.Lock for thread safety
     
     async def emit(self, event_type: str, data: Dict[str, Any], 
                    workflow_id: str, step_id: str, user_request_id: Optional[str] = None):
@@ -46,7 +47,7 @@ class EventEmitter:
             user_request_id=user_request_id
         )
         
-        async with self._lock:
+        with self._lock:  # Use threading.Lock for thread safety
             self.events.append(event)
         
         # Call registered callbacks
@@ -60,11 +61,28 @@ class EventEmitter:
                 logger.error(f"Event callback error: {e}", exc_info=True)
         
         # Log the event
+        try:
+            # Serialize event data for logging
+            import json
+            if data:
+                # Debug: Check if data contains problematic fields
+                if 'direction' in data:
+                    logger.warning(f"Event data contains 'direction' field: {data}")
+                json_data = json.dumps(data, indent=2, default=str)
+            else:
+                json_data = "{}"
+        except Exception as e:
+            logger.error(f"Event data serialization failed for event_type={event_type}, data keys={list(data.keys()) if data else 'None'}: {e}")
+            json_data = f'{{"error": "Failed to serialize data: {e}", "event_type": "{event_type}", "data_keys": {list(data.keys()) if data else []}}}'
+        
         logger.bind(
             user_request_id=user_request_id,
             workflow_id=workflow_id,
-            step_id=step_id
-        ).info(f"Workflow event emitted: {event_type}", event_data=data)
+            step_id=step_id,
+            interface="workflow",  # Add interface field for workflow logging
+            direction="event",     # Ensure 'direction' exists for log formatter
+            json_data=json_data  # Add serialized data for workflow format
+        ).info(f"Workflow event emitted: {event_type}")
     
     def on(self, callback: Callable[[WorkflowEvent], None]):
         """Register an event callback."""
@@ -77,18 +95,18 @@ class EventEmitter:
     
     async def get_events_since(self, timestamp: float) -> List[WorkflowEvent]:
         """Get events since a specific timestamp."""
-        async with self._lock:
+        with self._lock:  # Use threading.Lock for thread safety
             return [event for event in self.events if event.timestamp > timestamp]
     
     async def get_events_for_workflow(self, workflow_id: str) -> List[WorkflowEvent]:
         """Get all events for a specific workflow."""
-        async with self._lock:
+        with self._lock:  # Use threading.Lock for thread safety
             return [event for event in self.events if event.workflow_id == workflow_id]
     
     async def clear_old_events(self, max_age_seconds: int = 3600):
         """Clear events older than max_age_seconds."""
         cutoff_time = time.time() - max_age_seconds
-        async with self._lock:
+        with self._lock:  # Use threading.Lock for thread safety
             self.events = [event for event in self.events if event.timestamp > cutoff_time]
 
 

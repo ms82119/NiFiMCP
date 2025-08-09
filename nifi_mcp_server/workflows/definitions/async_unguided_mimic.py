@@ -9,28 +9,34 @@ import json
 import uuid
 import sys
 import os
-import json
-import uuid
-import importlib.util
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 
-# Import PocketFlow async classes
-"""
-Update: The pocketflow examples directory has moved to docs/libdocs/pocketflow examples
-"""
-pocketflow_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'docs', 'libdocs', 'pocketflow examples')
-sys.path.append(pocketflow_path)
-
-# Import AsyncFlow from the pocketflow examples __init__.py
-spec = importlib.util.spec_from_file_location("pocketflow_init", os.path.join(pocketflow_path, "__init__.py"))
-pocketflow_init = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(pocketflow_init)
-AsyncFlow = pocketflow_init.AsyncFlow
+# Import PocketFlow async classes from the installed package
+try:
+    from pocketflow import AsyncFlow
+except ImportError:
+    # Fallback for development - try to import from local examples
+    pocketflow_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'docs', 'libdocs', 'pocketflow examples')
+    if os.path.exists(pocketflow_path):
+        sys.path.append(pocketflow_path)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pocketflow_init", os.path.join(pocketflow_path, "__init__.py"))
+        pocketflow_init = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pocketflow_init)
+        AsyncFlow = pocketflow_init.AsyncFlow
+    else:
+        raise ImportError("PocketFlow package not found and local examples not available")
 
 from loguru import logger
 from ..nodes.async_nifi_node import AsyncNiFiWorkflowNode
 from ..registry import WorkflowDefinition, register_workflow
 from ..core.event_system import emit_workflow_start, EventTypes
+
+# Type checking imports
+if TYPE_CHECKING:
+    from pocketflow import AsyncFlow as AsyncFlowType
+else:
+    AsyncFlowType = Any
 
 
 class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
@@ -121,7 +127,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             return {
                 "status": "success",
                 "execution_state": final_results["execution_state"],
-                "final_messages": final_results["messages"],
+                "final_messages": final_results["final_messages"],  # Use final_messages key
                 "total_tokens_in": final_results["total_tokens_in"],
                 "total_tokens_out": final_results["total_tokens_out"],
                 "loop_count": final_results["loop_count"],
@@ -157,6 +163,13 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
         
         self.bound_logger.info("Starting async LLM execution loop")
         
+        # Emit workflow start event
+        await self.event_emitter.emit(EventTypes.WORKFLOW_START, {
+            "workflow_id": execution_state.get("workflow_id", "async_unguided_mimic"),
+            "step_id": "async_initialize_execution",
+            "status": "started"
+        }, execution_state.get("workflow_id", "async_unguided_mimic"), "async_initialize_execution", execution_state.get("user_request_id"))
+        
         # Prepare tools once
         formatted_tools = self.prepare_tools(execution_state)
         
@@ -189,7 +202,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 llm_action_id
             )
             
-            if "error" in response_data:
+            if response_data.get("error"):  # Changed from "error" in response_data to response_data.get("error")
                 self.bound_logger.error(f"Async LLM call failed: {response_data['error']}")
                 break
             
@@ -223,8 +236,8 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             if tool_calls:
                 self.bound_logger.info(f"Processing {len(tool_calls)} tool calls asynchronously")
                 
-                # Execute tool calls asynchronously with events
-                tool_results = await self.execute_tool_calls_async(tool_calls, execution_state)
+                # Execute tool calls asynchronously with events, passing LLM action_id for correlation
+                tool_results = await self.execute_tool_calls_async(tool_calls, execution_state, llm_action_id)
                 
                 # Check if all tool calls failed
                 failed_tools = 0
@@ -259,7 +272,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             if llm_content and any(phrase in llm_content.lower() for phrase in [
                 "task completed", "task complete", "completed successfully", 
                 "finished", "done", "no further", "objective achieved"
-            ]):
+            ]) or (llm_content and "TASK COMPLETE" in llm_content):
                 task_complete = True
                 self.bound_logger.info("LLM indicated task completion")
             else:
@@ -282,7 +295,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
         
         return {
             "execution_state": execution_state,
-            "messages": execution_state["messages"],
+            "final_messages": execution_state["messages"],  # Return as final_messages for UI compatibility
             "total_tokens_in": execution_state["request_tokens_in"],
             "total_tokens_out": execution_state["request_tokens_out"],
             "loop_count": execution_state["loop_count"],
@@ -304,7 +317,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
         return "default"  # Workflow complete
 
 
-def create_async_unguided_mimic_workflow() -> AsyncFlow:
+def create_async_unguided_mimic_workflow() -> Any:
     """Create the async unguided mimic workflow."""
     # Single node workflow
     initialize_node = AsyncInitializeExecutionNode()
@@ -318,7 +331,7 @@ async_unguided_mimic_definition = WorkflowDefinition(
     name="async_unguided_mimic",
     description="Async version of unguided LLM workflow with real-time progress updates",
     create_workflow_func=create_async_unguided_mimic_workflow,
-    display_name="Unguided Mimic (Real-time)",
+    display_name="Basic",
     category="Basic",
     phases=["Review", "Creation", "Modification", "Operation"],
     is_async=True  # Mark as async workflow

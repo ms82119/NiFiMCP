@@ -177,10 +177,10 @@ class InitializeExecutionNode(NiFiWorkflowNode):
                 self.bound_logger.warning("No NiFi server ID provided, skipping tools")
                 return []
             
-            # Get available tools from the handler
+            # Get available tools from the handler with correct signature
             tools = get_available_tools(
-                phase="All",  # Use "All" for unguided mode
-                selected_nifi_server_id=nifi_server_id
+                selected_nifi_server_id=nifi_server_id,
+                phase="All"  # Use "All" for unguided mode
             )
             
             # Return raw tools - ChatManager will handle formatting
@@ -216,13 +216,14 @@ class InitializeExecutionNode(NiFiWorkflowNode):
                 model_name=model_name,
                 user_request_id=user_request_id,
                 action_id=action_id,
+                selected_nifi_server_id=execution_state.get("nifi_server_id"),
                 tools=tools
             )
             
             return response_data
             
         except Exception as e:
-            self.bound_logger.error(f"LLM call failed: {e}")
+            self.bound_logger.error(f"LLM call failed: {e}", exc_info=True)
             return {"error": str(e)}
     
     def _process_tool_calls(self, tool_calls: List[Dict[str, Any]], 
@@ -333,7 +334,8 @@ class InitializeExecutionNode(NiFiWorkflowNode):
             response_data = self._call_llm(llm_context_messages, formatted_tools, execution_state, llm_action_id)
             self.bound_logger.info(f"LLM response received: {list(response_data.keys()) if response_data else 'None'}")
             
-            if "error" in response_data:
+            # Check for error in response
+            if response_data.get("error"):
                 self.bound_logger.error(f"LLM call failed: {response_data['error']}")
                 break
             
@@ -519,7 +521,7 @@ class LLMIterationNode(NiFiWorkflowNode):
             # Call LLM
             response_data = self._call_llm(llm_context_messages, formatted_tools, execution_state, llm_action_id)
             
-            if "error" in response_data:
+            if response_data.get("error"):  # Changed from "error" in response_data to response_data.get("error")
                 return {
                     "status": "error",
                     "execution_state": execution_state,
@@ -849,8 +851,8 @@ unguided_mimic_workflow = WorkflowDefinition(
     display_name="Unguided Mimic",
     category="Basic",
     phases=["Review", "Creation", "Modification", "Operation"],
-    enabled=True
+    enabled=False
 )
 
-# Auto-register the workflow when this module is imported
-register_workflow(unguided_mimic_workflow) 
+# Auto-register the workflow when this module is imported (disabled by default)
+register_workflow(unguided_mimic_workflow)

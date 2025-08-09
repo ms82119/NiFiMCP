@@ -89,7 +89,7 @@ class MCPClient:
             self.logger.error(f"Error getting tools from MCP server: {e}")
             return []
     
-    def execute_tool(self, tool_name: str, arguments: Dict[str, Any], user_request_id: Optional[str] = None) -> Any:
+    def execute_tool(self, tool_name: str, arguments: Dict[str, Any], user_request_id: Optional[str] = None, action_id: Optional[str] = None) -> Any:
         """
         Execute an MCP tool.
         
@@ -97,6 +97,7 @@ class MCPClient:
             tool_name: Name of the tool to execute
             arguments: Tool arguments
             user_request_id: Optional user request ID for logging
+            action_id: Optional action ID for logging
             
         Returns:
             Tool execution result
@@ -106,7 +107,7 @@ class MCPClient:
             return {"error": "MCP handler not available"}
         
         try:
-            result = execute_mcp_tool(tool_name, arguments, user_request_id=user_request_id)
+            result = execute_mcp_tool(tool_name, arguments, user_request_id=user_request_id, action_id=action_id)
             self.logger.info(f"Executed tool '{tool_name}' successfully")
             return result
         except Exception as e:

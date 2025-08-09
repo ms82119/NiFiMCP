@@ -1306,8 +1306,8 @@ async def create_nifi_flow(
             if item.get("type") == "connection": # Check top-level type
                 conn_def = item # Use the item directly
                 # Extract details using names
-                source_name = conn_def.get("source") # Expecting name
-                target_name = conn_def.get("dest") or conn_def.get("destination") # Allow variations
+                source_name = conn_def.get("source") or conn_def.get("source_name") # Support both formats
+                target_name = conn_def.get("target") or conn_def.get("target_name") or conn_def.get("dest") or conn_def.get("destination") # Allow variations
                 relationships = conn_def.get("relationships")
 
                 if not all([source_name, target_name, relationships]):
@@ -1954,14 +1954,14 @@ async def create_complete_nifi_flow(
         local_logger.info(f"Creating {len(all_connections)} connections...")
         
         for conn_def in all_connections:
-            source_name = conn_def.get("source")
-            target_name = conn_def.get("target") or conn_def.get("dest") or conn_def.get("destination")
+            source_name = conn_def.get("source") or conn_def.get("source_name")
+            target_name = conn_def.get("target") or conn_def.get("target_name") or conn_def.get("dest") or conn_def.get("destination")
             relationships = conn_def.get("relationships")
             
             if not all([source_name, target_name, relationships]):
                 error_result = {
                     "status": "error",
-                    "message": "Connection missing required fields (source, target, relationships)",
+                    "message": "Connection missing required fields (source/source_name, target/target_name, relationships)",
                     "definition": conn_def,
                     "object_type": "connection"
                 }
@@ -3194,7 +3194,7 @@ async def _analyze_and_auto_terminate_relationships(
         # Build a map of processor name -> relationships that will be used
         used_relationships = {}
         for conn_def in planned_connections:
-            source_name = conn_def.get("source")
+            source_name = conn_def.get("source") or conn_def.get("source_name")
             relationships = conn_def.get("relationships", [])
             
             if source_name and relationships:

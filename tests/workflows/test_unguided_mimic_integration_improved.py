@@ -74,8 +74,8 @@ class TestRealIntegrationWithMockedHTTP:
         """Set up test fixtures."""
         self.node = InitializeExecutionNode()
         
-    @patch('requests.post')  # Mock HTTP, not functions
-    @patch('requests.get')   # Mock HTTP, not functions
+    @patch('nifi_chat_ui.mcp_handler.requests.post')  # Mock the actual HTTP calls in mcp_handler
+    @patch('nifi_chat_ui.mcp_handler.requests.get')   # Mock the actual HTTP calls in mcp_handler
     def test_real_openai_integration(self, mock_get, mock_post):
         """Test with real LLM function but mocked HTTP calls."""
         # Mock HTTP responses for tools API
@@ -130,15 +130,27 @@ class TestRealIntegrationWithMockedHTTP:
         assert mock_get.called  # Tools API called
         assert mock_post.called  # OpenAI API called
         
+        # Verify that both MCP and OpenAI calls were made
+        assert mock_get.called  # Tools API called
+        assert mock_post.called  # Both MCP and OpenAI APIs called
+        
+        # Find the OpenAI call (to api.openai.com)
+        openai_calls = [call for call in mock_post.call_args_list if 'api.openai.com' in str(call)]
+        assert len(openai_calls) > 0, "No OpenAI API calls found"
+        
         # Verify OpenAI call structure
-        openai_call = mock_post.call_args
-        call_data = json.loads(openai_call[1]['data'])  # Get POST data
+        openai_call = openai_calls[0]
+        if 'json' in openai_call[1]:
+            call_data = openai_call[1]['json']
+        else:
+            call_data = json.loads(openai_call[1].get('data', '{}'))
+        
         assert 'messages' in call_data
         assert 'model' in call_data
         assert call_data['model'] == 'gpt-4o-mini'
     
-    @patch('requests.post')
-    @patch('requests.get') 
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get') 
     def test_anthropic_unavailable_fallback(self, mock_get, mock_post):
         """Test behavior when Anthropic is not available."""
         # Mock tools API
@@ -163,8 +175,8 @@ class TestRealIntegrationWithMockedHTTP:
         if result["status"] == "error":
             assert "anthropic" in result.get("message", "").lower()
     
-    @patch('requests.post')
-    @patch('requests.get')
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get')
     def test_tool_execution_with_real_calls(self, mock_get, mock_post):
         """Test tool execution using real execute_mcp_tool function."""
         # Mock tools API
@@ -248,8 +260,8 @@ class TestErrorConditionsWithRealFunctions:
         """Set up test fixtures."""
         self.node = InitializeExecutionNode()
     
-    @patch('requests.post')
-    @patch('requests.get')
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get')
     def test_network_error_handling(self, mock_get, mock_post):
         """Test handling of network errors."""
         # Simulate network error
@@ -270,8 +282,8 @@ class TestErrorConditionsWithRealFunctions:
         assert result["status"] == "success"  # Should continue with empty tools
         assert result["loop_count"] >= 1
     
-    @patch('requests.post')
-    @patch('requests.get')
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get')
     def test_invalid_openai_api_key(self, mock_get, mock_post):
         """Test handling of invalid API key."""
         # Mock tools API success
@@ -357,8 +369,8 @@ class TestWorkflowEndToEndImproved:
         self.nodes = create_unguided_mimic_workflow()
         self.executor = GuidedWorkflowExecutor(self.workflow_name, self.nodes)
     
-    @patch('requests.post')
-    @patch('requests.get')
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get')
     def test_complete_workflow_execution_realistic(self, mock_get, mock_post):
         """Test complete workflow with realistic HTTP mocking."""
         # Mock tools API

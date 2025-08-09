@@ -9,21 +9,23 @@ import sys
 import os
 import uuid
 import asyncio
-import importlib.util
 from typing import Dict, Any, List, Optional
 
-# Import PocketFlow async classes
-"""
-Update: The pocketflow examples directory has moved to docs/libdocs/pocketflow examples
-"""
-pocketflow_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'docs', 'libdocs', 'pocketflow examples')
-sys.path.append(pocketflow_path)
-
-# Import AsyncNode from the pocketflow examples __init__.py
-spec = importlib.util.spec_from_file_location("pocketflow_init", os.path.join(pocketflow_path, "__init__.py"))
-pocketflow_init = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(pocketflow_init)
-AsyncNode = pocketflow_init.AsyncNode
+# Import PocketFlow async classes from the installed package
+try:
+    from pocketflow import AsyncNode
+except ImportError:
+    # Fallback for development - try to import from local examples
+    pocketflow_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'docs', 'libdocs', 'pocketflow examples')
+    if os.path.exists(pocketflow_path):
+        sys.path.append(pocketflow_path)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pocketflow_init", os.path.join(pocketflow_path, "__init__.py"))
+        pocketflow_init = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pocketflow_init)
+        AsyncNode = pocketflow_init.AsyncNode
+    else:
+        raise ImportError("PocketFlow package not found and local examples not available")
 
 from loguru import logger
 from ..core.event_system import (
@@ -167,7 +169,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 response_data = {"error": f"Invalid response type: {type(response_data)}"}
             
             # Check for error response
-            if "error" in response_data:
+            if response_data.get("error"):  # Changed from "error" in response_data to response_data.get("error")
                 # Emit LLM error event
                 await self.event_emitter.emit(EventTypes.LLM_ERROR, {
                     "action_id": action_id,
@@ -203,7 +205,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             return {"error": str(e)}
     
     async def execute_tool_calls_async(self, tool_calls: List[Dict[str, Any]], 
-                                     execution_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+                                     execution_state: Dict[str, Any], 
+                                     llm_action_id: str = None) -> List[Dict[str, Any]]:
         """Execute tool calls asynchronously with event emission."""
         workflow_id = execution_state.get("workflow_id", "unknown")
         step_id = execution_state.get("step_id", self.name)
@@ -228,13 +231,17 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 except json.JSONDecodeError:
                     args_dict = {}
                 
-                # Emit tool start event
+                # Generate tool-specific action ID
+                tool_action_id = f"wf-{workflow_id}-{step_id}-tool-{uuid.uuid4()}"
+                
+                # Emit tool start event with LLM action_id for correlation
                 await emit_tool_start(workflow_id, step_id, {
                     "tool_name": function_name,
                     "tool_call_id": tool_call_id,
                     "tool_index": i + 1,
                     "total_tools": len(tool_calls),
-                    "arguments": args_dict
+                    "arguments": args_dict,
+                    "llm_action_id": llm_action_id  # Add LLM action_id for correlation
                 }, user_request_id)
                 
                 # Define the sync function to call in executor
@@ -243,7 +250,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                         tool_name=function_name,
                         params=args_dict,
                         selected_nifi_server_id=nifi_server_id,
-                        user_request_id=user_request_id
+                        user_request_id=user_request_id,
+                        action_id=tool_action_id  # Add the missing action_id parameter
                     )
                 
                 # Execute tool in thread pool to avoid blocking
@@ -259,23 +267,25 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 }
                 tool_results.append(result_message)
                 
-                # Emit tool complete event
+                # Emit tool complete event with LLM action_id for correlation
                 await emit_tool_complete(workflow_id, step_id, {
                     "tool_name": function_name,
                     "tool_call_id": tool_call_id,
                     "tool_index": i + 1,
                     "total_tools": len(tool_calls),
                     "result_length": len(str(tool_result)),
-                    "status": "success"
+                    "status": "success",
+                    "llm_action_id": llm_action_id  # Add LLM action_id for correlation
                 }, user_request_id)
                 
             except Exception as e:
-                # Emit tool error event
+                # Emit tool error event with LLM action_id for correlation
                 await self.event_emitter.emit(EventTypes.TOOL_ERROR, {
                     "tool_name": function_name,
                     "tool_call_id": tool_call_id,
                     "error": str(e),
-                    "status": "error"
+                    "status": "error",
+                    "llm_action_id": llm_action_id  # Add LLM action_id for correlation
                 }, workflow_id, step_id, user_request_id)
                 
                 self.bound_logger.error(f"Tool execution failed: {function_name} - {e}")
