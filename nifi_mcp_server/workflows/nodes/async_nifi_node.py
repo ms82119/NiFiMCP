@@ -101,7 +101,7 @@ class GoldenContextManager:
             if parent_dir not in sys.path:
                 sys.path.insert(0, parent_dir)
             
-            from nifi_chat_ui.app import smart_prune_messages
+            from nifi_chat_ui.utils.message_utils import smart_prune_messages
             
             purged_messages = smart_prune_messages(
                 golden_messages,
