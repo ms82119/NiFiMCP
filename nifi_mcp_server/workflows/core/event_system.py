@@ -143,6 +143,11 @@ class EventTypes:
     
     MESSAGE_ADDED = "message_added"
     PROGRESS_UPDATE = "progress_update"
+    
+    # Status report events
+    STATUS_REPORT_START = "status_report_start"
+    STATUS_REPORT_COMPLETE = "status_report_complete"
+    STATUS_REPORT_ERROR = "status_report_error"
 
 
 # Convenience functions for common event types

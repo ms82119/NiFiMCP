@@ -56,6 +56,48 @@ class AsyncWorkflowExecutor:
         self.workflow = workflow
         self.event_emitter = get_event_emitter()
         self.is_async_workflow = isinstance(workflow, AsyncFlow)
+        self._config_dict = None
+    
+    def set_config(self, config_dict: Dict[str, Any]):
+        """Set config dictionary from main thread to avoid background thread imports."""
+        self._config_dict = config_dict
+        self.bound_logger.info("Config set in async executor")
+        
+        # Debug: Log workflow structure
+        self.bound_logger.info(f"Workflow type: {type(self.workflow)}, is_async: {self.is_async_workflow}")
+        if hasattr(self.workflow, 'start_node'):
+            self.bound_logger.info(f"Workflow has start_node: {type(self.workflow.start_node)}")
+        if hasattr(self.workflow, 'nodes'):
+            self.bound_logger.info(f"Workflow has nodes: {len(self.workflow.nodes)}")
+        if hasattr(self.workflow, '_nodes'):
+            self.bound_logger.info(f"Workflow has _nodes: {len(self.workflow._nodes)}")
+        
+        # Pass config to workflow nodes if they support it
+        if self.is_async_workflow:
+            # For async workflows, try different ways to access nodes
+            if hasattr(self.workflow, 'nodes'):
+                # Direct nodes access
+                for node in self.workflow.nodes:
+                    if hasattr(node, 'set_config'):
+                        node.set_config(config_dict)
+                        self.bound_logger.info(f"Passed config to workflow node: {node.name}")
+            elif hasattr(self.workflow, 'start_node') and hasattr(self.workflow.start_node, 'set_config'):
+                # Single node workflow (like async_unguided_mimic)
+                self.workflow.start_node.set_config(config_dict)
+                self.bound_logger.info(f"Passed config to workflow start node: {self.workflow.start_node.name}")
+            elif hasattr(self.workflow, '_nodes'):
+                # Alternative nodes access
+                for node in self.workflow._nodes:
+                    if hasattr(node, 'set_config'):
+                        node.set_config(config_dict)
+                        self.bound_logger.info(f"Passed config to workflow node: {node.name}")
+            else:
+                self.bound_logger.warning(f"Could not find nodes in async workflow {self.workflow_name} to pass config to")
+        elif not self.is_async_workflow and isinstance(self.workflow, list):
+            for node in self.workflow:
+                if hasattr(node, 'set_config'):
+                    node.set_config(config_dict)
+                    self.bound_logger.info(f"Passed config to workflow node: {node.name}")
     
     @property
     def bound_logger(self):
@@ -95,6 +137,17 @@ class AsyncWorkflowExecutor:
             # Set up shared state
             shared_state = initial_context.copy() if initial_context else {}
             shared_state["workflow_name"] = self.workflow_name
+            
+            # Pass config through shared state as backup
+            if self._config_dict:
+                shared_state["_config_dict"] = self._config_dict
+                self.bound_logger.info("Added config to shared state as backup")
+            
+            # Set execution state in workflow nodes for config access
+            if self.is_async_workflow:
+                if hasattr(self.workflow, 'start_node') and hasattr(self.workflow.start_node, 'set_execution_state'):
+                    self.workflow.start_node.set_execution_state(shared_state)
+                    self.bound_logger.info("Set execution state in workflow start node")
             
             if self.is_async_workflow:
                 # Execute async workflow

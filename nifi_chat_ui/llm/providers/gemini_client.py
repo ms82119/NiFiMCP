@@ -441,15 +441,27 @@ class GeminiClient(LLMProvider):
                 )
             
             else:
-                error_msg = f"UNKNOWN: Gemini returned empty response for unknown reasons. Finish reasons: {finish_reasons}"
-                bound_logger.error(error_msg)
-                return LLMResponse(
-                    content=None,
-                    tool_calls=None,
-                    token_count_in=token_count_in,
-                    token_count_out=0,
-                    error=f"Empty response from Gemini: {error_msg}"
-                )
+                # Check if this is a context-related empty response
+                if token_count_in > 8000:  # High token count suggests context overflow
+                    error_msg = f"CONTEXT_OVERFLOW: Gemini returned empty response likely due to excessive context ({token_count_in} tokens). Finish reasons: {finish_reasons}"
+                    bound_logger.error(error_msg)
+                    return LLMResponse(
+                        content=None,
+                        tool_calls=None,
+                        token_count_in=token_count_in,
+                        token_count_out=0,
+                        error=f"Empty response from Gemini: {error_msg}"
+                    )
+                else:
+                    error_msg = f"UNKNOWN: Gemini returned empty response for unknown reasons. Finish reasons: {finish_reasons}"
+                    bound_logger.error(error_msg)
+                    return LLMResponse(
+                        content=None,
+                        tool_calls=None,
+                        token_count_in=token_count_in,
+                        token_count_out=0,
+                        error=f"Empty response from Gemini: {error_msg}"
+                    )
     
     def _analyze_tool_schemas_for_issues(self, tools, bound_logger):
         """

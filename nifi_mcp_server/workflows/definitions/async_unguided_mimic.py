@@ -31,6 +31,7 @@ from loguru import logger
 from ..nodes.async_nifi_node import AsyncNiFiWorkflowNode
 from ..registry import WorkflowDefinition, register_workflow
 from ..core.event_system import emit_workflow_start, EventTypes
+from nifi_chat_ui.mcp_handler import get_available_tools
 
 # Type checking imports
 if TYPE_CHECKING:
@@ -54,18 +55,39 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
         self.successors = {}
         
     async def prep_async(self, shared: Dict[str, Any]) -> Dict[str, Any]:
-        """Prepare execution context."""
+        """Prepare execution context with clean golden context only."""
+        # Get golden context messages optimized for LLM consumption
+        golden_messages = await self.get_golden_context_for_llm({
+            "provider": shared.get("provider"),
+            "model_name": shared.get("model_name"),
+            "nifi_server_id": shared.get("selected_nifi_server_id"),
+            "max_tokens_limit": shared.get("max_tokens_limit", 8000)
+        }, max_tokens=shared.get("max_tokens_limit", 8000))
+        
+        # Get current user prompt (only new input)
+        user_prompt = shared.get("user_prompt", "")
+        
+        # Combine golden context with user prompt
+        if user_prompt:
+            context_messages = golden_messages + [{"role": "user", "content": user_prompt}]
+            self.bound_logger.info(f"Combined golden context ({len(golden_messages)} messages) with user prompt")
+        else:
+            context_messages = golden_messages
+            self.bound_logger.info(f"Using golden context only ({len(golden_messages)} messages)")
+        
         # Extract required context from shared state
         return {
             "provider": shared.get("provider"),
             "model_name": shared.get("model_name"),
             "system_prompt": shared.get("system_prompt"),
             "user_request_id": shared.get("user_request_id"),
-            "messages": shared.get("messages", []),
+            "messages": context_messages,  # Use clean LLM context only
             "selected_nifi_server_id": shared.get("selected_nifi_server_id"),
             "max_loop_iterations": shared.get("max_loop_iterations", 10),
             "workflow_id": "async_unguided_mimic",
-            "step_id": "async_initialize_execution"
+            "step_id": "async_initialize_execution",
+            "max_tokens_limit": shared.get("max_tokens_limit", 8000),
+            "auto_prune_history": shared.get("auto_prune_history", True)  # Pass through auto-prune setting
         }
         
     async def exec_async(self, prep_res: Dict[str, Any]) -> Dict[str, Any]:
@@ -103,7 +125,9 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 "request_tokens_out": 0,
                 "execution_complete": False,
                 "workflow_id": "async_unguided_mimic",
-                "step_id": "async_initialize_execution"
+                "step_id": "async_initialize_execution",
+                "auto_prune_history": prep_res.get("auto_prune_history", True),  # Add auto-prune setting
+                "max_tokens_limit": prep_res.get("max_tokens_limit", 8000)  # Add max tokens limit setting
             }
             
             # Emit workflow start event
@@ -202,8 +226,11 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 llm_action_id
             )
             
-            if response_data.get("error"):  # Changed from "error" in response_data to response_data.get("error")
-                self.bound_logger.error(f"Async LLM call failed: {response_data['error']}")
+            # Check if we got a valid response
+            if response_data.get("error"):
+                error_msg = response_data["error"]
+                self.bound_logger.error(f"Async LLM call failed: {error_msg}")
+                execution_state["error_occurred"] = True
                 break
             
             # Update token counts
@@ -229,12 +256,16 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 "action_id": llm_action_id  # Use the workflow context action ID
             })
             
-            # Add assistant message to context with event
-            await self.add_message_to_context_async(assistant_message, execution_state)
+            # Add assistant message to context with automatic golden context management
+            await self.add_workflow_message(assistant_message, execution_state)
             
             # Process tool calls if present
             if tool_calls:
                 self.bound_logger.info(f"Processing {len(tool_calls)} tool calls asynchronously")
+                
+                # Log tool call details for debugging
+                tool_names = [tc.get("function", {}).get("name", "unknown") for tc in tool_calls]
+                self.bound_logger.info(f"Tool calls: {tool_names}")
                 
                 # Execute tool calls asynchronously with events, passing LLM action_id for correlation
                 tool_results = await self.execute_tool_calls_async(tool_calls, execution_state, llm_action_id)
@@ -248,7 +279,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                         "error" in tool_result.get("name", "").lower() or
                         tool_result.get("content") == "Error"):
                         failed_tools += 1
-                    await self.add_message_to_context_async(tool_result, execution_state)
+                    await self.add_workflow_message(tool_result, execution_state)
                 
                 # Track consecutive failures to prevent infinite loops
                 if failed_tools == len(tool_calls):
@@ -257,6 +288,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                     
                     if consecutive_failures >= max_consecutive_failures:
                         self.bound_logger.error(f"Too many consecutive tool failures ({consecutive_failures}). Stopping execution.")
+                        execution_state["error_occurred"] = True  # Mark that an error occurred
                         task_complete = True
                         break
                 else:
@@ -280,6 +312,15 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 task_complete = True
                 self.bound_logger.info("No tool calls requested, assuming task complete")
         
+        # Check if status report is needed (only if workflow completed normally, not due to errors)
+        if not execution_state.get("error_occurred", False):
+            needs_status_report = await self._check_status_report_needed(
+                execution_state, task_complete, max_iterations_reached, llm_content or ""
+            )
+            
+            if needs_status_report:
+                await self._request_status_report(execution_state)
+        
         # Emit workflow completion event
         await self.event_emitter.emit(EventTypes.WORKFLOW_COMPLETE, {
             "loop_count": execution_state["loop_count"],
@@ -290,7 +331,8 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             "task_complete": task_complete,
             "max_iterations_reached": max_iterations_reached,
             "consecutive_failures": consecutive_failures,
-            "stopped_due_to_failures": consecutive_failures >= max_consecutive_failures
+            "stopped_due_to_failures": consecutive_failures >= max_consecutive_failures,
+            "error_occurred": execution_state.get("error_occurred", False)
         }, execution_state["workflow_id"], execution_state["step_id"], execution_state["user_request_id"])
         
         return {
@@ -308,13 +350,157 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
         }
     
     async def post_async(self, shared, prep_res, exec_res):
-        """Post-process execution results."""
+        """Post-process execution results and update golden context using centralized manager."""
         # Update shared state with final results
         shared["workflow_execution_complete"] = True
         shared["final_execution_state"] = exec_res.get("execution_state", {})
         shared["final_messages"] = exec_res.get("final_messages", [])
         
+        # Update golden context with final messages using centralized manager
+        golden_context = self.golden_context_manager.get_golden_context()
+        golden_context["messages"] = exec_res.get("final_messages", [])
+        golden_context["current_phase"] = "completed"
+        self.golden_context_manager.update_golden_context(golden_context)
+        
+        self.bound_logger.info("Updated golden context with final workflow messages using centralized manager")
+        
         return "default"  # Workflow complete
+    
+    async def _check_status_report_needed(self, execution_state: Dict[str, Any], task_complete: bool, max_iterations_reached: bool, last_llm_content: str) -> bool:
+        """Check if a status report is needed based on completion conditions."""
+        # Status report is needed if:
+        # 1. Max iterations reached AND no comprehensive summary provided, OR
+        # 2. Task completed but no substantial content with TASK COMPLETE
+        
+        if max_iterations_reached:
+            # Check if LLM provided comprehensive summary
+            if last_llm_content and "TASK COMPLETE" in last_llm_content:
+                parts = last_llm_content.split("TASK COMPLETE")
+                if len(parts) > 1 and len(parts[0].strip()) > 200:
+                    self.bound_logger.info("LLM already provided comprehensive summary - skipping status report")
+                    return False
+                else:
+                    self.bound_logger.info("Max iterations reached but LLM summary insufficient - requesting status report")
+                    return True
+            else:
+                self.bound_logger.info("Max iterations reached without TASK COMPLETE - requesting status report")
+                return True
+        
+        # If task completed normally, check if we need a status report
+        if task_complete and last_llm_content:
+            if "TASK COMPLETE" in last_llm_content:
+                parts = last_llm_content.split("TASK COMPLETE")
+                if len(parts) > 1 and len(parts[0].strip()) > 200:
+                    self.bound_logger.info("Task completed with comprehensive summary - skipping status report")
+                    return False
+        
+        return False
+    
+    async def _request_status_report(self, execution_state: Dict[str, Any]):
+        """Request a status report from the LLM using centralized golden context."""
+        try:
+            self.bound_logger.info("Requesting status report from LLM")
+            
+            # Emit status report start event
+            await self.event_emitter.emit(EventTypes.STATUS_REPORT_START, {
+                "workflow_id": execution_state.get("workflow_id", "async_unguided_mimic"),
+                "step_id": execution_state.get("step_id", "async_initialize_execution"),
+                "iterations": execution_state.get("loop_count", 0),
+                "tools_executed": execution_state.get("executed_tools", []),
+                "max_iterations_reached": execution_state.get("max_iterations_reached", False)
+            }, execution_state.get("workflow_id", "async_unguided_mimic"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
+            
+            # Get conversation history optimized for LLM consumption
+            conversation_history = await self.get_golden_context_for_llm(execution_state)
+            
+            # If golden context is empty, fall back to execution state messages
+            if not conversation_history:
+                self.bound_logger.warning("Golden context is empty, using execution state messages")
+                conversation_history = execution_state.get("messages", [])
+            
+            # Filter out messages without content
+            valid_messages = []
+            for msg in conversation_history:
+                if msg.get("role") in ["user", "assistant"] and msg.get("content"):
+                    valid_messages.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
+            
+            # Ensure we have at least some context
+            if not valid_messages:
+                self.bound_logger.warning("No valid messages found, creating minimal context")
+                valid_messages = [
+                    {"role": "user", "content": "I need to provide a status report about my progress."}
+                ]
+            
+            # Create status report prompt
+            status_prompt = f"""
+I've reached the maximum action limit ({execution_state.get('loop_count', 0)} actions) for this request. 
+Please provide a brief status report:
+
+1. What have I accomplished so far?
+2. What challenges or difficulties did I encounter?
+3. What would be my next planned actions if I could continue?
+4. Any important notes or recommendations for the user?
+
+Keep this concise but informative.
+"""
+            
+            # Prepare messages for status report
+            status_messages = valid_messages + [
+                {"role": "user", "content": status_prompt}
+            ]
+            
+            # Call LLM for status report (no tools needed)
+            chat_manager = self.get_chat_manager()
+            
+            # Use the original system prompt for context
+            original_system_prompt = execution_state.get("system_prompt", "")
+            
+            status_response = chat_manager.get_llm_response(
+                messages=status_messages,
+                system_prompt=original_system_prompt,  # Use original system prompt for context
+                provider=execution_state.get("provider"),
+                model_name=execution_state.get("model_name"),
+                user_request_id=execution_state.get("user_request_id"),
+                tools=None  # No tools for status report
+            )
+            
+            if status_response and status_response.get("content"):
+                # Create status report message
+                status_message = {
+                    "role": "assistant",
+                    "content": f"### 📋 Status Report\n\n{status_response['content']}",
+                    "is_status_report": True,
+                    "token_count_in": status_response.get("token_count_in", 0),
+                    "token_count_out": status_response.get("token_count_out", 0),
+                    "action_id": str(uuid.uuid4()),
+                    "workflow_id": execution_state.get("workflow_id", "async_unguided_mimic"),
+                    "step_id": execution_state.get("step_id", "async_initialize_execution")
+                }
+                
+                # Add status report to workflow with automatic golden context management
+                await self.add_workflow_message(status_message, execution_state)
+                
+                # Emit status report complete event
+                await self.event_emitter.emit(EventTypes.STATUS_REPORT_COMPLETE, {
+                    "status_content": status_response["content"],
+                    "token_count_in": status_response.get("token_count_in", 0),
+                    "token_count_out": status_response.get("token_count_out", 0)
+                }, execution_state.get("workflow_id", "async_unguided_mimic"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
+                
+                self.bound_logger.info("Status report generated and added to workflow")
+                
+            else:
+                self.bound_logger.warning("Status report request failed - no content received")
+                
+        except Exception as e:
+            self.bound_logger.error(f"Failed to generate status report: {e}", exc_info=True)
+            # Emit status report error event
+            await self.event_emitter.emit(EventTypes.STATUS_REPORT_ERROR, {
+                "error": str(e)
+            }, execution_state.get("workflow_id", "async_unguided_mimic"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
 
 
 def create_async_unguided_mimic_workflow() -> Any:

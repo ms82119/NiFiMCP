@@ -40,6 +40,89 @@ from nifi_chat_ui.llm.mcp.client import MCPClient
 from nifi_chat_ui.mcp_handler import get_available_tools, execute_mcp_tool
 
 
+class GoldenContextManager:
+    """Centralized manager for golden context operations."""
+    
+    def __init__(self, logger):
+        self.logger = logger
+    
+    def get_golden_context(self) -> Dict[str, Any]:
+        """Get golden context from session state with defaults."""
+        # Use in-memory storage instead of direct Streamlit access
+        if not hasattr(self, '_golden_context'):
+            self._golden_context = {
+                "messages": [],
+                "objective": "",
+                "current_phase": "",
+                "metadata": {}
+            }
+        return self._golden_context
+    
+    def update_golden_context(self, golden_context: Dict[str, Any]):
+        """Update golden context in memory."""
+        self._golden_context = golden_context
+        self.logger.debug(f"Updated golden context in memory: {len(golden_context.get('messages', []))} messages")
+    
+    def add_message_to_golden_context(self, message: Dict[str, Any]):
+        """Add a single message to golden context and persist to session state."""
+        golden_context = self.get_golden_context()
+        if "messages" not in golden_context:
+            golden_context["messages"] = []
+        
+        golden_context["messages"].append(message)
+        self.update_golden_context(golden_context)
+        self.logger.debug(f"Added message to golden context: {message.get('role', 'unknown')} - {len(message.get('content', ''))} chars")
+    
+    def get_golden_messages(self) -> List[Dict[str, Any]]:
+        """Get messages from golden context."""
+        golden_context = self.get_golden_context()
+        return golden_context.get("messages", [])
+    
+
+    
+    def apply_smart_purging(self, golden_messages: List[Dict[str, Any]], 
+                          max_tokens: int, provider: str, model_name: str, 
+                          tools: List[Dict[str, Any]], auto_prune_history: bool = True) -> List[Dict[str, Any]]:
+        """Apply smart purging to golden messages only if auto_prune_history is enabled."""
+        if not golden_messages:
+            return []
+        
+        # Check if auto-prune history is enabled
+        if not auto_prune_history:
+            self.logger.debug("Auto-prune history disabled, returning all messages without purging")
+            return golden_messages
+        
+        try:
+            # Import smart purging function
+            import sys
+            import os
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            
+            from nifi_chat_ui.app import smart_prune_messages
+            
+            purged_messages = smart_prune_messages(
+                golden_messages,
+                max_tokens=max_tokens,
+                provider=provider,
+                model_name=model_name,
+                tools=tools,
+                logger=self.logger
+            )
+            
+            self.logger.info(f"Applied smart purging to golden context: {len(golden_messages)} -> {len(purged_messages)} messages")
+            return purged_messages
+            
+        except ImportError as e:
+            self.logger.warning(f"Could not import smart_prune_messages: {e}")
+            return golden_messages
+        except Exception as e:
+            self.logger.error(f"Error applying smart purging: {e}")
+            return golden_messages
+
+
 class AsyncNiFiWorkflowNode(AsyncNode):
     """
     Base class for async NiFi workflow nodes with event emission.
@@ -58,44 +141,71 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         # Initialize ChatManager for new modular architecture
         self._chat_manager = None
         self._mcp_client = None
+        
+        # Initialize golden context manager
+        self.golden_context_manager = GoldenContextManager(self.bound_logger)
     
     def get_chat_manager(self) -> ChatManager:
         """Get or create the ChatManager instance."""
         if self._chat_manager is None:
-            # Import config
-            import sys
-            import os
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))  # Go up to NiFiMCP root
-            if parent_dir not in sys.path:
-                sys.path.insert(0, parent_dir)
-            
-            from config import settings as config
-            
-            # Use the existing config system
-            config_dict = {
-                'openai': {
-                    'api_key': config.OPENAI_API_KEY,
-                    'models': config.OPENAI_MODELS
-                },
-                'gemini': {
-                    'api_key': config.GOOGLE_API_KEY,
-                    'models': config.GEMINI_MODELS
-                },
-                'anthropic': {
-                    'api_key': config.ANTHROPIC_API_KEY,
-                    'models': config.ANTHROPIC_MODELS
-                },
-                'perplexity': {
-                    'api_key': config.PERPLEXITY_API_KEY,
-                    'models': config.PERPLEXITY_MODELS
-                }
-            }
+            # Try to get config from execution state first (passed from main thread)
+            if hasattr(self, '_config_dict') and self._config_dict:
+                config_dict = self._config_dict
+                self.bound_logger.info("Using config passed from main thread")
+            elif hasattr(self, 'execution_state') and self.execution_state and self.execution_state.get('_config_dict'):
+                config_dict = self.execution_state['_config_dict']
+                self.bound_logger.info("Using config from shared state")
+            else:
+                # Fallback: Import config in background thread (may cause warnings)
+                try:
+                    import sys
+                    import os
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))  # Go up to NiFiMCP root
+                    if parent_dir not in sys.path:
+                        sys.path.insert(0, parent_dir)
+                    
+                    from config import settings as config
+                    
+                    # Use the existing config system
+                    config_dict = {
+                        'openai': {
+                            'api_key': config.OPENAI_API_KEY,
+                            'models': config.OPENAI_MODELS
+                        },
+                        'gemini': {
+                            'api_key': config.GOOGLE_API_KEY,
+                            'models': config.GEMINI_MODELS
+                        },
+                        'anthropic': {
+                            'api_key': config.ANTHROPIC_API_KEY,
+                            'models': config.ANTHROPIC_MODELS
+                        },
+                        'perplexity': {
+                            'api_key': config.PERPLEXITY_API_KEY,
+                            'models': config.PERPLEXITY_MODELS
+                        }
+                    }
+                    self.bound_logger.info("Initialized config in background thread")
+                except Exception as e:
+                    self.bound_logger.error(f"Failed to import config in background thread: {e}")
+                    # Use empty config as fallback
+                    config_dict = {}
             
             self._chat_manager = ChatManager(config_dict)
             self.bound_logger.info("Initialized new modular ChatManager for workflow")
         
         return self._chat_manager
+    
+    def set_config(self, config_dict: Dict[str, Any]):
+        """Set config dictionary from main thread to avoid background thread imports."""
+        self._config_dict = config_dict
+        self.bound_logger.info("Config set from main thread")
+    
+    def set_execution_state(self, execution_state: Dict[str, Any]):
+        """Set execution state to access config from shared state."""
+        self.execution_state = execution_state
+        self.bound_logger.info("Execution state set in workflow node")
     
     def get_mcp_client(self) -> MCPClient:
         """Get or create the MCPClient instance."""
@@ -303,17 +413,87 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     async def add_message_to_context_async(self, message: Dict[str, Any], 
                                          execution_state: Dict[str, Any]):
-        """Add a message to the execution context with event emission."""
+        """Add a message to the execution context with event emission and golden context update."""
         workflow_id = execution_state.get("workflow_id", "unknown")
         step_id = execution_state.get("step_id", self.name)
         user_request_id = execution_state.get("user_request_id")
         
-        # Add to messages
+        # Add to execution state messages
         if "messages" not in execution_state:
             execution_state["messages"] = []
         execution_state["messages"].append(message)
         
+        # Add to golden context (this now persists to session state)
+        self.golden_context_manager.add_message_to_golden_context(message)
+        
         # Emit message added event
+        await emit_message_added(workflow_id, step_id, {
+            "message_role": message.get("role"),
+            "message_type": "tool_calls" if "tool_calls" in message else "content",
+            "content_length": len(message.get("content", "")),
+            "tool_calls": len(message.get("tool_calls", [])),
+            "action_id": message.get("action_id")
+        }, user_request_id)
+    
+    async def get_golden_context_for_llm(self, execution_state: Dict[str, Any], 
+                                       max_tokens: int = None) -> List[Dict[str, Any]]:
+        """Get golden context messages optimized for LLM consumption with automatic smart purging."""
+        # Get all golden context messages
+        golden_messages = self.golden_context_manager.get_golden_messages()
+        
+        if not golden_messages:
+            return []
+        
+        # Check if auto-prune history is enabled
+        auto_prune_history = execution_state.get("auto_prune_history", True)
+        
+        # If auto-prune is disabled, return all messages without purging
+        if not auto_prune_history:
+            self.bound_logger.debug("Auto-prune history disabled, returning all golden context messages")
+            return golden_messages
+        
+        # If no max_tokens specified, use default from execution state
+        if max_tokens is None:
+            max_tokens = execution_state.get("max_tokens_limit", 8000)
+        
+        # Get tools for token calculation
+        tools = self.prepare_tools(execution_state)
+        
+        # Apply smart purging only if auto_prune_history is enabled
+        purged_messages = self.golden_context_manager.apply_smart_purging(
+            golden_messages,
+            max_tokens=max_tokens,
+            provider=execution_state.get("provider"),
+            model_name=execution_state.get("model_name"),
+            tools=tools,
+            auto_prune_history=auto_prune_history
+        )
+        
+        self.bound_logger.debug(f"Retrieved {len(purged_messages)} messages from golden context for LLM (auto_prune_history={auto_prune_history})")
+        return purged_messages
+    
+    async def add_workflow_message(self, message: Dict[str, Any], 
+                                 execution_state: Dict[str, Any],
+                                 persist_to_golden: bool = True):
+        """Add a message to the workflow with optional golden context persistence."""
+        # Always add to execution state
+        if "messages" not in execution_state:
+            execution_state["messages"] = []
+        execution_state["messages"].append(message)
+        
+        # Only add to golden context if it's a real LLM message (not workflow event)
+        # and persist_to_golden is True
+        if persist_to_golden and not message.get("workflow_event"):
+            self.golden_context_manager.add_message_to_golden_context(message)
+            self.bound_logger.debug(f"Added message to golden context: role={message.get('role')}, has_content={bool(message.get('content'))}")
+        elif message.get("workflow_event"):
+            self.bound_logger.debug(f"Skipped adding workflow event to golden context: {message.get('content', '')[:50]}...")
+        
+        # Emit message added event
+        workflow_id = execution_state.get("workflow_id", "unknown")
+        step_id = execution_state.get("step_id", self.name)
+        user_request_id = execution_state.get("user_request_id")
+        
         await emit_message_added(workflow_id, step_id, {
             "message_role": message.get("role"),
             "message_type": "tool_calls" if "tool_calls" in message else "content",
