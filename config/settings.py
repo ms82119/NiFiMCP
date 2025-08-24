@@ -43,12 +43,7 @@ DEFAULT_APP_CONFIG = {
         'default_action_limit': 10,
         'retry_attempts': 3,
         'enabled_workflows': [
-            'unguided_mimic',
-            'async_unguided_mimic',
-            'documentation',
-            'review_analysis',
-            'build_new',
-            'build_modify'
+            'unguided'
         ]
     }
 }

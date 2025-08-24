@@ -5,6 +5,5 @@ This module contains the specific workflow implementations for
 different types of NiFi operations and use cases.
 """
 
-from .unguided_mimic import create_unguided_mimic_workflow
-
-__all__ = ['create_unguided_mimic_workflow'] 
+# No workflow imports needed - workflows are auto-registered when imported
+__all__ = [] 

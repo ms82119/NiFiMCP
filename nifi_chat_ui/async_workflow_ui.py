@@ -261,7 +261,7 @@ def test_async_workflow_ui():
     if st.button("Test Async Unguided Mimic"):
         # Mock test execution
         run_async_workflow_with_ui(
-            workflow_name="async_unguided_mimic",
+            workflow_name="unguided",
             provider="openai", 
             model_name="gpt-4o-mini",
             base_sys_prompt="You are a helpful NiFi assistant.",

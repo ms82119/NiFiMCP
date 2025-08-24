@@ -28,7 +28,7 @@ class TestContractValidation:
     
     def test_get_llm_response_contract(self):
         """Test that workflow calls get_llm_response with correct signature."""
-        from nifi_chat_ui.chat_manager_compat import get_llm_response
+        from nifi_chat_ui.chat_manager import get_llm_response
         import inspect
         
         # Get actual function signature
@@ -317,7 +317,7 @@ class TestParameterValidationWithAutospec:
         """Set up test fixtures."""
         self.node = InitializeExecutionNode()
     
-    @patch('nifi_chat_ui.chat_manager_compat.get_llm_response', autospec=True)
+    @patch('nifi_chat_ui.chat_manager.get_llm_response', autospec=True)
     @patch('nifi_chat_ui.mcp_handler.get_available_tools', autospec=True) 
     def test_function_called_with_correct_parameters(self, mock_get_tools, mock_llm_response):
         """Test that functions are called with correct parameter names and types."""

@@ -9,7 +9,6 @@ from .registry import WorkflowRegistry, get_workflow_registry
 from .core.executor import GuidedWorkflowExecutor
 
 # Import workflow definitions to ensure they are registered
-from .definitions import unguided_mimic
-from .definitions import async_unguided_mimic
+from .definitions import unguided
 
 __all__ = ['WorkflowRegistry', 'GuidedWorkflowExecutor', 'get_workflow_registry'] 

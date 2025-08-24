@@ -84,7 +84,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             "messages": context_messages,  # Use clean LLM context only
             "selected_nifi_server_id": shared.get("selected_nifi_server_id"),
             "max_loop_iterations": shared.get("max_loop_iterations", 10),
-            "workflow_id": "async_unguided_mimic",
+            "workflow_id": "unguided",
             "step_id": "async_initialize_execution",
             "max_tokens_limit": shared.get("max_tokens_limit", 8000),
             "auto_prune_history": shared.get("auto_prune_history", True)  # Pass through auto-prune setting
@@ -124,7 +124,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 "request_tokens_in": 0,
                 "request_tokens_out": 0,
                 "execution_complete": False,
-                "workflow_id": "async_unguided_mimic",
+                "workflow_id": "unguided",
                 "step_id": "async_initialize_execution",
                 "auto_prune_history": prep_res.get("auto_prune_history", True),  # Add auto-prune setting
                 "max_tokens_limit": prep_res.get("max_tokens_limit", 8000)  # Add max tokens limit setting
@@ -167,7 +167,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             await self.event_emitter.emit(EventTypes.WORKFLOW_ERROR, {
                 "error": str(e),
                 "step": "async_initialize_execution"
-            }, "async_unguided_mimic", "async_initialize_execution", prep_res.get("user_request_id"))
+            }, "unguided", "async_initialize_execution", prep_res.get("user_request_id"))
             
             self.bound_logger.error(f"Error in async execution: {e}", exc_info=True)
             return {
@@ -189,10 +189,10 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
         
         # Emit workflow start event
         await self.event_emitter.emit(EventTypes.WORKFLOW_START, {
-            "workflow_id": execution_state.get("workflow_id", "async_unguided_mimic"),
+            "workflow_id": execution_state.get("workflow_id", "unguided"),
             "step_id": "async_initialize_execution",
             "status": "started"
-        }, execution_state.get("workflow_id", "async_unguided_mimic"), "async_initialize_execution", execution_state.get("user_request_id"))
+        }, execution_state.get("workflow_id", "unguided"), "async_initialize_execution", execution_state.get("user_request_id"))
         
         # Prepare tools once
         formatted_tools = self.prepare_tools(execution_state)
@@ -211,7 +211,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 break
             
             # Generate workflow context action ID
-            workflow_id = execution_state.get("workflow_id", "async_unguided_mimic")
+            workflow_id = execution_state.get("workflow_id", "unguided")
             step_id = f"async_initialize_execution_iter_{loop_count}"
             llm_action_id = f"wf-{workflow_id}-{step_id}-llm-{uuid.uuid4()}"
             
@@ -251,7 +251,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             assistant_message.update({
                 "token_count_in": response_data.get("token_count_in", 0),
                 "token_count_out": response_data.get("token_count_out", 0),
-                "workflow_id": execution_state.get("workflow_id", "async_unguided_mimic"),
+                "workflow_id": execution_state.get("workflow_id", "unguided"),
                 "step_id": step_id,
                 "action_id": llm_action_id  # Use the workflow context action ID
             })
@@ -403,12 +403,12 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             
             # Emit status report start event
             await self.event_emitter.emit(EventTypes.STATUS_REPORT_START, {
-                "workflow_id": execution_state.get("workflow_id", "async_unguided_mimic"),
+                "workflow_id": execution_state.get("workflow_id", "unguided"),
                 "step_id": execution_state.get("step_id", "async_initialize_execution"),
                 "iterations": execution_state.get("loop_count", 0),
                 "tools_executed": execution_state.get("executed_tools", []),
                 "max_iterations_reached": execution_state.get("max_iterations_reached", False)
-            }, execution_state.get("workflow_id", "async_unguided_mimic"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
+            }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
             
             # Get conversation history optimized for LLM consumption
             conversation_history = await self.get_golden_context_for_llm(execution_state)
@@ -476,7 +476,7 @@ Keep this concise but informative.
                     "token_count_in": status_response.get("token_count_in", 0),
                     "token_count_out": status_response.get("token_count_out", 0),
                     "action_id": str(uuid.uuid4()),
-                    "workflow_id": execution_state.get("workflow_id", "async_unguided_mimic"),
+                    "workflow_id": execution_state.get("workflow_id", "unguided"),
                     "step_id": execution_state.get("step_id", "async_initialize_execution")
                 }
                 
@@ -488,7 +488,7 @@ Keep this concise but informative.
                     "status_content": status_response["content"],
                     "token_count_in": status_response.get("token_count_in", 0),
                     "token_count_out": status_response.get("token_count_out", 0)
-                }, execution_state.get("workflow_id", "async_unguided_mimic"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
+                }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
                 
                 self.bound_logger.info("Status report generated and added to workflow")
                 
@@ -500,10 +500,10 @@ Keep this concise but informative.
             # Emit status report error event
             await self.event_emitter.emit(EventTypes.STATUS_REPORT_ERROR, {
                 "error": str(e)
-            }, execution_state.get("workflow_id", "async_unguided_mimic"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
+            }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
 
 
-def create_async_unguided_mimic_workflow() -> Any:
+def create_unguided_workflow() -> Any:
     """Create the async unguided mimic workflow."""
     # Single node workflow
     initialize_node = AsyncInitializeExecutionNode()
@@ -513,14 +513,13 @@ def create_async_unguided_mimic_workflow() -> Any:
 
 
 # Register the async workflow
-async_unguided_mimic_definition = WorkflowDefinition(
-    name="async_unguided_mimic",
-    description="Async version of unguided LLM workflow with real-time progress updates",
-    create_workflow_func=create_async_unguided_mimic_workflow,
-    display_name="Basic",
-    category="Basic",
-    phases=["Review", "Creation", "Modification", "Operation"],
-    is_async=True  # Mark as async workflow
+unguided_definition = WorkflowDefinition(
+    name="unguided",
+    description="Unguided workflow with minimal logic for unfiltered communication with LLM, Tools, and UI",
+    create_workflow_func=create_unguided_workflow,
+    display_name="Unguided",
+    category="Unguided",
+    enabled=True
 )
 
-register_workflow(async_unguided_mimic_definition) 
+register_workflow(unguided_definition) 

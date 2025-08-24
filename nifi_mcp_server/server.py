@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
     
     # Configure LLM clients for workflow execution
     try:
-        from nifi_chat_ui.chat_manager_compat import configure_llms
+        from nifi_chat_ui.chat_manager import configure_llms
         configure_llms()
         logger.info("LLM clients configured for workflow execution")
     except Exception as e:

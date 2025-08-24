@@ -1148,7 +1148,7 @@ if is_executing or pending_execution:
         bound_logger = logger.bind(user_request_id=user_req_id)
         bound_logger.info(f"Async workflow execution: selected_workflow='{selected_workflow}'")
         
-        if selected_workflow == "async_unguided_mimic":
+        if selected_workflow == "unguided":
             # Run async workflow with integrated real-time UI
             try:
                 run_async_workflow_integrated(selected_workflow, provider, model_name, base_system_prompt, user_req_id, user_input)
@@ -1159,10 +1159,10 @@ if is_executing or pending_execution:
             # No supported workflow selected
             bound_logger.warning(f"No supported workflow selected: '{selected_workflow}'")
             with st.chat_message("assistant"):
-                st.markdown("⚠️ **No supported workflow selected.** Only 'async_unguided_mimic' is currently supported.")
+                st.markdown("⚠️ **No supported workflow selected.** Only 'unguided' is currently supported.")
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": "⚠️ **No supported workflow selected.** Only 'async_unguided_mimic' is currently supported."
+                "content": "⚠️ **No supported workflow selected.** Only 'unguided' is currently supported."
             })
 
 else:

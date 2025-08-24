@@ -82,7 +82,7 @@ class AsyncWorkflowExecutor:
                         node.set_config(config_dict)
                         self.bound_logger.info(f"Passed config to workflow node: {node.name}")
             elif hasattr(self.workflow, 'start_node') and hasattr(self.workflow.start_node, 'set_config'):
-                # Single node workflow (like async_unguided_mimic)
+                # Single node workflow (like unguided)
                 self.workflow.start_node.set_config(config_dict)
                 self.bound_logger.info(f"Passed config to workflow start node: {self.workflow.start_node.name}")
             elif hasattr(self.workflow, '_nodes'):
