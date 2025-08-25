@@ -202,13 +202,14 @@ def render_main_interface():
     # Display chat history using our new component
     chat_display.display_chat_history()
     
-    # Check for new events and refresh UI (polling mechanism) ONLY while executing
+    # Check for new events and refresh UI (polling mechanism)
+    # Only trigger rerun during execution to avoid interfering with user input
     if st.session_state.get("has_new_events", False) and st.session_state.get("llm_executing", False):
         logger.info("Detected new events during execution, triggering UI refresh")
         st.session_state.has_new_events = False
         st.rerun()
     else:
-        # If not executing, just clear the flag without forcing a rerun
+        # Clear the flag without forcing a rerun to avoid interfering with user input
         if st.session_state.get("has_new_events", False):
             st.session_state.has_new_events = False
 
@@ -224,7 +225,18 @@ def render_user_input():
         st.session_state.llm_executing = False
         st.session_state.pending_execution = None
 
-# Custom input UI with stop button functionality
+    # Check if workflow has completed and we need to clear execution state
+    # This handles the case where workflow completes but UI hasn't been updated yet
+    current_async = st.session_state.get("current_async_execution", {})
+    if (st.session_state.get("llm_executing", False) and 
+        (current_async.get("completed", False) or 
+         (st.session_state.get("has_new_events", False) and not st.session_state.get("pending_execution")))):
+        # Workflow has completed, clear execution state
+        st.session_state.llm_executing = False
+        st.session_state.has_new_events = False
+        logger.info("Cleared execution state after workflow completion")
+
+    # Custom input UI with stop button functionality
     is_executing = st.session_state.get("llm_executing", False)
     pending_execution = st.session_state.get("pending_execution", None)
 
@@ -257,11 +269,13 @@ def render_user_input():
                 st.divider()
                 col1, col2 = st.columns([0.85, 0.15])
                 with col1:
-                    user_input = st.text_input(
+                    user_input = st.text_area(
                         "Message",
                         placeholder="What can I help you with?",
                         key=f"user_input_field_{st.session_state.input_counter}",
-                        label_visibility="collapsed"
+                        label_visibility="collapsed",
+                        height=100,
+                        max_chars=None
                     )
                 with col2:
                     send_button = st.button("▶️ Send", key="send_btn_after", help="Send message", use_container_width=True)
@@ -273,11 +287,13 @@ def render_user_input():
         # Show normal input when not executing and no pending execution
         col1, col2 = st.columns([0.85, 0.15])
         with col1:
-            user_input = st.text_input(
+            user_input = st.text_area(
                 "Message",
                 placeholder="What can I help you with?",
                 key=f"user_input_field_{st.session_state.input_counter}",
-                label_visibility="collapsed"
+                label_visibility="collapsed",
+                height=100,
+                max_chars=None
             )
         with col2:
             send_button = st.button("▶️ Send", key="send_btn", help="Send message", use_container_width=True)
@@ -339,8 +355,9 @@ def _display_session_statistics():
     
 def _process_user_input(user_input: str):
     """Process user input and set up execution."""
-    # Prevent a pending rerun from interrupting this send action
+    # Clear any pending workflow completion state to avoid conflicts
     st.session_state.has_new_events = False
+    
     if not provider:
         st.error("Please configure an API key and select a provider.")
         logger.warning("User submitted prompt but no provider was configured/selected.")
@@ -359,6 +376,8 @@ def _process_user_input(user_input: str):
     # Set up pending execution (will be processed on next run)
     st.session_state.pending_execution = (provider, model_name, base_system_prompt, user_request_id, user_input)
     st.session_state.stop_requested = False
+    # Clear any lingering execution state
+    st.session_state.llm_executing = False
 
     # Force a rerun to show the executing state
     st.rerun()
