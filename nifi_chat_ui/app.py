@@ -202,46 +202,80 @@ def render_main_interface():
     # Display chat history using our new component
     chat_display.display_chat_history()
     
+    # Debug: Log that polling is running
+    logger.debug("render_main_interface: polling for completion signals")
+    
     # Check for new events and refresh UI (polling mechanism)
-    # Only trigger rerun during execution to avoid interfering with user input
-    if st.session_state.get("has_new_events", False) and st.session_state.get("llm_executing", False):
-        logger.info("Detected new events during execution, triggering UI refresh")
+    has_new_events = st.session_state.get("has_new_events", False)
+    completion_time = st.session_state.get("workflow_completion_time", 0)
+    current_async = st.session_state.get("current_async_execution", {})
+    
+    # Check for file-based completion signals (workaround for thread isolation)
+    file_signal_detected = False
+    import os
+    import tempfile
+    import glob
+    
+    # Look for ANY completion signal files (don't depend on current_async state)
+    pattern = os.path.join(tempfile.gettempdir(), "nifi_workflow_complete_*.signal")
+    signal_files = glob.glob(pattern)
+    
+    if signal_files:
+        try:
+            # Read and cleanup signal file(s)
+            for signal_file in signal_files:
+                with open(signal_file, 'r') as f:
+                    file_completion_time = float(f.read().strip())
+                os.remove(signal_file)
+                file_signal_detected = True
+                logger.info(f"Detected workflow completion via file signal: {signal_file}")
+        except Exception as e:
+            logger.error(f"Error processing completion signal file: {e}")
+    
+    logger.debug(f"Polling: has_new_events={has_new_events}, completion_time={completion_time}, file_signal={file_signal_detected}, async.completed={current_async.get('completed', False)}")
+    
+    if has_new_events or file_signal_detected:
+        logger.info("Detected new events or completion signal; triggering UI refresh")
         st.session_state.has_new_events = False
+        # Clear completion time once processed
+        if completion_time:
+            st.session_state.workflow_completion_time = 0
         st.rerun()
-    else:
-        # Clear the flag without forcing a rerun to avoid interfering with user input
-        if st.session_state.get("has_new_events", False):
-            st.session_state.has_new_events = False
 
-    # Show execution status during workflow
+    # Show execution status during workflow and ensure periodic polling
     if st.session_state.get("llm_executing", False):
         st.info("🔄 Workflow is executing... Please wait for completion.")
+        
+        # Force periodic reruns during execution to ensure completion signal detection
+        import time
+        current_time = time.time()
+        last_poll_time = st.session_state.get("last_poll_time", 0)
+        
+        # Rerun every 2 seconds during execution to check for completion signals
+        if current_time - last_poll_time > 2.0:
+            st.session_state.last_poll_time = current_time
+            logger.debug("Forcing periodic rerun during execution for completion signal detection")
+            st.rerun()
 
 def render_user_input():
     """Render user input handling."""
-    # Defensive reset: if a previous async workflow completed, ensure input UI returns
-    current_async = st.session_state.get("current_async_execution", {})
-    if st.session_state.get("llm_executing") and current_async.get("completed"):
-        st.session_state.llm_executing = False
-        st.session_state.pending_execution = None
+    # No speculative completion handling; rely on executor's current_async_execution
 
-    # Check if workflow has completed and we need to clear execution state
-    # This handles the case where workflow completes but UI hasn't been updated yet
-    current_async = st.session_state.get("current_async_execution", {})
-    if (st.session_state.get("llm_executing", False) and 
-        (current_async.get("completed", False) or 
-         (st.session_state.get("has_new_events", False) and not st.session_state.get("pending_execution")))):
-        # Workflow has completed, clear execution state
-        st.session_state.llm_executing = False
-        st.session_state.has_new_events = False
-        logger.info("Cleared execution state after workflow completion")
-
-    # Custom input UI with stop button functionality
-    is_executing = st.session_state.get("llm_executing", False)
+    # --- Compute unified running state and process pending immediately ---
     pending_execution = st.session_state.get("pending_execution", None)
+    current_async = st.session_state.get("current_async_execution", {})
+    async_executing_flag = bool(current_async.get("executing", False))
+    logger.debug(
+        f"Render input (pre): pending={'yes' if pending_execution else 'no'}, "
+        f"async.executing={async_executing_flag}, async.completed={current_async.get('completed', False)}"
+    )
+
+    # Unified UI running flag: only pending or executor's executing
+    is_running_ui = bool(pending_execution or async_executing_flag)
+    logger.debug(f"UI running flag={is_running_ui}")
 
     # If we have pending execution or are executing, show the stop UI
-    if is_executing or pending_execution:
+    if is_running_ui:
         # Show status and stop button when executing or about to execute
         col1, col2 = st.columns([0.85, 0.15])
         with col1:
@@ -251,6 +285,7 @@ def render_user_input():
                 st.info(f"🤔 LLM is processing... (Max {st.session_state.get('max_loop_iterations', 10)} actions)")
         with col2:
             if st.button("🛑 Stop", key="stop_btn", help="Stop LLM execution", use_container_width=True):
+                logger.info("Stop clicked: clearing pending and llm_executing; rerunning UI")
                 st.session_state.stop_requested = True
                 # Clear pending execution if stopping before it starts
                 if pending_execution:
@@ -259,29 +294,10 @@ def render_user_input():
                 st.session_state.llm_executing = False
                 st.rerun()
                 
-        # Process pending execution after showing the UI
-        if pending_execution and not is_executing:
+        # Start pending execution after rendering stop UI (so the stop button is visible first)
+        if pending_execution and not async_executing_flag:
+            logger.debug("Starting pending execution after rendering stop UI")
             _process_pending_execution(pending_execution)
-            # After completion, refresh flags and render normal input inline (no rerun needed)
-            is_executing = st.session_state.get("llm_executing", False)
-            pending_execution = st.session_state.get("pending_execution", None)
-            if not is_executing and not pending_execution:
-                st.divider()
-                col1, col2 = st.columns([0.85, 0.15])
-                with col1:
-                    user_input = st.text_area(
-                        "Message",
-                        placeholder="What can I help you with?",
-                        key=f"user_input_field_{st.session_state.input_counter}",
-                        label_visibility="collapsed",
-                        height=100,
-                        max_chars=None
-                    )
-                with col2:
-                    send_button = st.button("▶️ Send", key="send_btn_after", help="Send message", use_container_width=True)
-                _display_session_statistics()
-                if send_button and user_input.strip():
-                    _process_user_input(user_input)
 
     else:
         # Show normal input when not executing and no pending execution
@@ -303,12 +319,13 @@ def render_user_input():
         
         # Process input when send button is clicked
         if send_button and user_input.strip():
+            logger.debug("Send clicked: processing user input")
             _process_user_input(user_input)
 
 def _process_pending_execution(pending_execution):
     """Process pending execution."""
     # Start the execution
-    st.session_state.llm_executing = True
+    logger.debug("_process_pending_execution: clearing pending_execution and starting executor")
     st.session_state.pending_execution = None
 
     # Extract execution parameters
@@ -379,7 +396,8 @@ def _process_user_input(user_input: str):
     # Clear any lingering execution state
     st.session_state.llm_executing = False
 
-    # Force a rerun to show the executing state
+    logger.debug(f"_process_user_input: queued pending_execution for request_id={user_request_id}; triggering rerun")
+    # Force a rerun to immediately render the stop UI and start pending on next pass
     st.rerun()
 
 # --- Main Application ---

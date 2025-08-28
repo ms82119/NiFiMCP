@@ -502,10 +502,26 @@ class WorkflowExecutor:
         # Allow prompt box to reappear immediately after completion
         self.session_state.llm_executing = False
         # Trigger a UI rerun to restore input box promptly
+        # Use file-based signaling to communicate across threads (Streamlit limitation workaround)
         try:
-            self.session_state.has_new_events = True
-        except Exception:
-            pass
+            import os
+            import tempfile
+            import time
+            
+            # Create a completion signal file
+            completion_file = os.path.join(tempfile.gettempdir(), f"nifi_workflow_complete_{user_req_id}.signal")
+            with open(completion_file, 'w') as f:
+                f.write(str(time.time()))
+            
+            logger.debug(f"_cleanup_execution_state: created completion signal file {completion_file}")
+            
+            # Also try session state (might work in some cases)
+            import streamlit as st
+            st.session_state.has_new_events = True
+            st.session_state.workflow_completion_time = time.time()
+            
+        except Exception as e:
+            logger.error(f"_cleanup_execution_state: failed to set completion signals: {e}")
 
     def _update_live_response(self, user_request_id: str) -> None:
         """Render the live aggregated response bubble from session state."""

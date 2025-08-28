@@ -93,14 +93,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to configure server logging: {e}", exc_info=True)
     
-    # Configure LLM clients for workflow execution
-    try:
-        from nifi_chat_ui.chat_manager import configure_llms
-        configure_llms()
-        logger.info("LLM clients configured for workflow execution")
-    except Exception as e:
-        logger.error(f"Failed to configure LLM clients: {e}", exc_info=True)
-        logger.warning("Workflows may not be able to call LLMs")
+    # LLM clients are now handled by the modular architecture
+    # No need to configure them here - they're initialized on-demand
+    logger.info("LLM clients will be initialized on-demand by the modular architecture")
     
     if not get_nifi_servers():
         logger.warning("*******************************************************")
