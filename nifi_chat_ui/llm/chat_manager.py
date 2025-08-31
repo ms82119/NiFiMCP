@@ -58,7 +58,9 @@ class ChatManager:
         user_request_id: Optional[str] = None,
         action_id: Optional[str] = None,
         selected_nifi_server_id: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = "auto"  # Use "auto" as default to distinguish from None
+        tools: Optional[List[Dict[str, Any]]] = "auto",  # Use "auto" as default to distinguish from None
+        tool_results: Optional[List[Dict[str, Any]]] = None,  # Optional tool results to process
+        tool_calls: Optional[List[Dict[str, Any]]] = None  # Original tool calls for ID matching
     ) -> Dict[str, Any]:
         """
         Get response from specified LLM provider.
@@ -115,6 +117,73 @@ class ChatManager:
                 messages, system_prompt, model_name, tools, user_request_id, action_id
             )
             
+            # If we have tool results, process them and get final response
+            if tool_results and response and not response.to_dict().get("error"):
+                bound_logger.info(f"Processing {len(tool_results)} tool results and getting final LLM response")
+                
+                # Get the original response to preserve the message structure
+                original_response_dict = response.to_dict()
+                
+                # Create tool result messages for the LLM
+                tool_result_messages = []
+                
+                # Extract tool call IDs from the original response
+                original_tool_calls = original_response_dict.get("tool_calls", [])
+                
+                for i, result in enumerate(tool_results):
+                    # Get the correct tool_call_id from the original tool calls
+                    if i < len(original_tool_calls):
+                        tool_call = original_tool_calls[i]
+                        tool_call_id = tool_call.get("id", f"call_{i}")
+                    else:
+                        tool_call_id = f"call_{i}"
+                    
+                    if "error" in result:
+                        tool_result_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": f"Error: {result['error']}"
+                        })
+                    else:
+                        # Format the tool result for the LLM
+                        tool_result = result["result"]
+                        if isinstance(tool_result, (list, dict)):
+                            # Format structured data nicely
+                            import json
+                            formatted_result = json.dumps(tool_result, indent=2)
+                        else:
+                            formatted_result = str(tool_result)
+                        
+                        tool_result_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": formatted_result
+                        })
+                
+                # Create a new message list that includes the original assistant message with tool_calls
+                # and the tool result messages
+                final_messages = messages.copy()
+                
+                # Add the original assistant message with tool_calls if it exists
+                if "tool_calls" in original_response_dict:
+                    final_messages.append({
+                        "role": "assistant",
+                        "content": original_response_dict.get("content", ""),
+                        "tool_calls": original_response_dict["tool_calls"]
+                    })
+                
+                # Add tool results to the conversation
+                final_messages.extend(tool_result_messages)
+                
+                # Get final response from LLM with tool results
+                bound_logger.info("Requesting final response from LLM with tool results")
+                final_response = provider_instance.send_message(
+                    final_messages, system_prompt, model_name, None, user_request_id, action_id  # No tools for final response
+                )
+                
+                # Use the final response instead of the original
+                response = final_response
+            
             # Convert to dictionary format for compatibility
             result = response.to_dict()
             
@@ -138,7 +207,7 @@ class ChatManager:
         """Check if a provider is properly configured."""
         return provider in self.providers and self.providers[provider].is_configured()
     
-    def execute_tool(self, tool_name: str, arguments: Dict[str, Any], user_request_id: Optional[str] = None) -> Any:
+    def execute_tool(self, tool_name: str, arguments: Dict[str, Any], user_request_id: Optional[str] = None, selected_nifi_server_id: Optional[str] = None) -> Any:
         """
         Execute an MCP tool.
         
@@ -146,11 +215,12 @@ class ChatManager:
             tool_name: Name of the tool to execute
             arguments: Tool arguments
             user_request_id: Optional user request ID for logging
+            selected_nifi_server_id: Optional NiFi server ID
             
         Returns:
             Tool execution result
         """
-        return self.mcp_client.execute_tool(tool_name, arguments, user_request_id)
+        return self.mcp_client.execute_tool(tool_name, arguments, user_request_id, selected_nifi_server_id)
     
     def get_tools(self, provider: str, user_request_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """

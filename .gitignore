@@ -11,3 +11,4 @@ config.yaml
 docs/archived/
 docs/plans/
 docs/libdocs/
+chat_history.db

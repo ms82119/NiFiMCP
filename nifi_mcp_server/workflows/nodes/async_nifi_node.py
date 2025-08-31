@@ -294,7 +294,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             tool_calls_data = response_data.get("tool_calls") or []
             await emit_llm_complete(workflow_id, step_id, {
                 "action_id": action_id,
-                "response_content": response_data.get("content", "")[:200] if response_data.get("content") else "",
+                "response_content": response_data.get("content", ""),
                 "tool_calls": len(tool_calls_data),
                 "tokens_in": response_data.get("token_count_in", 0),
                 "tokens_out": response_data.get("token_count_out", 0),

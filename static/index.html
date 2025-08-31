@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NiFi Chat UI</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1 class="app-title">🤖 NiFi Chat UI</h1>
+                <div class="header-controls">
+                    <button id="theme-toggle" class="theme-toggle" title="Toggle theme">
+                        <span class="theme-icon">🌙</span>
+                    </button>
+                    <button id="settings-toggle-btn" class="header-btn" title="Settings">
+                        <span class="btn-icon">⚙️</span>
+                    </button>
+                    <div class="connection-status">
+                        <span id="connection-indicator" class="connection-indicator disconnected"></span>
+                        <span id="connection-text">Disconnected</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+
+            <!-- Settings Panel (Streamlit-style) -->
+            <div id="settings-panel" class="settings-panel" style="display: none;">
+                <div class="settings-resize-handle"></div>
+                <div class="settings-content">
+                    <div class="settings-header">
+                        <h3>Settings</h3>
+                        <button id="settings-close-btn" class="btn btn-icon-only">×</button>
+                    </div>
+                    
+                    <!-- Model Selection -->
+                    <div class="settings-section">
+                        <h4>Select LLM Model:</h4>
+                        <select id="model-select" class="settings-select">
+                            <option value="">Loading models...</option>
+                        </select>
+                    </div>
+
+                    <!-- NiFi Server Selection -->
+                    <div class="settings-section">
+                        <h4>Target NiFi Server:</h4>
+                        <select id="nifi-server-select" class="settings-select">
+                            <option value="">Loading servers...</option>
+                        </select>
+                    </div>
+
+                    <!-- Execution Settings -->
+                    <div class="settings-section">
+                        <h4>Execution Settings</h4>
+                        <div class="setting-item">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="auto-prune-history" checked>
+                                <span class="checkmark"></span>
+                                Auto-prune History
+                            </label>
+                            <small>Automatically remove older messages to stay below token limit</small>
+                        </div>
+                        <div class="setting-item">
+                            <label for="max-tokens-limit">Max Tokens Limit (approx):</label>
+                            <select id="max-tokens-limit" class="settings-select">
+                                <option value="4000">4,000</option>
+                                <option value="8000" selected>8,000</option>
+                                <option value="16000">16,000</option>
+                                <option value="32000">32,000</option>
+                                <option value="64000">64,000</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label for="max-actions">Max Actions per Request:</label>
+                            <input type="number" id="max-actions" value="10" min="1" max="20" class="settings-input">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chat History -->
+            <div class="chat-container">
+                <div id="chat-history" class="chat-history">
+                    <!-- Welcome message -->
+                    <div class="message system-message">
+                        <div class="message-content">
+                            <h3>Welcome to NiFi Chat UI! 🚀</h3>
+                            <p>I'm here to help you manage your NiFi workflows. You can ask me to:</p>
+                            <ul>
+                                <li>Create and configure NiFi processors</li>
+                                <li>Manage process groups and connections</li>
+                                <li>Monitor flow status and performance</li>
+                                <li>Debug and troubleshoot issues</li>
+                                <li>And much more!</li>
+                            </ul>
+                            <p>Just type your request below and I'll help you get started.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="input-area">
+                <!-- Stop Button (hidden by default) -->
+                <div id="stop-button" class="stop-button" style="display: none;">
+                    <button id="stop-workflow-btn" class="btn btn-stop">
+                        <span class="btn-icon">⏹️</span>
+                        <span class="btn-text">Stop Workflow</span>
+                    </button>
+                </div>
+
+                <!-- Input Form -->
+                <div id="input-form" class="input-form">
+                    <!-- Objective Input -->
+                    <div class="objective-container">
+                        <textarea 
+                            id="objective-input" 
+                            class="objective-input" 
+                            placeholder="Optional: Set an objective or context for this conversation..."
+                            rows="2"
+                            maxlength="500"
+                        ></textarea>
+                    </div>
+                    
+                    <div class="input-container">
+                        <textarea 
+                            id="user-input" 
+                            class="user-input" 
+                            placeholder="What can I help you with? (e.g., 'Create a simple flow with a GenerateFlowFile processor')"
+                            rows="1"
+                            maxlength="2000"
+                        ></textarea>
+                        <button id="send-button" class="btn btn-send">
+                            <span class="btn-icon">▶️</span>
+                        </button>
+                    </div>
+                    <div class="input-footer">
+                        <span class="char-count">
+                            <span id="char-count">0</span>/2000
+                        </span>
+                        <div class="input-options">
+                            <button id="workflow-modal-btn" class="btn btn-secondary btn-small">
+                                <span class="btn-icon">⚙️</span>
+                                Workflow: <span id="current-workflow">unguided</span>
+                            </button>
+                            <button id="copy-conversation-btn-footer" class="btn btn-secondary btn-small">
+                                <span class="btn-icon">📋</span>
+                                Copy Chat
+                            </button>
+                            <button id="clear-chat-btn-footer" class="btn btn-secondary btn-small">Clear Chat</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Loading Overlay -->
+        <div id="loading-overlay" class="loading-overlay" style="display: none;">
+            <div class="loading-content">
+                <div class="loading-spinner"></div>
+                <p>Processing your request...</p>
+            </div>
+        </div>
+
+        <!-- Error Modal -->
+        <div id="error-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>⚠️ Error</h3>
+                    <button class="modal-close" onclick="closeErrorModal()">×</button>
+                </div>
+                <div class="modal-body">
+                    <p id="error-message"></p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" onclick="closeErrorModal()">OK</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Workflow Modal -->
+        <div id="workflow-modal" class="modal" style="display: none;">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h3>⚙️ Workflow & Tools Configuration</h3>
+                    <button id="close-workflow-modal-btn" class="modal-close">×</button>
+                </div>
+                <div class="modal-body">
+                    <!-- Workflow Selection -->
+                    <div class="modal-section">
+                        <h4>Select Workflow:</h4>
+                        <select id="workflow-select-modal" class="settings-select">
+                            <option value="">Loading workflows...</option>
+                        </select>
+                        <div id="workflow-description-modal" class="workflow-description"></div>
+                    </div>
+
+                    <!-- Phase Filtering -->
+                    <div class="modal-section">
+                        <h4>Tool Selection By Phase:</h4>
+                        <div class="phase-filters">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="phase-all" checked>
+                                <span class="checkmark"></span>
+                                All Phases
+                            </label>
+                            <div id="phase-checkboxes" class="phase-checkboxes">
+                                <!-- Phase checkboxes will be populated here -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Available Tools -->
+                    <div class="modal-section">
+                        <h4>Available MCP Tools</h4>
+                        <div id="tools-container-modal" class="tools-container">
+                            <div class="loading">Loading tools...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="close-workflow-modal-footer-btn" class="btn btn-primary">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="/static/app.js"></script>
+</body>
+</html>

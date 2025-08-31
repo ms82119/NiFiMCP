@@ -241,6 +241,8 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             llm_content = response_data.get("content")
             tool_calls = response_data.get("tool_calls")
             
+
+            
             assistant_message = {"role": "assistant"}
             if llm_content:
                 assistant_message["content"] = llm_content
