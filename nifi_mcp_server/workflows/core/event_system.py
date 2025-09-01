@@ -148,6 +148,8 @@ class EventTypes:
     STATUS_REPORT_START = "status_report_start"
     STATUS_REPORT_COMPLETE = "status_report_complete"
     STATUS_REPORT_ERROR = "status_report_error"
+    
+
 
 
 # Convenience functions for common event types
@@ -190,4 +192,7 @@ async def emit_message_added(workflow_id: str, step_id: str, data: Dict[str, Any
                            user_request_id: Optional[str] = None):
     """Emit a message added event."""
     emitter = get_event_emitter()
-    await emitter.emit(EventTypes.MESSAGE_ADDED, data, workflow_id, step_id, user_request_id) 
+    await emitter.emit(EventTypes.MESSAGE_ADDED, data, workflow_id, step_id, user_request_id)
+
+
+ 

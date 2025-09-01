@@ -18,6 +18,9 @@ class NiFiChatApp {
         this.maxReconnectAttempts = 5;
         this.reconnectDelay = 1000;
         
+        // Tracking for final messages to prevent duplicates
+        this.finalMessageCreated = {};
+        
         // Initialize managers
         this.themeManager = new ThemeManager();
         this.modalManager = new ModalManager();
@@ -375,7 +378,6 @@ class NiFiChatApp {
         
         this.hideStopButton();
         this.showInputForm();
-        // this.showLoading(false);
         
         // Remove the live response bubble
         const liveContainer = document.getElementById(`live-response-${requestId}`);
@@ -383,26 +385,34 @@ class NiFiChatApp {
             liveContainer.remove();
         }
         
-        if (data.result && data.result.content) {
-                    // Add the final content to aggregated content
-        if (!this.aggregatedContent) {
-            this.aggregatedContent = {};
-        }
-        if (!this.aggregatedContent[requestId]) {
-            this.aggregatedContent[requestId] = [];
+        // Check if we've already created a final message for this request
+        if (this.finalMessageCreated && this.finalMessageCreated[requestId]) {
+            console.log('Final message already created for request:', requestId);
+            return;
         }
         
-                        // Add the final response content
-                this.aggregatedContent[requestId].push(data.result.content);
+        if (data.result && data.result.content) {
+            // Add the final content to aggregated content
+            if (!this.aggregatedContent) {
+                this.aggregatedContent = {};
+            }
+            if (!this.aggregatedContent[requestId]) {
+                this.aggregatedContent[requestId] = [];
+            }
             
-            // Create the final aggregated message
-            this.createFinalAggregatedMessage(requestId, data.result);
-            
-        } else if (data.result && data.result.error) {
-            this.addSystemMessage(`❌ Workflow failed: ${data.result.error}`);
-        } else {
-            this.addSystemMessage('✅ Workflow completed successfully');
+            // Add the final response content (cleaned of completion phrases)
+            const cleanedContent = this.cleanCompletionPhrases(data.result.content);
+            this.aggregatedContent[requestId].push(cleanedContent);
         }
+        
+        // Create the final aggregated message (only once per request)
+        this.createFinalAggregatedMessage(requestId, data.result);
+        
+        // Mark that we've created the final message for this request
+        if (!this.finalMessageCreated) {
+            this.finalMessageCreated = {};
+        }
+        this.finalMessageCreated[requestId] = true;
         
         this.currentWorkflowId = null;
     }
@@ -419,10 +429,15 @@ class NiFiChatApp {
         
         // Add execution steps (tool calls and LLM responses) - preserve all details
         if (this.aggregatedSteps && this.aggregatedSteps[requestId]) {
-            html += '<div class="execution-steps">';
+            html += '<div class="execution-steps-container">';
+            html += '<div class="execution-steps-header">';
+            html += '<button class="execution-steps-toggle" onclick="this.parentElement.parentElement.querySelector(\'.execution-steps\').classList.toggle(\'collapsed\'); this.textContent = this.parentElement.parentElement.querySelector(\'.execution-steps\').classList.contains(\'collapsed\') ? \'📋 Show Details\' : \'📋 Hide Details\';">📋 Show Details</button>';
+            html += '</div>';
+            html += '<div class="execution-steps collapsed">';
             this.aggregatedSteps[requestId].forEach(step => {
                 html += `<div class="status-update">${this.formatStatusMessage(step)}</div>`;
             });
+            html += '</div>';
             html += '</div>';
         }
         
@@ -431,7 +446,9 @@ class NiFiChatApp {
             if (html) html += '<hr>';
             html += '<div class="aggregated-content">';
             this.aggregatedContent[requestId].forEach(content => {
-                html += `<div class="content-part">${this.formatMessage(content)}</div>`;
+                // Clean completion phrases before formatting
+                const cleanedContent = this.cleanCompletionPhrases(content);
+                html += `<div class="content-part">${this.formatMessage(cleanedContent)}</div>`;
             });
             html += '</div>';
         }
@@ -443,24 +460,39 @@ class NiFiChatApp {
         
         const stats = [];
         
-        // Add model name if available
-        if (this.aggregatedStatus && this.aggregatedStatus[requestId] && this.aggregatedStatus[requestId].model_name) {
-            const modelName = this.aggregatedStatus[requestId].model_name;
-            if (modelName !== 'unknown') {
-                stats.push(`🤖 ${modelName}`);
-            }
+        // Add model name if available - prioritize workflow completion data
+        let modelName = null;
+        if (result.metadata && result.metadata.model_name && result.metadata.model_name !== 'unknown') {
+            modelName = result.metadata.model_name;
+        } else if (this.aggregatedStatus && this.aggregatedStatus[requestId] && this.aggregatedStatus[requestId].model_name) {
+            modelName = this.aggregatedStatus[requestId].model_name;
         }
         
-        // Use consistent token display format (same as live status)
+        if (modelName && modelName !== 'unknown') {
+            stats.push(`🤖 ${modelName}`);
+        }
+        
+        // Use workflow completion token counts (cumulative totals) - this is the key fix
         if (result.metadata && result.metadata.token_count_in && result.metadata.token_count_out) {
             stats.push(`📊 ${result.metadata.token_count_in.toLocaleString()}/${result.metadata.token_count_out.toLocaleString()}`);
         }
         
+        // Add tool calls count from workflow completion
         if (result.metadata && result.metadata.tool_calls_count) {
             stats.push(`🔧 ${result.metadata.tool_calls_count} tools executed`);
         }
         
-        // Add elapsed time
+        // Add iteration count from workflow completion
+        if (result.metadata && result.metadata.loop_count) {
+            stats.push(`🔄 ${result.metadata.loop_count} iterations`);
+        }
+        
+        // Add message count if available (from aggregated status)
+        if (this.aggregatedStatus && this.aggregatedStatus[requestId] && this.aggregatedStatus[requestId].messages_in_request) {
+            stats.push(`💬 ${this.aggregatedStatus[requestId].messages_in_request} msgs`);
+        }
+        
+        // Add elapsed time at the end (from aggregated status)
         if (this.aggregatedStatus && this.aggregatedStatus[requestId]) {
             const status = this.aggregatedStatus[requestId];
             const elapsed = Math.floor((Date.now() - status.start_time) / 1000);
@@ -712,14 +744,14 @@ class NiFiChatApp {
         // Token usage
         stats.push(`📊 ${status.tokens_in.toLocaleString()}/${status.tokens_out.toLocaleString()}`);
         
-        // Live timer
-        stats.push(`⏱️ ${elapsed}s`);
-        
         // Tools available
         stats.push(`🔧 ${status.tools_available} tools`);
         
         // Messages in request (non-system messages)
         stats.push(`💬 ${status.messages_in_request} msgs`);
+        
+        // Live timer at the end
+        stats.push(`⏱️ ${elapsed}s`);
         
         return `
             <div class="live-status-section">
@@ -915,6 +947,40 @@ class NiFiChatApp {
         return cleaned;
     }
     
+    cleanCompletionPhrases(content) {
+        // Remove completion phrases like 'TASK COMPLETE' from the content
+        if (!content) {
+            return content;
+        }
+        
+        console.log('🧹 cleanCompletionPhrases called with:', content.substring(0, 100) + '...');
+        
+        // Remove "TASK COMPLETE" and variations
+        const completionPhrases = [
+            "TASK COMPLETE",
+            "task complete",
+            "Task Complete",
+            "TASK COMPLETED",
+            "task completed",
+            "Task Completed"
+        ];
+        
+        let cleanedContent = content;
+        for (const phrase of completionPhrases) {
+            const before = cleanedContent;
+            cleanedContent = cleanedContent.replace(new RegExp(phrase, 'gi'), '').trim();
+            if (before !== cleanedContent) {
+                console.log('🧹 Removed phrase:', phrase);
+            }
+        }
+        
+        // Remove any trailing whitespace, newlines, or punctuation that might be left
+        cleanedContent = cleanedContent.replace(/[ \n\r\t.,;:!?]+$/, '');
+        
+        console.log('🧹 Final cleaned content:', cleanedContent.substring(0, 100) + '...');
+        return cleanedContent;
+    }
+    
     formatToolResults(content, metadata) {
         let html = this.formatMessage(content);
         
@@ -1007,7 +1073,7 @@ class NiFiChatApp {
     updateCharCount() {
         const input = document.getElementById('user-input');
         const count = input.value.length;
-        document.getElementById('char-count').textContent = count;
+        document.getElementById('prompt-char-count').textContent = count;
         
         // Change color if approaching limit
         const charCountElement = document.querySelector('.char-count');
@@ -1017,6 +1083,22 @@ class NiFiChatApp {
             charCountElement.style.color = '#f59e0b';
         } else {
             charCountElement.style.color = '#64748b';
+        }
+    }
+    
+    updateObjectiveCharCount() {
+        const objectiveInput = document.getElementById('objective-input');
+        const count = objectiveInput.value.length;
+        document.getElementById('objective-char-count').textContent = count;
+
+        // Change color if approaching limit
+        const objectiveCharCountElement = document.querySelector('.objective-char-count');
+        if (count > 1800) {
+            objectiveCharCountElement.style.color = '#ef4444';
+        } else if (count > 1500) {
+            objectiveCharCountElement.style.color = '#f59e0b';
+        } else {
+            objectiveCharCountElement.style.color = '#64748b';
         }
     }
     

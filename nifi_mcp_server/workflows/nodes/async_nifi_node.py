@@ -40,111 +40,7 @@ from nifi_chat_ui.llm.mcp.client import MCPClient
 from nifi_chat_ui.mcp_handler import get_available_tools, execute_mcp_tool
 
 
-class GoldenContextManager:
-    """Centralized manager for golden context operations."""
-    
-    def __init__(self, logger):
-        self.logger = logger
-    
-    def get_golden_context(self) -> Dict[str, Any]:
-        """Get golden context from session state with defaults."""
-        # Use in-memory storage instead of direct Streamlit access
-        if not hasattr(self, '_golden_context'):
-            self._golden_context = {
-                "messages": [],
-                "objective": "",
-                "current_phase": "",
-                "metadata": {}
-            }
-        return self._golden_context
-    
-    def initialize_from_shared_state(self, shared_state: Dict[str, Any]):
-        """Initialize golden context from shared state (for FastAPI integration)."""
-        if "golden_context" in shared_state:
-            self._golden_context = shared_state["golden_context"].copy()
-            self.logger.info(f"Initialized golden context from shared state: {len(self._golden_context.get('messages', []))} messages")
-        elif "messages" in shared_state:
-            # Fallback: create golden context from messages
-            self._golden_context = {
-                "messages": shared_state["messages"].copy(),
-                "objective": shared_state.get("objective", ""),
-                "current_phase": "",
-                "metadata": {}
-            }
-            self.logger.info(f"Initialized golden context from messages: {len(self._golden_context['messages'])} messages")
-        else:
-            # Default initialization
-            self._golden_context = {
-                "messages": [],
-                "objective": "",
-                "current_phase": "",
-                "metadata": {}
-            }
-            self.logger.info("Initialized golden context with defaults")
-    
-    def update_golden_context(self, golden_context: Dict[str, Any]):
-        """Update golden context in memory."""
-        self._golden_context = golden_context
-        self.logger.debug(f"Updated golden context in memory: {len(golden_context.get('messages', []))} messages")
-    
-    def add_message_to_golden_context(self, message: Dict[str, Any]):
-        """Add a single message to golden context and persist to session state."""
-        golden_context = self.get_golden_context()
-        if "messages" not in golden_context:
-            golden_context["messages"] = []
-        
-        golden_context["messages"].append(message)
-        self.update_golden_context(golden_context)
-        self.logger.debug(f"Added message to golden context: {message.get('role', 'unknown')} - {len(message.get('content', ''))} chars")
-    
-    def get_golden_messages(self) -> List[Dict[str, Any]]:
-        """Get messages from golden context."""
-        golden_context = self.get_golden_context()
-        return golden_context.get("messages", [])
-    
-
-    
-    def apply_smart_purging(self, golden_messages: List[Dict[str, Any]], 
-                          max_tokens: int, provider: str, model_name: str, 
-                          tools: List[Dict[str, Any]], auto_prune_history: bool = True) -> List[Dict[str, Any]]:
-        """Apply smart purging to golden messages only if auto_prune_history is enabled."""
-        if not golden_messages:
-            return []
-        
-        # Check if auto-prune history is enabled
-        if not auto_prune_history:
-            self.logger.debug("Auto-prune history disabled, returning all messages without purging")
-            return golden_messages
-        
-        try:
-            # Import smart purging function
-            import sys
-            import os
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-            if parent_dir not in sys.path:
-                sys.path.insert(0, parent_dir)
-            
-            from nifi_chat_ui.utils.message_utils import smart_prune_messages
-            
-            purged_messages = smart_prune_messages(
-                golden_messages,
-                max_tokens=max_tokens,
-                provider=provider,
-                model_name=model_name,
-                tools=tools,
-                logger=self.logger
-            )
-            
-            self.logger.info(f"Applied smart purging to golden context: {len(golden_messages)} -> {len(purged_messages)} messages")
-            return purged_messages
-            
-        except ImportError as e:
-            self.logger.warning(f"Could not import smart_prune_messages: {e}")
-            return golden_messages
-        except Exception as e:
-            self.logger.error(f"Error applying smart purging: {e}")
-            return golden_messages
+# Removed GoldenContextManager class - no longer needed
 
 
 class AsyncNiFiWorkflowNode(AsyncNode):
@@ -166,8 +62,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         self._chat_manager = None
         self._mcp_client = None
         
-        # Initialize golden context manager
-        self.golden_context_manager = GoldenContextManager(self.bound_logger)
+        # No longer need golden context manager - using database messages directly
     
     def get_chat_manager(self) -> ChatManager:
         """Get or create the ChatManager instance."""
@@ -239,9 +134,6 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     async def prep_async(self, shared: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare the node execution context."""
-        # Initialize golden context from shared state if available
-        self.golden_context_manager.initialize_from_shared_state(shared)
-        
         # Default prep - subclasses should override
         return shared
     
@@ -271,7 +163,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             "model": execution_state.get("model_name", "unknown"),
             "model_name": execution_state.get("model_name", "unknown"),  # Explicit model name for UI
             "messages_in_request": len([msg for msg in messages if msg.get("role") in ["user", "assistant", "tool"]]),  # Count non-system messages
-            "tools_available": len(tools) if tools else 0  # Count available tools
+            "tools_available": len(tools) if tools else 0,  # Count available tools
+            "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
         }, user_request_id)
         
         try:
@@ -328,7 +221,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 "tool_calls": len(tool_calls_data),
                 "tokens_in": response_data.get("token_count_in", 0),
                 "tokens_out": response_data.get("token_count_out", 0),
-                "status": "success"
+                "status": "success",
+                "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
             }, user_request_id)
             
             return response_data
@@ -381,7 +275,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                     "tool_index": i + 1,
                     "total_tools": len(tool_calls),
                     "arguments": args_dict,
-                    "llm_action_id": llm_action_id  # Add LLM action_id for correlation
+                    "llm_action_id": llm_action_id,  # Add LLM action_id for correlation
+                    "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
                 }, user_request_id)
                 
                 # Define the sync function to call in executor
@@ -415,7 +310,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                     "total_tools": len(tool_calls),
                     "result_length": len(str(tool_result)),
                     "status": "success",
-                    "llm_action_id": llm_action_id  # Add LLM action_id for correlation
+                    "llm_action_id": llm_action_id,  # Add LLM action_id for correlation
+                    "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
                 }, user_request_id)
                 
             except Exception as e:
@@ -425,7 +321,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                     "tool_call_id": tool_call_id,
                     "error": str(e),
                     "status": "error",
-                    "llm_action_id": llm_action_id  # Add LLM action_id for correlation
+                    "llm_action_id": llm_action_id,  # Add LLM action_id for correlation
+                    "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
                 }, workflow_id, step_id, user_request_id)
                 
                 self.bound_logger.error(f"Tool execution failed: {function_name} - {e}")
@@ -465,42 +362,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             "action_id": message.get("action_id")
         }, user_request_id)
     
-    async def get_golden_context_for_llm(self, execution_state: Dict[str, Any], 
-                                       max_tokens: int = None) -> List[Dict[str, Any]]:
-        """Get golden context messages optimized for LLM consumption with automatic smart purging."""
-        # Get all golden context messages
-        golden_messages = self.golden_context_manager.get_golden_messages()
-        
-        if not golden_messages:
-            return []
-        
-        # Check if auto-prune history is enabled
-        auto_prune_history = execution_state.get("auto_prune_history", True)
-        
-        # If auto-prune is disabled, return all messages without purging
-        if not auto_prune_history:
-            self.bound_logger.debug("Auto-prune history disabled, returning all golden context messages")
-            return golden_messages
-        
-        # If no max_tokens specified, use default from execution state
-        if max_tokens is None:
-            max_tokens = execution_state.get("max_tokens_limit", 16000)
-        
-        # Get tools for token calculation
-        tools = self.prepare_tools(execution_state)
-        
-        # Apply smart purging only if auto_prune_history is enabled
-        purged_messages = self.golden_context_manager.apply_smart_purging(
-            golden_messages,
-            max_tokens=max_tokens,
-            provider=execution_state.get("provider"),
-            model_name=execution_state.get("model_name"),
-            tools=tools,
-            auto_prune_history=auto_prune_history
-        )
-        
-        self.bound_logger.debug(f"Retrieved {len(purged_messages)} messages from golden context for LLM (auto_prune_history={auto_prune_history})")
-        return purged_messages
+    # Removed get_golden_context_for_llm method - no longer needed
     
     async def add_workflow_message(self, message: Dict[str, Any], 
                                  execution_state: Dict[str, Any],
@@ -511,13 +373,11 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             execution_state["messages"] = []
         execution_state["messages"].append(message)
         
-        # Only add to golden context if it's a real LLM message (not workflow event)
-        # and persist_to_golden is True
-        if persist_to_golden and not message.get("workflow_event"):
-            self.golden_context_manager.add_message_to_golden_context(message)
-            self.bound_logger.debug(f"Added message to golden context: role={message.get('role')}, has_content={bool(message.get('content'))}")
-        elif message.get("workflow_event"):
-            self.bound_logger.debug(f"Skipped adding workflow event to golden context: {message.get('content', '')[:50]}...")
+        # Messages are already persisted to database - no need for golden context
+        if message.get("workflow_event"):
+            self.bound_logger.debug(f"Workflow event message: {message.get('content', '')[:50]}...")
+        else:
+            self.bound_logger.debug(f"Added message to execution state: role={message.get('role')}, has_content={bool(message.get('content'))}")
         
         # Emit message added event
         workflow_id = execution_state.get("workflow_id", "unknown")
@@ -529,8 +389,66 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             "message_type": "tool_calls" if "tool_calls" in message else "content",
             "content_length": len(message.get("content", "")),
             "tool_calls": len(message.get("tool_calls", [])),
-            "action_id": message.get("action_id")
+            "action_id": message.get("action_id"),
+            "is_status_report": message.get("is_status_report", False)  # Include status report flag
         }, user_request_id)
+    
+    def apply_smart_pruning_to_messages(self, messages: List[Dict[str, Any]], execution_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Apply smart pruning to messages based on execution state settings."""
+        if not messages:
+            return []
+        
+        # Check if auto-prune history is enabled
+        auto_prune_history = execution_state.get("auto_prune_history", True)
+        if not auto_prune_history:
+            self.bound_logger.debug("Auto-prune history disabled, returning all messages without pruning")
+            return messages
+        
+        try:
+            # Import smart pruning function
+            import sys
+            import os
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            # Fix the import path - go up to the workspace root, then into nifi_chat_ui
+            workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_dir))))
+            if workspace_root not in sys.path:
+                sys.path.insert(0, workspace_root)
+            
+            from nifi_chat_ui.utils.message_utils import smart_prune_messages
+            
+            # Get tools for token calculation
+            tools = self.prepare_tools(execution_state)
+            
+            # Ensure tools is a list (not None)
+            if tools is None:
+                tools = []
+                self.bound_logger.debug("No tools available for token calculation, using empty list")
+            
+            # Get max tokens limit
+            max_tokens = execution_state.get("max_tokens_limit", 16000)
+            
+            # Log the pruning attempt details
+            self.bound_logger.debug(f"Smart pruning attempt: {len(messages)} messages, max_tokens={max_tokens}, tools_count={len(tools)}")
+            
+            # Apply smart pruning
+            pruned_messages = smart_prune_messages(
+                messages,
+                max_tokens=max_tokens,
+                provider=execution_state.get("provider"),
+                model_name=execution_state.get("model_name"),
+                tools=tools,
+                logger=self.bound_logger
+            )
+            
+            self.bound_logger.info(f"Applied smart pruning: {len(messages)} -> {len(pruned_messages)} messages (max_tokens={max_tokens})")
+            return pruned_messages
+            
+        except ImportError as e:
+            self.bound_logger.warning(f"Could not import smart_prune_messages: {e}")
+            return messages
+        except Exception as e:
+            self.bound_logger.error(f"Error applying smart pruning: {e}")
+            return messages
     
     def prepare_tools(self, execution_state: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         """Prepare tools for LLM execution (sync method for compatibility)."""

@@ -459,6 +459,18 @@ body {
     color: #94a3b8;
 }
 
+.objective-footer {
+    display: flex;
+    justify-content: flex-start;
+    margin-top: 0.5rem;
+    font-size: 0.875rem;
+    color: #64748b;
+}
+
+.objective-char-count {
+    font-weight: 500;
+}
+
 .input-container {
     display: flex;
     gap: 0.5rem;
@@ -502,6 +514,10 @@ body {
 }
 
 .char-count {
+    font-weight: 500;
+}
+
+.prompt-char-count {
     font-weight: 500;
 }
 
@@ -1656,4 +1672,43 @@ body {
     margin-right: 4px;
     color: #374151;
     font-size: 0.9em;
+}
+
+/* Execution Steps Toggle */
+.execution-steps-container {
+    margin-bottom: 1rem;
+}
+
+.execution-steps-header {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+}
+
+.execution-steps-toggle {
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.5rem;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    color: #475569;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.execution-steps-toggle:hover {
+    background: #e2e8f0;
+    border-color: #94a3b8;
+}
+
+.execution-steps-toggle:active {
+    transform: translateY(1px);
+}
+
+.execution-steps.collapsed {
+    display: none;
+}
+
+.execution-steps {
+    transition: all 0.3s ease;
 }

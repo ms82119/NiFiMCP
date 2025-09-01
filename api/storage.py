@@ -201,10 +201,12 @@ class ChatStorage:
                 conn.row_factory = sqlite3.Row  # Enable dict-like access
                 
                 # Query to load LLM conversation format messages (user, assistant, tool)
+                # Also include status reports (which are saved with ui_conversation format but have is_status_report flag)
                 query = """
                     SELECT * FROM messages 
                     WHERE json_extract(metadata, '$.format') = 'llm_conversation'
                        OR role = 'user'
+                       OR (json_extract(metadata, '$.is_status_report') = true)
                 """
                 params = []
                 

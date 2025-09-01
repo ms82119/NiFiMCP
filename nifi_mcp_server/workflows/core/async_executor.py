@@ -158,13 +158,17 @@ class AsyncWorkflowExecutor:
                 self.bound_logger.info(f"Executing sync workflow in thread pool: {self.workflow_name}")
                 result = await self._execute_sync_workflow_async(shared_state)
             
-            # Emit workflow completion event
-            await self.event_emitter.emit(EventTypes.WORKFLOW_COMPLETE, {
-                "status": result.get("status", "success"),
-                "workflow_name": self.workflow_name,
-                "result_keys": list(result.keys())
-            }, self.workflow_name, "workflow_complete", 
-            initial_context.get("user_request_id") if initial_context else None)
+            # Check if a status report was already emitted to prevent duplicates
+            if not shared_state.get("status_report_emitted", False):
+                # Emit workflow completion event
+                await self.event_emitter.emit(EventTypes.WORKFLOW_COMPLETE, {
+                    "status": result.get("status", "success"),
+                    "workflow_name": self.workflow_name,
+                    "result_keys": list(result.keys())
+                }, self.workflow_name, "workflow_complete", 
+                initial_context.get("user_request_id") if initial_context else None)
+            else:
+                self.bound_logger.info("Skipping workflow completion event - status report already emitted")
             
             return result
             

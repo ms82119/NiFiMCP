@@ -125,8 +125,12 @@
                             class="objective-input" 
                             placeholder="Optional: Set an objective or context for this conversation..."
                             rows="2"
-                            maxlength="500"
                         ></textarea>
+                        <div class="objective-footer">
+                            <span class="char-count objective-char-count">
+                                <span id="objective-char-count">0</span> characters
+                            </span>
+                        </div>
                     </div>
                     
                     <div class="input-container">
@@ -135,15 +139,14 @@
                             class="user-input" 
                             placeholder="What can I help you with? (e.g., 'Create a simple flow with a GenerateFlowFile processor')"
                             rows="1"
-                            maxlength="2000"
                         ></textarea>
                         <button id="send-button" class="btn btn-send">
                             <span class="btn-icon">▶️</span>
                         </button>
                     </div>
                     <div class="input-footer">
-                        <span class="char-count">
-                            <span id="char-count">0</span>/2000
+                        <span class="char-count prompt-char-count">
+                            <span id="prompt-char-count">0</span> characters
                         </span>
                         <div class="input-options">
                             <button id="workflow-modal-btn" class="btn btn-secondary btn-small">

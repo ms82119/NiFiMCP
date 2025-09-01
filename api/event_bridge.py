@@ -100,8 +100,27 @@ class EventBridge:
             }
             
         elif event.event_type == EventTypes.WORKFLOW_COMPLETE:
-            # Don't send a separate completion message - the LLM response will handle completion
-            return None
+            # Send workflow completion event to UI with cumulative data
+            return {
+                "type": "workflow_complete",
+                "request_id": user_request_id,
+                "result": {
+                    "content": None,  # No specific content for workflow completion
+                    "tokens_in": event_data.get("total_tokens_in", 0),  # Use cumulative total
+                    "tokens_out": event_data.get("total_tokens_out", 0),  # Use cumulative total
+                    "tool_calls": [],
+                    "metadata": {
+                        "token_count_in": event_data.get("total_tokens_in", 0),  # Use cumulative total
+                        "token_count_out": event_data.get("total_tokens_out", 0),  # Use cumulative total
+                        "tool_calls_count": event_data.get("tool_calls_executed", 0),
+                        "loop_count": event_data.get("loop_count", 0),
+                        "is_status_report": False,  # This is workflow completion, not status report
+                        "model_name": event_data.get("model_name", "unknown"),
+                        "provider": event_data.get("provider", "unknown")
+                    }
+                },
+                "timestamp": str(event.id)
+            }
             
         elif event.event_type == EventTypes.WORKFLOW_ERROR:
             return {
@@ -114,11 +133,15 @@ class EventBridge:
         elif event.event_type == EventTypes.LLM_START:
             provider = event_data.get("provider", "Unknown")
             model = event_data.get("model", "Unknown")
+            loop_count = event_data.get("loop_count", 0)
+            message = f"LLM Call Started - {provider} {model}"
+            if loop_count > 0:
+                message += f" (Iteration {loop_count})"
             return {
                 "type": "workflow_status",
                 "request_id": user_request_id,
                 "status": "processing",
-                "message": f"LLM Call Started - {provider} {model}",
+                "message": message,
                 "data": event_data,  # Pass all the enhanced data to the UI
                 "timestamp": str(event.id)
             }
@@ -128,10 +151,12 @@ class EventBridge:
             tokens_out = event_data.get("tokens_out", 0)
             tool_calls = event_data.get("tool_calls", [])
             response_content = event_data.get("response_content")
+            is_status_report = event_data.get("is_status_report", False)
             
             # Check if this is a final LLM response with content
-            if response_content:
+            if response_content and not is_status_report:
                 # This is the final assistant response - send as workflow_complete
+                # But NOT for status reports (those are handled separately)
                 return {
                     "type": "workflow_complete",
                     "request_id": user_request_id,
@@ -143,9 +168,23 @@ class EventBridge:
                         "metadata": {
                             "token_count_in": tokens_in,
                             "token_count_out": tokens_out,
-                            "tool_calls_count": len(tool_calls) if tool_calls else 0
+                            "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                            "loop_count": event_data.get("loop_count", 0),  # Include iteration count
+                            "is_status_report": False,  # This is not a status report
+                            "model_name": event_data.get("model", "unknown"),  # Include model name for consistent display
+                            "provider": event_data.get("provider", "unknown")  # Include provider for consistent display
                         }
                     },
+                    "timestamp": str(event.id)
+                }
+            elif response_content and is_status_report:
+                # This is a status report - send as a status update, not workflow completion
+                return {
+                    "type": "workflow_status",
+                    "request_id": user_request_id,
+                    "status": "status_report",
+                    "message": f"Status Report: {tokens_in:,} in, {tokens_out:,} out",
+                    "data": event_data,
                     "timestamp": str(event.id)
                 }
             else:
@@ -162,6 +201,7 @@ class EventBridge:
                     "request_id": user_request_id,
                     "status": "processing",
                     "message": f"LLM step: {tokens_in:,} in, {tokens_out:,} out{tool_summary}",
+                    "data": event_data,  # Pass all the enhanced data to the UI
                     "timestamp": str(event.id)
                 }
             
@@ -170,16 +210,22 @@ class EventBridge:
             tool_index = event_data.get("tool_index", 1)
             total_tools = event_data.get("total_tools", 1)
             tool_args = event_data.get("arguments") or event_data.get("tool_args") or {}
+            loop_count = event_data.get("loop_count", 0)
             
             args_preview = str(tool_args)
             if len(args_preview) > 120:
                 args_preview = args_preview[:117] + "..."
             
+            message = f"Executing: `{tool_name}` ({tool_index}/{total_tools})"
+            if loop_count > 0:
+                message += f" (Iteration {loop_count})"
+            message += (f" — args: `{args_preview}`" if tool_args else "")
+            
             return {
                 "type": "workflow_status",
                 "request_id": user_request_id,
                 "status": "executing_tools",
-                "message": f"Executing: `{tool_name}` ({tool_index}/{total_tools})" + (f" — args: `{args_preview}`" if tool_args else ""),
+                "message": message,
                 "timestamp": str(event.id)
             }
             
@@ -188,6 +234,7 @@ class EventBridge:
             result_len = event_data.get("result_length")
             if result_len is None:
                 result_len = len(str(event_data.get("tool_result", "")))
+            loop_count = event_data.get("loop_count", 0)
             
             # Use LLM's tool_call_id as the primary Action ID for correlation
             tool_call_id = event_data.get("tool_call_id")
@@ -203,27 +250,36 @@ class EventBridge:
                 else:
                     result_preview = f" — result: {result_str}"
             
+            message = f"Tool Completed: `{tool_name}` — {result_len:,} chars{result_preview} (Act: {action_id_display})"
+            if loop_count > 0:
+                message += f" (Iteration {loop_count})"
+            
             return {
                 "type": "workflow_status",
                 "request_id": user_request_id,
                 "status": "processing",
-                "message": f"Tool Completed: `{tool_name}` — {result_len:,} chars{result_preview} (Act: {action_id_display})",
+                "message": message,
                 "timestamp": str(event.id)
             }
             
         elif event.event_type == EventTypes.TOOL_ERROR:
             tool_name = event_data.get("tool_name", "Unknown")
             error_msg = event_data.get("error", "Unknown error")
+            loop_count = event_data.get("loop_count", 0)
             
             # Use LLM's tool_call_id as the primary Action ID for correlation
             tool_call_id = event_data.get("tool_call_id")
             action_id_display = tool_call_id if tool_call_id else "unknown"
             
+            message = f"❌ Tool Failed: `{tool_name}` — {error_msg} (Act: {action_id_display})"
+            if loop_count > 0:
+                message += f" (Iteration {loop_count})"
+            
             return {
                 "type": "workflow_status",
                 "request_id": user_request_id,
                 "status": "error",
-                "message": f"❌ Tool Failed: `{tool_name}` — {error_msg} (Act: {action_id_display})",
+                "message": message,
                 "timestamp": str(event.id)
             }
             

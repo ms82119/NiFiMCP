@@ -29,6 +29,31 @@ chat_manager = ChatManager(settings.__dict__)
 workflow_registry = get_workflow_registry()
 
 
+def _clean_completion_phrases(content: str) -> str:
+    """Remove completion phrases like 'TASK COMPLETE' from the content."""
+    if not content:
+        return content
+    
+    # Remove "TASK COMPLETE" and variations
+    completion_phrases = [
+        "TASK COMPLETE",
+        "task complete",
+        "Task Complete",
+        "TASK COMPLETED",
+        "task completed",
+        "Task Completed"
+    ]
+    
+    cleaned_content = content
+    for phrase in completion_phrases:
+        cleaned_content = cleaned_content.replace(phrase, "").strip()
+    
+    # Remove any trailing whitespace, newlines, or punctuation that might be left
+    cleaned_content = cleaned_content.rstrip(" \n\r\t.,;:!?")
+    
+    return cleaned_content
+
+
 @router.post("/", response_model=ChatResponse)
 async def submit_chat(message: ChatMessage, background_tasks: BackgroundTasks):
     """Submit a chat message and start workflow execution."""
@@ -136,6 +161,9 @@ async def save_complete_response(request: dict):
         if not request_id or not content:
             raise HTTPException(status_code=400, detail="Missing request_id or content")
         
+        # Clean the content by removing "TASK COMPLETE" and other completion phrases
+        cleaned_content = _clean_completion_phrases(content)
+        
         # Save the complete response as an assistant message with UI conversation format
         ui_metadata = metadata.copy() if metadata else {}
         ui_metadata["format"] = "ui_conversation"
@@ -143,7 +171,7 @@ async def save_complete_response(request: dict):
         storage.save_message(
             request_id=request_id,
             role="assistant",
-            content=content,
+            content=cleaned_content,
             provider=metadata.get("provider", "unknown"),
             model_name=metadata.get("model_name", "unknown"),
             nifi_server_id=metadata.get("nifi_server_id"),
@@ -278,14 +306,8 @@ async def execute_workflow(
             "max_loop_iterations": max_loop_iterations,
             "max_tokens_limit": max_tokens_limit,
             "auto_prune_history": auto_prune_history,
-            # Add conversation history for golden context
-            "messages": messages_for_context,
-            "golden_context": {
-                "messages": messages_for_context,
-                "objective": objective or "",
-                "current_phase": "",
-                "metadata": {}
-            }
+            # Add conversation history for workflow execution
+            "messages": messages_for_context
         }
         
         # Execute workflow using the existing PocketFlow system
