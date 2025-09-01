@@ -113,8 +113,9 @@ class EventParser:
         """Parse TOOL_COMPLETE event into MessageData."""
         tool_name = event_data.get("tool_name", "unknown")
         tool_result = event_data.get("tool_result", {})
+        result_length = event_data.get("result_length", len(str(tool_result)) if tool_result else 0)
         
-        content_lines = [f"✅ **Tool Completed:** `{tool_name}`"]
+        content_lines = [f"✅ **Tool Completed:** `{tool_name}` — {result_length:,} chars"]
         if tool_result:
             result_preview = str(tool_result)[:200]
             content_lines.append(f"📄 **Result:** `{result_preview}{'...' if len(str(tool_result)) > 200 else ''}`")

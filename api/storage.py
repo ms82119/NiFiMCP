@@ -73,6 +73,21 @@ class ChatStorage:
         """Save a chat message to the database."""
         try:
             with sqlite3.connect(self.db_path) as conn:
+                # For assistant messages, check if we already have a UI conversation format message for this request
+                if role == "assistant":
+                    cursor = conn.execute(
+                        """SELECT id FROM messages 
+                           WHERE request_id = ? AND role = ? 
+                           AND json_extract(metadata, '$.format') = 'ui_conversation'
+                           ORDER BY timestamp DESC LIMIT 1""",
+                        (request_id, role)
+                    )
+                    existing = cursor.fetchone()
+                    
+                    if existing:
+                        self.logger.debug(f"UI conversation format assistant message already exists for request {request_id}")
+                        return
+                
                 metadata_json = json.dumps(metadata) if metadata else None
                 conn.execute(
                     """INSERT INTO messages 
@@ -118,19 +133,86 @@ class ChatStorage:
         limit: Optional[int] = None, 
         request_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Get chat history from the database."""
+        """Get chat history from the database for UI display."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row  # Enable dict-like access
                 
-                query = "SELECT * FROM messages"
+                # Query to load user messages, system messages, and UI conversation format messages
+                # Exclude LLM conversation format messages (used for LLM history, not UI display)
+                query = """
+                    SELECT * FROM messages 
+                    WHERE role = 'user' 
+                       OR (role = 'assistant' AND json_extract(metadata, '$.format') = 'ui_conversation')
+                       OR role = 'system'
+                """
                 params = []
                 
                 if request_id:
-                    query += " WHERE request_id = ?"
+                    query += " AND request_id = ?"
                     params.append(request_id)
                 
-                query += " ORDER BY timestamp DESC"
+                query += " ORDER BY timestamp ASC"
+                
+                if limit:
+                    query += f" LIMIT {limit}"
+                
+                cursor = conn.execute(query, params)
+                rows = cursor.fetchall()
+                
+                # Convert to list of dictionaries and deduplicate
+                messages = []
+                seen_content = set()  # Track content to avoid duplicates
+                
+                for row in rows:
+                    message = dict(row)
+                    # Parse metadata if present
+                    if message.get('metadata'):
+                        try:
+                            message['metadata'] = json.loads(message['metadata'])
+                        except json.JSONDecodeError:
+                            message['metadata'] = None
+                    
+                    # Create a unique key for deduplication (request_id + role + content length + first 100 chars)
+                    content = message.get('content', '')
+                    content_preview = content[:100] if content else ''
+                    unique_key = f"{message.get('request_id', '')}_{message.get('role', '')}_{len(content)}_{content_preview}"
+                    
+                    if unique_key not in seen_content:
+                        seen_content.add(unique_key)
+                        messages.append(message)
+                    else:
+                        self.logger.debug(f"Dropping duplicate message: {unique_key}")
+                
+                self.logger.debug(f"Retrieved {len(messages)} UI messages from database (after deduplication)")
+                return messages
+        except Exception as e:
+            self.logger.error(f"Failed to get chat history: {e}")
+            return []
+    
+    def get_llm_conversation_history(
+        self, 
+        limit: Optional[int] = None, 
+        request_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get LLM conversation history from the database for LLM context."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row  # Enable dict-like access
+                
+                # Query to load LLM conversation format messages (user, assistant, tool)
+                query = """
+                    SELECT * FROM messages 
+                    WHERE json_extract(metadata, '$.format') = 'llm_conversation'
+                       OR role = 'user'
+                """
+                params = []
+                
+                if request_id:
+                    query += " AND request_id = ?"
+                    params.append(request_id)
+                
+                query += " ORDER BY timestamp ASC"
                 
                 if limit:
                     query += f" LIMIT {limit}"
@@ -150,10 +232,10 @@ class ChatStorage:
                             message['metadata'] = None
                     messages.append(message)
                 
-                self.logger.debug(f"Retrieved {len(messages)} messages from database")
+                self.logger.debug(f"Retrieved {len(messages)} LLM conversation messages from database")
                 return messages
         except Exception as e:
-            self.logger.error(f"Failed to get chat history: {e}")
+            self.logger.error(f"Failed to get LLM conversation history: {e}")
             return []
     
     def get_workflow_status(self, request_id: str) -> Optional[Dict[str, Any]]:
@@ -219,6 +301,24 @@ class ChatStorage:
                 self.logger.info(f"Cleaned up {deleted_count} old messages")
         except Exception as e:
             self.logger.error(f"Failed to cleanup old messages: {e}")
+    
+    def clear_chat_history(self):
+        """Clear all chat history from the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # Delete all messages
+                conn.execute("DELETE FROM messages")
+                deleted_count = conn.total_changes
+                self.logger.info(f"Cleared {deleted_count} messages from chat history")
+                
+                # Also clear workflows table
+                conn.execute("DELETE FROM workflows")
+                deleted_workflows = conn.total_changes
+                self.logger.info(f"Cleared {deleted_workflows} workflows from history")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to clear chat history: {e}")
+            raise
 
 
 # Global storage instance

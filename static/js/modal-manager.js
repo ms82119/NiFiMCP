@@ -242,6 +242,7 @@ class ModalManager {
             }
             
             this.renderToolsList(filteredTools, toolsContainer);
+            this.updateToolCount(filteredTools.length);
         }
     }
     
@@ -314,6 +315,13 @@ class ModalManager {
         description = description.replace(/`([^`]+)`/g, '<code>$1</code>');
         
         return description;
+    }
+    updateToolCount(count) {
+        // Update the section header tool count
+        const toolCountSpan = document.querySelector('.modal-section h4 .tool-count');
+        if (toolCountSpan) {
+            toolCountSpan.textContent = `(${count})`;
+        }
     }
 }
 

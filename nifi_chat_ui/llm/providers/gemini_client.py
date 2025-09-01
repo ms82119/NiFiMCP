@@ -76,15 +76,45 @@ class GeminiClient(LLMProvider):
         """Send message to Gemini using ADK for proper MCP integration."""
         bound_logger = self.logger.bind(user_request_id=user_request_id, action_id=action_id)
         
+        # LLM Debug Logging - Log the request being sent to Gemini
+        llm_request_data = {
+            "provider": "gemini",
+            "model": model_name,
+            "messages": messages,
+            "tools": tools
+        }
+        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id).debug("Calling Gemini LLM")
+        
         try:
             if self.adk_agent and ADK_AVAILABLE:
-                return self._send_with_adk(messages, system_prompt, model_name, bound_logger)
+                response = self._send_with_adk(messages, system_prompt, model_name, bound_logger)
             else:
                 # Fallback to manual implementation if ADK is not available
-                return self._send_with_manual_implementation(messages, system_prompt, model_name, tools, bound_logger)
+                response = self._send_with_manual_implementation(messages, system_prompt, model_name, tools, bound_logger)
+            
+            # LLM Debug Logging - Log the response received from Gemini
+            llm_response_data = {
+                "content_length": len(response.content) if response.content else 0,
+                "tool_calls_count": len(response.tool_calls) if response.tool_calls else 0,
+                "token_count_in": response.token_count_in,
+                "token_count_out": response.token_count_out,
+                "error": response.error,
+                "full_response": response.content
+            }
+            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id).debug("llm-response")
+            
+            return response
                 
         except Exception as e:
             bound_logger.error(f"Gemini API error: {e}", exc_info=True)
+            # LLM Debug Logging - Log the error response
+            llm_error_data = {
+                "error": str(e),
+                "token_count_in": 0,
+                "token_count_out": 0
+            }
+            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id).debug("Received error from Gemini LLM")
+            
             error_message = LLMErrorHandler.handle_error(e, "Gemini")
             return LLMResponse(
                 content=None,

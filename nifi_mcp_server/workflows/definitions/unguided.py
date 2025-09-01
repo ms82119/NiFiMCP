@@ -56,16 +56,45 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
         
     async def prep_async(self, shared: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare execution context with clean golden context only."""
-        # Get golden context messages optimized for LLM consumption
+        # First, call parent prep_async to initialize Golden Context from shared state
+        await super().prep_async(shared)
+        
+        # Now get golden context messages optimized for LLM consumption
         golden_messages = await self.get_golden_context_for_llm({
             "provider": shared.get("provider"),
             "model_name": shared.get("model_name"),
             "nifi_server_id": shared.get("selected_nifi_server_id"),
-            "max_tokens_limit": shared.get("max_tokens_limit", 8000)
-        }, max_tokens=shared.get("max_tokens_limit", 8000))
+            "max_tokens_limit": shared.get("max_tokens_limit", 16000)
+        }, max_tokens=shared.get("max_tokens_limit", 16000))
         
         # Get current user prompt (only new input)
         user_prompt = shared.get("user_prompt", "")
+        
+        # Use the messages that were already prepared in the API
+        context_messages = shared.get("messages", [])
+        self.bound_logger.info(f"Using {len(context_messages)} messages from API preparation")
+        
+        # Save user message to database (LLM conversation format) if it's not already saved
+        if user_prompt:
+            try:
+                from api.storage import storage
+                storage.save_message(
+                    request_id=shared.get("user_request_id"),
+                    role="user",
+                    content=user_prompt,
+                    provider=shared.get("provider", "unknown"),
+                    model_name=shared.get("model_name", "unknown"),
+                    nifi_server_id=shared.get("selected_nifi_server_id"),
+                    metadata={
+                        "workflow_id": "unguided",
+                        "step_id": "async_initialize_execution",
+                        "event_type": "user_input",
+                        "format": "llm_conversation"  # Mark as LLM conversation format
+                    }
+                )
+                self.bound_logger.info(f"Saved user message (LLM format) to database for request {shared.get('user_request_id')}")
+            except Exception as e:
+                self.bound_logger.error(f"Failed to save user message to database: {e}")
         
         # Combine golden context with user prompt
         if user_prompt:
@@ -86,7 +115,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             "max_loop_iterations": shared.get("max_loop_iterations", 10),
             "workflow_id": "unguided",
             "step_id": "async_initialize_execution",
-            "max_tokens_limit": shared.get("max_tokens_limit", 8000),
+            "max_tokens_limit": shared.get("max_tokens_limit", 16000),
             "auto_prune_history": shared.get("auto_prune_history", True)  # Pass through auto-prune setting
         }
         
@@ -127,7 +156,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 "workflow_id": "unguided",
                 "step_id": "async_initialize_execution",
                 "auto_prune_history": prep_res.get("auto_prune_history", True),  # Add auto-prune setting
-                "max_tokens_limit": prep_res.get("max_tokens_limit", 8000)  # Add max tokens limit setting
+                "max_tokens_limit": prep_res.get("max_tokens_limit", 16000)  # Add max tokens limit setting
             }
             
             # Emit workflow start event
@@ -261,6 +290,30 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             # Add assistant message to context with automatic golden context management
             await self.add_workflow_message(assistant_message, execution_state)
             
+            # Save assistant message to database (LLM conversation format)
+            try:
+                from api.storage import storage
+                storage.save_message(
+                    request_id=execution_state["user_request_id"],
+                    role="assistant",
+                    content=llm_content or "",
+                    provider=execution_state.get("provider", "unknown"),
+                    model_name=execution_state.get("model_name", "unknown"),
+                    nifi_server_id=execution_state.get("nifi_server_id"),
+                    metadata={
+                        "tool_calls": tool_calls or [],
+                        "token_count_in": response_data.get("token_count_in", 0),
+                        "token_count_out": response_data.get("token_count_out", 0),
+                        "workflow_id": execution_state.get("workflow_id"),
+                        "step_id": step_id,
+                        "action_id": llm_action_id,
+                        "format": "llm_conversation"  # Mark as LLM conversation format
+                    }
+                )
+                self.bound_logger.info(f"Saved assistant message (LLM format) to database for request {execution_state['user_request_id']}")
+            except Exception as e:
+                self.bound_logger.error(f"Failed to save assistant message to database: {e}")
+            
             # Process tool calls if present
             if tool_calls:
                 self.bound_logger.info(f"Processing {len(tool_calls)} tool calls asynchronously")
@@ -282,8 +335,31 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                         tool_result.get("content") == "Error"):
                         failed_tools += 1
                     await self.add_workflow_message(tool_result, execution_state)
-                
-                # Track consecutive failures to prevent infinite loops
+                    
+                    # Save tool result to database (LLM conversation format)
+                    try:
+                        from api.storage import storage
+                        storage.save_message(
+                            request_id=execution_state["user_request_id"],
+                            role="tool",
+                            content=str(tool_result.get("content", "")),
+                            provider=execution_state.get("provider", "unknown"),
+                            model_name=execution_state.get("model_name", "unknown"),
+                            nifi_server_id=execution_state.get("nifi_server_id"),
+                            metadata={
+                                "tool_name": tool_result.get("name"),
+                                "tool_call_id": tool_result.get("tool_call_id"),
+                                "workflow_id": execution_state.get("workflow_id"),
+                                "step_id": step_id,
+                                "action_id": llm_action_id,
+                                "format": "llm_conversation"  # Mark as LLM conversation format
+                            }
+                        )
+                        self.bound_logger.info(f"Saved tool result (LLM format) to database for request {execution_state['user_request_id']}")
+                    except Exception as e:
+                        self.bound_logger.error(f"Failed to save tool result to database: {e}")
+                    
+                    # Track consecutive failures to prevent infinite loops
                 if failed_tools == len(tool_calls):
                     consecutive_failures += 1
                     self.bound_logger.warning(f"All {len(tool_calls)} tool calls failed. Consecutive failures: {consecutive_failures}")

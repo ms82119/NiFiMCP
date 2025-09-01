@@ -48,6 +48,15 @@ class AnthropicClient(LLMProvider):
             if len(tools) > 0:
                 self.logger.debug(f"First tool structure: {tools[0]}")
         
+        # LLM Debug Logging - Log the request being sent to Anthropic
+        llm_request_data = {
+            "provider": "anthropic",
+            "model": model_name,
+            "messages": anthropic_messages,
+            "tools": tools
+        }
+        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id).debug("Calling Anthropic LLM")
+        
         try:
             response = self.client.messages.create(
                 model=model_name,
@@ -85,6 +94,18 @@ class AnthropicClient(LLMProvider):
                         tool_calls.append(tool_call)
             token_count_in = getattr(response.usage, 'input_tokens', 0)
             token_count_out = getattr(response.usage, 'output_tokens', 0)
+            
+            # LLM Debug Logging - Log the response received from Anthropic
+            llm_response_data = {
+                "content_length": len(content) if content else 0,
+                "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                "token_count_in": token_count_in,
+                "token_count_out": token_count_out,
+                "error": None,
+                "full_response": content
+            }
+            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id).debug("llm-response")
+            
             return LLMResponse(
                 content=content or None,
                 tool_calls=tool_calls if tool_calls else None,
@@ -93,6 +114,13 @@ class AnthropicClient(LLMProvider):
             )
         except Exception as e:
             self.logger.error(f"Anthropic API error: {e}")
+            # LLM Debug Logging - Log the error response
+            llm_error_data = {
+                "error": str(e),
+                "token_count_in": 0,
+                "token_count_out": 0
+            }
+            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id).debug("Received error from Anthropic LLM")
             raise
     
     def format_tools(self, tools: List[Dict[str, Any]]) -> Any:

@@ -113,8 +113,8 @@ def smart_prune_messages(messages: List[Dict], max_tokens: int, provider: str, m
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
         
-        from nifi_chat_ui.app import get_token_counter
-        token_counter = get_token_counter()
+        from nifi_chat_ui.llm.utils.token_counter import TokenCounter
+        token_counter = TokenCounter()
         
         current_tokens = token_counter.calculate_input_tokens(messages, provider, model_name, tools)
         logger.info(f"SMART_PRUNE_DEBUG: Initial tokens: {current_tokens}, Limit: {max_tokens}, Messages: {len(messages)}")

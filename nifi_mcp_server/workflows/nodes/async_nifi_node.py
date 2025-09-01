@@ -58,6 +58,30 @@ class GoldenContextManager:
             }
         return self._golden_context
     
+    def initialize_from_shared_state(self, shared_state: Dict[str, Any]):
+        """Initialize golden context from shared state (for FastAPI integration)."""
+        if "golden_context" in shared_state:
+            self._golden_context = shared_state["golden_context"].copy()
+            self.logger.info(f"Initialized golden context from shared state: {len(self._golden_context.get('messages', []))} messages")
+        elif "messages" in shared_state:
+            # Fallback: create golden context from messages
+            self._golden_context = {
+                "messages": shared_state["messages"].copy(),
+                "objective": shared_state.get("objective", ""),
+                "current_phase": "",
+                "metadata": {}
+            }
+            self.logger.info(f"Initialized golden context from messages: {len(self._golden_context['messages'])} messages")
+        else:
+            # Default initialization
+            self._golden_context = {
+                "messages": [],
+                "objective": "",
+                "current_phase": "",
+                "metadata": {}
+            }
+            self.logger.info("Initialized golden context with defaults")
+    
     def update_golden_context(self, golden_context: Dict[str, Any]):
         """Update golden context in memory."""
         self._golden_context = golden_context
@@ -215,6 +239,9 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     async def prep_async(self, shared: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare the node execution context."""
+        # Initialize golden context from shared state if available
+        self.golden_context_manager.initialize_from_shared_state(shared)
+        
         # Default prep - subclasses should override
         return shared
     
@@ -235,13 +262,16 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         step_id = execution_state.get("step_id", self.name)
         user_request_id = execution_state.get("user_request_id")
         
-        # Emit LLM start event
+        # Emit LLM start event with enhanced information
         await emit_llm_start(workflow_id, step_id, {
             "action_id": action_id,
             "message_count": len(messages),
             "tool_count": len(tools) if tools else 0,
             "provider": execution_state.get("provider", "unknown"),
-            "model": execution_state.get("model_name", "unknown")
+            "model": execution_state.get("model_name", "unknown"),
+            "model_name": execution_state.get("model_name", "unknown"),  # Explicit model name for UI
+            "messages_in_request": len([msg for msg in messages if msg.get("role") in ["user", "assistant", "tool"]]),  # Count non-system messages
+            "tools_available": len(tools) if tools else 0  # Count available tools
         }, user_request_id)
         
         try:
@@ -361,7 +391,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                         params=args_dict,
                         selected_nifi_server_id=nifi_server_id,
                         user_request_id=user_request_id,
-                        action_id=tool_action_id  # Add the missing action_id parameter
+                        action_id=tool_call_id  # Use LLM's tool_call_id instead of generated action_id
                     )
                 
                 # Execute tool in thread pool to avoid blocking
@@ -454,7 +484,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         
         # If no max_tokens specified, use default from execution state
         if max_tokens is None:
-            max_tokens = execution_state.get("max_tokens_limit", 8000)
+            max_tokens = execution_state.get("max_tokens_limit", 16000)
         
         # Get tools for token calculation
         tools = self.prepare_tools(execution_state)

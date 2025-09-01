@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NiFi Chat UI</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=2025-08-31-2">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -71,8 +71,8 @@
                             <label for="max-tokens-limit">Max Tokens Limit (approx):</label>
                             <select id="max-tokens-limit" class="settings-select">
                                 <option value="4000">4,000</option>
-                                <option value="8000" selected>8,000</option>
-                                <option value="16000">16,000</option>
+                                <option value="8000">8,000</option>
+                                <option value="16000" selected>16,000</option>
                                 <option value="32000">32,000</option>
                                 <option value="64000">64,000</option>
                             </select>
@@ -219,7 +219,7 @@
 
                     <!-- Available Tools -->
                     <div class="modal-section">
-                        <h4>Available MCP Tools</h4>
+                        <h4>Available MCP Tools <span class="tool-count">(0)</span></h4>
                         <div id="tools-container-modal" class="tools-container">
                             <div class="loading">Loading tools...</div>
                         </div>

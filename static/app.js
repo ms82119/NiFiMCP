@@ -291,6 +291,11 @@ class NiFiChatApp {
             const serverSelect = document.getElementById('nifi-server-select');
             const workflowSelect = document.getElementById('workflow-select');
             
+            // Get smart purging settings
+            const autoPruneHistory = document.getElementById('auto-prune-history').checked;
+            const maxTokensLimit = parseInt(document.getElementById('max-tokens-limit').value);
+            const maxActions = parseInt(document.getElementById('max-actions').value);
+            
             let provider = 'openai';
             let model_name = 'gpt-4o-mini';
             
@@ -317,7 +322,11 @@ class NiFiChatApp {
                     objective: objective,
                     provider: provider,
                     model_name: model_name,
-                    selected_nifi_server_id: serverSelect.value || null
+                    selected_nifi_server_id: serverSelect.value || null,
+                    // Include smart purging settings
+                    auto_prune_history: autoPruneHistory,
+                    max_tokens_limit: maxTokensLimit,
+                    max_loop_iterations: maxActions
                 })
             });
             
@@ -359,12 +368,16 @@ class NiFiChatApp {
     handleWorkflowComplete(data) {
         console.log('Workflow completed:', data);
         
+        const requestId = data.request_id;
+        
+        // Stop the live timer
+        this.stopLiveTimer(requestId);
+        
         this.hideStopButton();
         this.showInputForm();
         // this.showLoading(false);
         
         // Remove the live response bubble
-        const requestId = data.request_id;
         const liveContainer = document.getElementById(`live-response-${requestId}`);
         if (liveContainer) {
             liveContainer.remove();
@@ -429,6 +442,14 @@ class NiFiChatApp {
         html += '<div class="summary-stats">';
         
         const stats = [];
+        
+        // Add model name if available
+        if (this.aggregatedStatus && this.aggregatedStatus[requestId] && this.aggregatedStatus[requestId].model_name) {
+            const modelName = this.aggregatedStatus[requestId].model_name;
+            if (modelName !== 'unknown') {
+                stats.push(`🤖 ${modelName}`);
+            }
+        }
         
         // Use consistent token display format (same as live status)
         if (result.metadata && result.metadata.token_count_in && result.metadata.token_count_out) {
@@ -618,6 +639,9 @@ class NiFiChatApp {
         
         contentDiv.innerHTML = html;
         
+        // Start live timer updates if not already started
+        this.startLiveTimer(requestId);
+        
         // Scroll to bottom
         this.scrollToBottom();
     }
@@ -635,10 +659,22 @@ class NiFiChatApp {
         const status = this.aggregatedStatus[requestId];
         const message = data.message || '';
         
+        // Apply styling to Request and Action IDs in the message
+        let styledMessage = message
+            .replace(/\(Req: ([^)]+)\)/g, '<span class="id-label">Req:</span><span class="request-id">$1</span>')
+            .replace(/\(Act: ([^)]+)\)/g, '<span class="id-label">Act:</span><span class="action-id">$1</span>');
+        
         if (data.status === 'started') {
             status.current_status = 'Workflow started';
         } else if (message.includes('LLM Call Started')) {
             status.current_status = 'LLM processing';
+            // Extract model name and other info from LLM start event
+            if (data.data) {
+                status.model_name = data.data.model_name || data.data.model || 'unknown';
+                status.provider = data.data.provider || 'unknown';
+                status.messages_in_request = data.data.messages_in_request || 0;
+                status.tools_available = data.data.tools_available || 0;
+            }
         } else if (message.includes('Executing:')) {
             status.current_status = 'Tool execution';
         } else if (message.includes('LLM step:')) {
@@ -649,6 +685,9 @@ class NiFiChatApp {
                 status.tokens_out = parseInt(tokenMatch[2].replace(/,/g, ''));
             }
         }
+        
+        // Update the styled message
+        status.current_message = styledMessage;
     }
     
     buildStatusSection(requestId) {
@@ -661,21 +700,86 @@ class NiFiChatApp {
             statusIcon = '<span class="working-dots">⟳</span>';
         }
         
+        const stats = [];
+        
+        // Status with model name
+        if (status.model_name && status.model_name !== 'unknown') {
+            stats.push(`${statusIcon} ${status.current_status} (${status.model_name})`);
+        } else {
+            stats.push(`${statusIcon} ${status.current_status}`);
+        }
+        
+        // Token usage
+        stats.push(`📊 ${status.tokens_in.toLocaleString()}/${status.tokens_out.toLocaleString()}`);
+        
+        // Live timer
+        stats.push(`⏱️ ${elapsed}s`);
+        
+        // Tools available
+        stats.push(`🔧 ${status.tools_available} tools`);
+        
+        // Messages in request (non-system messages)
+        stats.push(`💬 ${status.messages_in_request} msgs`);
+        
         return `
             <div class="live-status-section">
                 <div class="status-metrics">
-                    <span class="metric">${statusIcon} ${status.current_status}</span>
-                    <span class="metric">📊 ${status.tokens_in.toLocaleString()}/${status.tokens_out.toLocaleString()}</span>
-                    <span class="metric">⏱️ ${elapsed}s</span>
-                    <span class="metric">🔧 ${status.tools_available}</span>
-                    <span class="metric">💬 ${status.context_size}</span>
+                    ${stats.join(' | ')}
                 </div>
             </div>
         `;
     }
     
+    startLiveTimer(requestId) {
+        // Stop any existing timer for this request
+        if (this.liveTimers && this.liveTimers[requestId]) {
+            clearInterval(this.liveTimers[requestId]);
+        }
+        
+        // Initialize live timers object if it doesn't exist
+        if (!this.liveTimers) {
+            this.liveTimers = {};
+        }
+        
+        // Start a new timer that updates every second
+        this.liveTimers[requestId] = setInterval(() => {
+            const liveContainer = document.getElementById(`live-response-${requestId}`);
+            if (liveContainer) {
+                // Update the status section with current time
+                const contentDiv = liveContainer.querySelector('.live-content');
+                if (contentDiv) {
+                    // Rebuild the status section with updated time
+                    const statusSection = this.buildStatusSection(requestId);
+                    const currentHtml = contentDiv.innerHTML;
+                    
+                    // Replace the status section part
+                    const updatedHtml = currentHtml.replace(
+                        /<div class="live-status-section">[\s\S]*?<\/div>\s*<\/div>\s*$/,
+                        statusSection
+                    );
+                    
+                    contentDiv.innerHTML = updatedHtml;
+                }
+            } else {
+                // Container no longer exists, stop the timer
+                clearInterval(this.liveTimers[requestId]);
+                delete this.liveTimers[requestId];
+            }
+        }, 1000);
+    }
+    
+    stopLiveTimer(requestId) {
+        if (this.liveTimers && this.liveTimers[requestId]) {
+            clearInterval(this.liveTimers[requestId]);
+            delete this.liveTimers[requestId];
+        }
+    }
+    
     async saveCompleteResponse(requestId, html, result) {
         try {
+            // Stop the live timer when workflow completes
+            this.stopLiveTimer(requestId);
+            
             // Save the complete response to the database
             const response = await fetch('/api/chat/save-complete-response', {
                 method: 'POST',
@@ -721,9 +825,27 @@ class NiFiChatApp {
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         
+        // Check if content already contains HTML (from saved database content)
+        // Look for common HTML tags that indicate this is pre-formatted content
+        const hasHtml = content.includes('<') && content.includes('>') && 
+                       (content.includes('<div') || content.includes('<span') || 
+                        content.includes('<br') || content.includes('<table') ||
+                        content.includes('<p>') || content.includes('<h'));
+        
         // Check if this is an assistant message with tool results
         if (role === 'assistant' && metadata && metadata.has_tool_results) {
             contentDiv.innerHTML = this.formatToolResults(content, metadata);
+        } else if (hasHtml) {
+            // Content already contains HTML, clean it up and use it directly without re-formatting
+            const cleanedContent = this.cleanupHtmlContent(content);
+            contentDiv.innerHTML = cleanedContent;
+            
+            // Re-render Mermaid diagrams in the loaded content
+            if (this.markdownRenderer && cleanedContent.includes('mermaid-container')) {
+                setTimeout(() => {
+                    this.markdownRenderer.autoRenderMermaidDiagrams();
+                }, 100);
+            }
         } else {
             // Format content (basic markdown-like formatting)
             contentDiv.innerHTML = this.formatMessage(content);
@@ -754,9 +876,43 @@ class NiFiChatApp {
     formatStatusMessage(content) {
         // Special formatting for status messages (tool execution, etc.)
         // Don't use markdown renderer for these, just basic formatting
-        return content
-            .replace(/`([^`]+)`/g, '<code>$1</code>')
-            .replace(/\n/g, '<br>');
+        
+        // Apply styling to Request and Action IDs in the message
+        let formattedContent = content
+            .replace(/\(Req: ([^)]+)\)/g, '<span class="request-id">Req: $1</span>')
+            .replace(/\(Act: ([^)]+)\)/g, '<span class="action-id">Act: $1</span>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>');
+        
+        // Only add br tags if content doesn't already contain HTML
+        if (!formattedContent.includes('<') || !formattedContent.includes('>')) {
+            formattedContent = formattedContent.replace(/\n/g, '<br>');
+        }
+        
+        return formattedContent;
+    }
+    
+    cleanupHtmlContent(content) {
+        // Clean up excessive <br> tags and whitespace in saved HTML content
+        let cleaned = content;
+        
+        // Clean up excessive <br> tags (more than 2 consecutive)
+        cleaned = cleaned.replace(/(<br\s*\/?>\s*){3,}/gi, '<br><br>');
+        
+        // Clean up <br> tags inside table wrappers
+        cleaned = cleaned.replace(/(<div class="markdown-table-wrapper">)\s*(<br\s*\/?>\s*)+/gi, '$1');
+        cleaned = cleaned.replace(/(<br\s*\/?>\s*)+(<\/div>)/gi, '$2');
+        
+        // Clean up excessive whitespace around tables
+        cleaned = cleaned.replace(/(<div class="markdown-table-wrapper">)\s*(<table[^>]*>)/gi, '$1$2');
+        cleaned = cleaned.replace(/(<\/table>)\s*(<\/div>)/gi, '$1$2');
+        
+        // Clean up <br> tags that are immediately followed by closing tags
+        cleaned = cleaned.replace(/<br\s*\/?>\s*(<\/[^>]+>)/gi, '$1');
+        
+        // Clean up <br> tags that are immediately preceded by opening tags
+        cleaned = cleaned.replace(/(<[^>]+>)\s*<br\s*\/?>/gi, '$1');
+        
+        return cleaned;
     }
     
     formatToolResults(content, metadata) {
@@ -884,7 +1040,7 @@ class NiFiChatApp {
                 }
                 
                 // Add historical messages
-                data.messages.reverse().forEach(msg => {
+                data.messages.forEach(msg => {
                     if (msg.role === 'user') {
                         this.addUserMessage(msg.content);
                     } else if (msg.role === 'assistant') {
@@ -893,35 +1049,60 @@ class NiFiChatApp {
                 });
                 
                 this.scrollToBottom();
+                
+                // Re-render all Mermaid diagrams after loading chat history
+                if (this.markdownRenderer) {
+                    setTimeout(() => {
+                        this.markdownRenderer.autoRenderMermaidDiagrams();
+                    }, 200);
+                }
             }
         } catch (error) {
             console.error('Error loading chat history:', error);
         }
     }
     
-    clearChat() {
-        if (confirm('Are you sure you want to clear the chat history?')) {
-            const chatHistory = document.getElementById('chat-history');
-            chatHistory.innerHTML = '';
-            
-            // Add welcome message back
-            const welcomeMessage = document.createElement('div');
-            welcomeMessage.className = 'message system-message';
-            welcomeMessage.innerHTML = `
-                <div class="message-content">
-                    <h3>Welcome to NiFi Chat UI! 🚀</h3>
-                    <p>I'm here to help you manage your NiFi workflows. You can ask me to:</p>
-                    <ul>
-                        <li>Create and configure NiFi processors</li>
-                        <li>Manage process groups and connections</li>
-                        <li>Monitor flow status and performance</li>
-                        <li>Debug and troubleshoot issues</li>
-                        <li>And much more!</li>
-                    </ul>
-                    <p>Just type your request below and I'll help you get started.</p>
-                </div>
-            `;
-            chatHistory.appendChild(welcomeMessage);
+    async clearChat() {
+        if (confirm('Are you sure you want to clear the chat history? This will permanently delete all conversation history.')) {
+            try {
+                // Call API to clear chat history from database
+                const response = await fetch('/api/chat/history', {
+                    method: 'DELETE'
+                });
+                
+                if (response.ok) {
+                    // Clear the UI
+                    const chatHistory = document.getElementById('chat-history');
+                    chatHistory.innerHTML = '';
+                    
+                    // Add welcome message back
+                    const welcomeMessage = document.createElement('div');
+                    welcomeMessage.className = 'message system-message';
+                    welcomeMessage.innerHTML = `
+                        <div class="message-content">
+                            <h3>Welcome to NiFi Chat UI! 🚀</h3>
+                            <p>I'm here to help you manage your NiFi workflows. You can ask me to:</p>
+                            <ul>
+                                <li>Create and configure NiFi processors</li>
+                                <li>Manage process groups and connections</li>
+                                <li>Monitor flow status and performance</li>
+                                <li>Debug and troubleshoot issues</li>
+                                <li>And much more!</li>
+                            </ul>
+                            <p>Just type your request below and I'll help you get started.</p>
+                        </div>
+                    `;
+                    chatHistory.appendChild(welcomeMessage);
+                    
+                    console.log('Chat history cleared successfully');
+                } else {
+                    console.error('Failed to clear chat history:', response.status);
+                    this.showError('Failed to clear chat history from database');
+                }
+            } catch (error) {
+                console.error('Error clearing chat history:', error);
+                this.showError('Failed to clear chat history');
+            }
         }
     }
     

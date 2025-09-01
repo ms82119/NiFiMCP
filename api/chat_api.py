@@ -36,16 +36,6 @@ async def submit_chat(message: ChatMessage, background_tasks: BackgroundTasks):
         # Generate unique request ID
         request_id = str(uuid.uuid4())
         
-        # Save user message to database
-        storage.save_message(
-            request_id=request_id,
-            role="user",
-            content=message.content,
-            provider=message.provider,
-            model_name=message.model_name,
-            nifi_server_id=message.selected_nifi_server_id
-        )
-        
         # Broadcast workflow start notification
         await manager.broadcast_json({
             "type": "workflow_start",
@@ -71,7 +61,10 @@ async def submit_chat(message: ChatMessage, background_tasks: BackgroundTasks):
                 objective=message.objective,
                 provider=message.provider or "openai",
                 model_name=message.model_name or "gpt-4o-mini",
-                nifi_server_id=message.selected_nifi_server_id
+                nifi_server_id=message.selected_nifi_server_id,
+                auto_prune_history=message.auto_prune_history,
+                max_tokens_limit=message.max_tokens_limit,
+                max_loop_iterations=message.max_loop_iterations
             )
             logger.info(f"Background task added successfully for request {request_id}")
         except Exception as e:
@@ -84,7 +77,10 @@ async def submit_chat(message: ChatMessage, background_tasks: BackgroundTasks):
                 objective=message.objective,
                 provider=message.provider or "openai",
                 model_name=message.model_name or "gpt-4o-mini",
-                nifi_server_id=message.selected_nifi_server_id
+                nifi_server_id=message.selected_nifi_server_id,
+                auto_prune_history=message.auto_prune_history,
+                max_tokens_limit=message.max_tokens_limit,
+                max_loop_iterations=message.max_loop_iterations
             )
         
         logger.info(f"Started workflow execution for request {request_id}")
@@ -116,6 +112,19 @@ async def get_chat_history(limit: Optional[int] = 50, request_id: Optional[str] 
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.delete("/history")
+async def clear_chat_history():
+    """Clear all chat history from the database."""
+    try:
+        storage.clear_chat_history()
+        logger.info("Chat history cleared from database")
+        return {"status": "success", "message": "Chat history cleared"}
+        
+    except Exception as e:
+        logger.error(f"Error clearing chat history: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/save-complete-response")
 async def save_complete_response(request: dict):
     """Save a complete response with all aggregated content."""
@@ -127,7 +136,10 @@ async def save_complete_response(request: dict):
         if not request_id or not content:
             raise HTTPException(status_code=400, detail="Missing request_id or content")
         
-        # Save the complete response as an assistant message
+        # Save the complete response as an assistant message with UI conversation format
+        ui_metadata = metadata.copy() if metadata else {}
+        ui_metadata["format"] = "ui_conversation"
+        
         storage.save_message(
             request_id=request_id,
             role="assistant",
@@ -135,7 +147,7 @@ async def save_complete_response(request: dict):
             provider=metadata.get("provider", "unknown"),
             model_name=metadata.get("model_name", "unknown"),
             nifi_server_id=metadata.get("nifi_server_id"),
-            metadata=metadata
+            metadata=ui_metadata
         )
         
         logger.info(f"Saved complete response for request {request_id}")
@@ -181,7 +193,10 @@ async def execute_workflow(
     objective: Optional[str] = None,
     provider: str = "openai",
     model_name: str = "gpt-4o-mini",
-    nifi_server_id: Optional[str] = None
+    nifi_server_id: Optional[str] = None,
+    auto_prune_history: bool = True,
+    max_tokens_limit: int = 16000,
+    max_loop_iterations: int = 10
 ):
     """Execute workflow using existing PocketFlow workflow system."""
     try:
@@ -222,6 +237,35 @@ async def execute_workflow(
         else:
             system_prompt = base_system_prompt
         
+        # Load LLM conversation history from database
+        logger.info("Loading LLM conversation history from database...")
+        llm_history = storage.get_llm_conversation_history(limit=50)  # Get recent LLM conversation messages
+        
+        # Prepare messages for LLM context (format)
+        messages_for_context = []
+        for msg in llm_history:
+            metadata = msg.get('metadata') or {}
+            
+            if msg['role'] in ['user', 'assistant', 'tool']:
+                # Include assistant messages even if content is empty (they might have tool_calls)
+                # Include user and tool messages only if they have content
+                if msg['role'] == 'assistant' or msg.get('content'):
+                    # Format message for LLM context
+                    formatted_msg = {
+                        'role': msg['role'],
+                        'content': msg.get('content', '')  # Use empty string for assistant messages without content
+                    }
+                    # Add tool_calls for assistant messages if available
+                    if msg['role'] == 'assistant' and metadata.get('tool_calls'):
+                        formatted_msg['tool_calls'] = metadata['tool_calls']
+                    # Add tool_call_id for tool messages if available (put in message, not metadata)
+                    if msg['role'] == 'tool' and metadata.get('tool_call_id'):
+                        formatted_msg['tool_call_id'] = metadata['tool_call_id']
+                    messages_for_context.append(formatted_msg)
+                    logger.debug(f"Included LLM message: role={msg['role']}, content_length={len(msg.get('content', ''))}, has_tool_calls={bool(metadata.get('tool_calls'))}")
+        
+        logger.info(f"Loaded {len(messages_for_context)} LLM conversation messages from database (total LLM messages: {len(llm_history)})")
+        
         # Prepare shared state for workflow execution
         shared_state = {
             "user_request_id": request_id,
@@ -231,13 +275,22 @@ async def execute_workflow(
             "model_name": model_name,
             "selected_nifi_server_id": nifi_server_id,
             "system_prompt": system_prompt,
-            "max_loop_iterations": 10,
-            "max_tokens_limit": 8000,
-            "auto_prune_history": True
+            "max_loop_iterations": max_loop_iterations,
+            "max_tokens_limit": max_tokens_limit,
+            "auto_prune_history": auto_prune_history,
+            # Add conversation history for golden context
+            "messages": messages_for_context,
+            "golden_context": {
+                "messages": messages_for_context,
+                "objective": objective or "",
+                "current_phase": "",
+                "metadata": {}
+            }
         }
         
         # Execute workflow using the existing PocketFlow system
         logger.info(f"Executing workflow with shared state: {list(shared_state.keys())}")
+        logger.info(f"Conversation history: {len(messages_for_context)} messages")
         
         # Create async executor for the workflow
         workflow_executor = workflow_registry.create_async_executor("unguided")

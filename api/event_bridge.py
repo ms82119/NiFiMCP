@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional
 from loguru import logger
 
 from .websocket_manager import manager
+from .storage import storage
 from nifi_mcp_server.workflows.core.event_system import get_event_emitter, WorkflowEvent, EventTypes
 
 
@@ -39,6 +40,9 @@ class EventBridge:
         try:
             self.bound_logger.debug(f"Received PocketFlow event: {event.event_type}")
             
+            # Save messages to database if this is a message event
+            await self._save_message_to_database(event)
+            
             # Map PocketFlow events to WebSocket messages
             websocket_message = self._map_event_to_websocket(event)
             
@@ -49,6 +53,30 @@ class EventBridge:
             
         except Exception as e:
             self.bound_logger.error(f"Error handling PocketFlow event: {e}", exc_info=True)
+    
+    async def _save_message_to_database(self, event: WorkflowEvent):
+        """Save messages to database when they're created during workflow execution."""
+        try:
+            user_request_id = event.user_request_id
+            event_data = event.data or {}
+            
+            # Save user messages when they're added to context
+            if event.event_type == EventTypes.MESSAGE_ADDED:
+                message_role = event_data.get("message_role")
+                content_length = event_data.get("content_length", 0)
+                
+                # Only save if this is a real message with content
+                if message_role in ["user", "assistant"] and content_length > 0:
+                    # Note: We don't have the full content here, just metadata
+                    # The actual content will be saved via the save_complete_response endpoint
+                    self.bound_logger.debug(f"Message event received: {message_role}, {content_length} chars")
+            
+            # Note: UI display format messages are now saved via the UI's saveCompleteResponse
+            # This prevents duplicate saves that were causing triple message rendering
+            # The workflow still saves LLM conversation format for history purposes
+                    
+        except Exception as e:
+            self.bound_logger.error(f"Error saving message to database: {e}", exc_info=True)
     
     def _map_event_to_websocket(self, event: WorkflowEvent) -> Optional[Dict[str, Any]]:
         """Map PocketFlow events to WebSocket message format.
@@ -67,7 +95,7 @@ class EventBridge:
                 "type": "workflow_status",
                 "request_id": user_request_id,
                 "status": "started",
-                "message": f"🚀 Workflow execution started: {workflow_name}",
+                "message": f"🚀 Workflow execution started: {workflow_name} (Req: {user_request_id})",
                 "timestamp": str(event.id)
             }
             
@@ -91,6 +119,7 @@ class EventBridge:
                 "request_id": user_request_id,
                 "status": "processing",
                 "message": f"LLM Call Started - {provider} {model}",
+                "data": event_data,  # Pass all the enhanced data to the UI
                 "timestamp": str(event.id)
             }
             
@@ -160,11 +189,41 @@ class EventBridge:
             if result_len is None:
                 result_len = len(str(event_data.get("tool_result", "")))
             
+            # Use LLM's tool_call_id as the primary Action ID for correlation
+            tool_call_id = event_data.get("tool_call_id")
+            action_id_display = tool_call_id if tool_call_id else "unknown"
+            
+            # Show result preview if available
+            tool_result = event_data.get("tool_result")
+            result_preview = ""
+            if tool_result:
+                result_str = str(tool_result)
+                if len(result_str) > 50:
+                    result_preview = f" — preview: {result_str[:47]}..."
+                else:
+                    result_preview = f" — result: {result_str}"
+            
             return {
                 "type": "workflow_status",
                 "request_id": user_request_id,
                 "status": "processing",
-                "message": f"Tool Completed: `{tool_name}` — result: {result_len} chars",
+                "message": f"Tool Completed: `{tool_name}` — {result_len:,} chars{result_preview} (Act: {action_id_display})",
+                "timestamp": str(event.id)
+            }
+            
+        elif event.event_type == EventTypes.TOOL_ERROR:
+            tool_name = event_data.get("tool_name", "Unknown")
+            error_msg = event_data.get("error", "Unknown error")
+            
+            # Use LLM's tool_call_id as the primary Action ID for correlation
+            tool_call_id = event_data.get("tool_call_id")
+            action_id_display = tool_call_id if tool_call_id else "unknown"
+            
+            return {
+                "type": "workflow_status",
+                "request_id": user_request_id,
+                "status": "error",
+                "message": f"❌ Tool Failed: `{tool_name}` — {error_msg} (Act: {action_id_display})",
                 "timestamp": str(event.id)
             }
             

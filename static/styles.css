@@ -1616,3 +1616,44 @@ body {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
 }
+
+.tool-count {
+    color: #666;
+    font-size: 0.9em;
+    font-weight: normal;
+    margin-left: 0.5rem;
+}
+
+.tool-count:empty::before {
+    content: "(0)";
+    color: #999;
+}
+
+/* Add styling for Request and Action IDs */
+.request-id, .action-id {
+    background-color: #6366f1;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.9em;
+    font-weight: 600;
+    font-family: 'Courier New', monospace;
+    margin-left: 6px;
+    border: 2px solid #4f46e5;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.action-id {
+    background-color: #059669;
+    border-color: #047857;
+}
+
+/* Style for the ID labels */
+.id-label {
+    font-weight: 700;
+    margin-right: 4px;
+    color: #374151;
+    font-size: 0.9em;
+}

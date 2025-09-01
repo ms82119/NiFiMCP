@@ -150,7 +150,23 @@ class MarkdownRenderer {
         // Add syntax highlighting classes
         html = html.replace(/<code class="language-(\w+)">/g, '<code class="language-$1 syntax-highlight">');
         
-        // Add any additional post-processing
+        // Clean up excessive <br> tags (more than 2 consecutive)
+        html = html.replace(/(<br\s*\/?>\s*){3,}/gi, '<br><br>');
+        
+        // Clean up <br> tags that are immediately followed by closing tags
+        html = html.replace(/<br\s*\/?>\s*(<\/[^>]+>)/gi, '$1');
+        
+        // Clean up <br> tags that are immediately preceded by opening tags
+        html = html.replace(/(<[^>]+>)\s*<br\s*\/?>/gi, '$1');
+        
+        // Clean up <br> tags inside table wrappers (common issue with saved content)
+        html = html.replace(/(<div class="markdown-table-wrapper">)\s*(<br\s*\/?>\s*)+/gi, '$1');
+        html = html.replace(/(<br\s*\/?>\s*)+(<\/div>)/gi, '$2');
+        
+        // Clean up excessive whitespace around tables
+        html = html.replace(/(<div class="markdown-table-wrapper">)\s*(<table[^>]*>)/gi, '$1$2');
+        html = html.replace(/(<\/table>)\s*(<\/div>)/gi, '$1$2');
+        
         return html;
     }
     
@@ -179,17 +195,49 @@ class MarkdownRenderer {
             const mermaidBlocks = document.querySelectorAll('.markdown-mermaid-block');
             mermaidBlocks.forEach(block => {
                 const container = block.querySelector('.mermaid-container');
-                const loadingDiv = container.querySelector('.mermaid-loading');
-                
-                if (loadingDiv) {
-                    // Get the Mermaid code from the data attribute
-                    const mermaidCode = container.getAttribute('data-mermaid-code');
-                    if (mermaidCode) {
-                        this.renderMermaid(container.id, mermaidCode);
+                if (container) {
+                    const loadingDiv = container.querySelector('.mermaid-loading');
+                    
+                    if (loadingDiv) {
+                        // Get the Mermaid code from the data attribute
+                        const mermaidCode = container.getAttribute('data-mermaid-code');
+                        if (mermaidCode) {
+                            this.renderMermaid(container.id, mermaidCode);
+                        }
                     }
                 }
             });
         }, 100);
+    }
+    
+    cleanMermaidCode(code) {
+        // Remove HTML tags that might be in the code
+        let cleaned = code.replace(/<br\s*\/?>/gi, '\n');  // Replace <br> with newlines
+        cleaned = cleaned.replace(/<[^>]*>/g, '');  // Remove any other HTML tags
+        
+        // Fix common Mermaid syntax issues
+        cleaned = cleaned.replace(/&lt;/g, '<');  // Fix escaped <
+        cleaned = cleaned.replace(/&gt;/g, '>');  // Fix escaped >
+        cleaned = cleaned.replace(/&amp;/g, '&');  // Fix escaped &
+        
+        // Fix node IDs with parentheses - replace with underscores
+        cleaned = cleaned.replace(/\[([^\]]*\([^)]*\)[^\]]*)\]/g, (match, content) => {
+            // Replace parentheses with underscores in node content
+            const fixedContent = content.replace(/[()]/g, '_');
+            return `[${fixedContent}]`;
+        });
+        
+        // Fix node IDs with other problematic characters
+        cleaned = cleaned.replace(/\[([^\]]*[^\w\s\-_][^\]]*)\]/g, (match, content) => {
+            // Replace problematic characters with underscores
+            const fixedContent = content.replace(/[^\w\s\-_]/g, '_');
+            return `[${fixedContent}]`;
+        });
+        
+        // Remove extra whitespace and normalize line endings
+        cleaned = cleaned.trim();
+        
+        return cleaned;
     }
     
     // Render Mermaid diagram
@@ -203,11 +251,14 @@ class MarkdownRenderer {
             const container = document.getElementById(containerId);
             if (!container) return;
             
+            // Clean the Mermaid code before rendering
+            const cleanedCode = this.cleanMermaidCode(mermaidCode);
+            
             // Clear the container and render the diagram
             container.innerHTML = '';
             container.className = 'mermaid-container rendered';
             
-            const { svg } = await mermaid.render(containerId + '-svg', mermaidCode);
+            const { svg } = await mermaid.render(containerId + '-svg', cleanedCode);
             container.innerHTML = svg;
             
         } catch (error) {
