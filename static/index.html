@@ -15,14 +15,53 @@
                 <h1 class="app-title">🤖 NiFi Chat UI</h1>
                 <div class="header-controls">
                     <button id="theme-toggle" class="theme-toggle" title="Toggle theme">
-                        <span class="theme-icon">🌙</span>
+                        <span class="theme-icon">☀️</span>
                     </button>
-                    <button id="settings-toggle-btn" class="header-btn" title="Settings">
-                        <span class="btn-icon">⚙️</span>
-                    </button>
+
+                    <!-- LLM Model Selection -->
+                    <div class="model-selector">
+                        <label for="model-select-header" class="server-label">LLM:</label>
+                        <select id="model-select-header" class="server-select" title="Select LLM Model">
+                            <option value="">Loading models...</option>
+                        </select>
+                        <div class="exec-settings">
+                            <label class="exec-item">
+                                <input type="checkbox" id="auto-prune-history" checked>
+                                <span>Auto-prune</span>
+                            </label>
+                            <label class="exec-item">
+                                <span class="server-label">Tokens:</span>
+                                <select id="max-tokens-limit" class="server-select">
+                                    <option value="4000">4,000</option>
+                                    <option value="8000">8,000</option>
+                                    <option value="16000" selected>16,000</option>
+                                    <option value="32000">32,000</option>
+                                    <option value="64000">64,000</option>
+                                </select>
+                            </label>
+                            <label class="exec-item">
+                                <span class="server-label">Max Actions:</span>
+                                <input type="number" id="max-actions" value="10" min="1" max="20" class="server-select exec-number">
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- NiFi Server Selection -->
+                    <div class="nifi-server-selector">
+                        <label for="nifi-server-select-header" class="server-label">NiFi Server:</label>
+                        <select id="nifi-server-select-header" class="server-select" title="Select NiFi Server">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+
+                    
+                    
+                    <!-- Enhanced Connection Status -->
                     <div class="connection-status">
-                        <span id="connection-indicator" class="connection-indicator disconnected"></span>
-                        <span id="connection-text">Disconnected</span>
+                        <div class="connection-item">
+                            <span id="nifi-connection-indicator" class="connection-indicator disconnected"></span>
+                            <span id="nifi-connection-text">NiFi Server</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -31,59 +70,7 @@
         <!-- Main Content -->
         <main class="main-content">
 
-            <!-- Settings Panel (Streamlit-style) -->
-            <div id="settings-panel" class="settings-panel" style="display: none;">
-                <div class="settings-resize-handle"></div>
-                <div class="settings-content">
-                    <div class="settings-header">
-                        <h3>Settings</h3>
-                        <button id="settings-close-btn" class="btn btn-icon-only">×</button>
-                    </div>
-                    
-                    <!-- Model Selection -->
-                    <div class="settings-section">
-                        <h4>Select LLM Model:</h4>
-                        <select id="model-select" class="settings-select">
-                            <option value="">Loading models...</option>
-                        </select>
-                    </div>
-
-                    <!-- NiFi Server Selection -->
-                    <div class="settings-section">
-                        <h4>Target NiFi Server:</h4>
-                        <select id="nifi-server-select" class="settings-select">
-                            <option value="">Loading servers...</option>
-                        </select>
-                    </div>
-
-                    <!-- Execution Settings -->
-                    <div class="settings-section">
-                        <h4>Execution Settings</h4>
-                        <div class="setting-item">
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="auto-prune-history" checked>
-                                <span class="checkmark"></span>
-                                Auto-prune History
-                            </label>
-                            <small>Automatically remove older messages to stay below token limit</small>
-                        </div>
-                        <div class="setting-item">
-                            <label for="max-tokens-limit">Max Tokens Limit (approx):</label>
-                            <select id="max-tokens-limit" class="settings-select">
-                                <option value="4000">4,000</option>
-                                <option value="8000">8,000</option>
-                                <option value="16000" selected>16,000</option>
-                                <option value="32000">32,000</option>
-                                <option value="64000">64,000</option>
-                            </select>
-                        </div>
-                        <div class="setting-item">
-                            <label for="max-actions">Max Actions per Request:</label>
-                            <input type="number" id="max-actions" value="10" min="1" max="20" class="settings-input">
-                        </div>
-                    </div>
-                </div>
-            </div>
+            
 
             <!-- Chat History -->
             <div class="chat-container">

@@ -30,6 +30,21 @@ class NiFiChatApp {
         this.init();
     }
     
+    fitSelectToContent(selectEl) {
+        try {
+            // Create a temporary span to measure text width
+            const temp = document.createElement('span');
+            temp.style.visibility = 'hidden';
+            temp.style.whiteSpace = 'nowrap';
+            temp.style.font = window.getComputedStyle(selectEl).font;
+            temp.textContent = selectEl.options[selectEl.selectedIndex]?.text || '';
+            document.body.appendChild(temp);
+            const padding = 32; // extra space for native arrow to avoid clipping
+            selectEl.style.width = Math.max(80, temp.offsetWidth + padding) + 'px';
+            document.body.removeChild(temp);
+        } catch (_) {}
+    }
+
     init() {
         console.log('Initializing NiFi Chat App...');
         this.setupEventListeners();
@@ -37,6 +52,7 @@ class NiFiChatApp {
         this.loadChatHistory();
         this.loadSettings();
         this.updateConnectionStatus('connecting');
+        this.updateNiFiConnectionStatus('disconnected');
         console.log('NiFi Chat App initialization complete');
     }
     
@@ -80,61 +96,43 @@ class NiFiChatApp {
             stopButton.addEventListener('click', () => this.stopWorkflow());
         }
         
-        // Settings panel
-        const settingsToggleBtn = document.getElementById('settings-toggle-btn');
-        const settingsPanel = document.getElementById('settings-panel');
-        const settingsCloseBtn = document.getElementById('settings-close-btn');
+        // Settings panel removed
         
-        if (settingsToggleBtn && settingsPanel) {
-            console.log('Settings toggle button found, adding click listener');
-            settingsToggleBtn.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                console.log('Settings button clicked');
-                
-                // Show panel immediately
-                settingsPanel.style.display = 'block';
-                settingsPanel.style.visibility = 'visible';
-                
-                // Force a reflow for Safari
-                settingsPanel.offsetHeight;
-                
-                // Add show class after a brief delay
-                setTimeout(() => {
-                    settingsPanel.classList.add('show');
-                }, 50);
-            });
-        } else {
-            console.error('Settings elements not found:', { settingsToggleBtn, settingsPanel });
-        }
-        
-        if (settingsCloseBtn && settingsPanel) {
-            settingsCloseBtn.addEventListener('click', () => {
-                this.closeSettingsPanel();
-            });
-        }
-        
-        // Close settings panel when clicking outside
-        document.addEventListener('click', (e) => {
-            if (settingsPanel && settingsPanel.classList.contains('show')) {
-                if (!settingsPanel.contains(e.target) && !settingsToggleBtn.contains(e.target)) {
-                    this.closeSettingsPanel();
-                }
-            }
-        });
-        
-        // Settings change events
-        const modelSelect = document.getElementById('model-select');
-        if (modelSelect) {
-            modelSelect.addEventListener('change', (e) => {
+        // Settings change events (header model selector)
+        const modelSelectHeader = document.getElementById('model-select-header');
+        if (modelSelectHeader) {
+            modelSelectHeader.addEventListener('change', (e) => {
                 this.updateSettings('model', e.target.value);
+                this.fitSelectToContent(modelSelectHeader);
             });
         }
+
+        // Auto-prune toggles tokens enable state
+        const autoPruneCheckbox = document.getElementById('auto-prune-history');
+        const tokensSelect = document.getElementById('max-tokens-limit');
+        const tokensWrapper = tokensSelect ? tokensSelect.closest('.exec-item') : null;
+        if (autoPruneCheckbox && tokensSelect) {
+            const syncTokensDisabled = () => {
+                const disabled = !autoPruneCheckbox.checked;
+                tokensSelect.disabled = disabled;
+                if (tokensWrapper) {
+                    tokensWrapper.classList.toggle('disabled', disabled);
+                }
+            };
+            autoPruneCheckbox.addEventListener('change', syncTokensDisabled);
+            // initialize on load
+            syncTokensDisabled();
+        }
         
-        const serverSelect = document.getElementById('nifi-server-select');
-        if (serverSelect) {
-            serverSelect.addEventListener('change', (e) => {
-                this.updateSettings('nifi_server', e.target.value);
+        // Settings panel NiFi selector removed; header handles changes
+        // Header NiFi server selector
+        const headerServerSelect = document.getElementById('nifi-server-select-header');
+        if (headerServerSelect) {
+            headerServerSelect.addEventListener('change', (e) => {
+                const selectedServerId = e.target.value;
+                if (selectedServerId) {
+                    this.changeNiFiServer(selectedServerId);
+                }
             });
         }
         
@@ -145,11 +143,7 @@ class NiFiChatApp {
             });
         }
         
-        // Clear chat button (in settings)
-        const clearButton = document.getElementById('clear-chat-btn');
-        if (clearButton) {
-            clearButton.addEventListener('click', () => this.clearChat());
-        }
+        // Clear chat button (in settings) removed; footer button remains
 
         // Clear chat button (in footer)
         const clearButtonFooter = document.getElementById('clear-chat-btn-footer');
@@ -290,8 +284,8 @@ class NiFiChatApp {
         
         try {
             // Get selected settings
-            const modelSelect = document.getElementById('model-select');
-            const serverSelect = document.getElementById('nifi-server-select');
+            const modelSelect = document.getElementById('model-select-header');
+            const serverSelect = document.getElementById('nifi-server-select-header');
             const workflowSelect = document.getElementById('workflow-select');
             
             // Get smart purging settings
@@ -302,7 +296,7 @@ class NiFiChatApp {
             let provider = 'openai';
             let model_name = 'gpt-4o-mini';
             
-            if (modelSelect.value) {
+            if (modelSelect && modelSelect.value) {
                 const [selectedProvider, selectedModel] = modelSelect.value.split(':');
                 provider = selectedProvider;
                 model_name = selectedModel;
@@ -1047,21 +1041,50 @@ class NiFiChatApp {
     }
     
     updateConnectionStatus(status) {
-        const indicator = document.getElementById('connection-indicator');
-        const text = document.getElementById('connection-text');
+        // Update UI server connection status
+        const uiIndicator = document.getElementById('ui-connection-indicator');
+        const uiText = document.getElementById('ui-connection-text');
         
-        indicator.className = `connection-indicator ${status}`;
+        if (uiIndicator && uiText) {
+            uiIndicator.className = `connection-indicator ${status}`;
+            
+            switch (status) {
+                case 'connected':
+                    uiText.textContent = 'Connected';
+                    break;
+                case 'connecting':
+                    uiText.textContent = 'Connecting...';
+                    break;
+                case 'disconnected':
+                    uiText.textContent = 'Disconnected';
+                    break;
+            }
+        }
+    }
+
+    updateNiFiConnectionStatus(status) {
+        const indicator = document.getElementById('nifi-connection-indicator');
+        const text = document.getElementById('nifi-connection-text');
         
-        switch (status) {
-            case 'connected':
-                text.textContent = 'Connected';
-                break;
-            case 'connecting':
-                text.textContent = 'Connecting...';
-                break;
-            case 'disconnected':
-                text.textContent = 'Disconnected';
-                break;
+        if (indicator && text) {
+            // Map healthy to connected styling for green indicator
+            const indicatorClass = status === 'healthy' ? 'connected' : (status === 'checking' ? 'connecting' : status);
+            indicator.className = `connection-indicator ${indicatorClass}`;
+            
+            switch (status) {
+                case 'healthy':
+                    text.textContent = 'Connected';
+                    break;
+                case 'unhealthy':
+                    text.textContent = 'Disconnected';
+                    break;
+                case 'checking':
+                    text.textContent = 'Checking...';
+                    break;
+                case 'disconnected':
+                    text.textContent = 'Disconnected';
+                    break;
+            }
         }
     }
     
@@ -1235,19 +1258,33 @@ class NiFiChatApp {
             const response = await fetch('/api/settings/models');
             if (response.ok) {
                 const models = await response.json();
-                const modelSelect = document.getElementById('model-select');
-                
-                modelSelect.innerHTML = '';
-                models.forEach(model => {
-                    const option = document.createElement('option');
-                    option.value = `${model.provider}:${model.name}`;
-                    option.textContent = `${model.provider}: ${model.name}`;
-                    modelSelect.appendChild(option);
-                });
-                
-                // Set default
-                if (models.length > 0) {
-                    modelSelect.value = `${models[0].provider}:${models[0].name}`;
+                const modelSelectHeader = document.getElementById('model-select-header');
+                if (modelSelectHeader) {
+                    modelSelectHeader.innerHTML = '';
+                    // Group by provider using optgroups; display only model name for brevity
+                    const byProvider = models.reduce((acc, m) => {
+                        (acc[m.provider] = acc[m.provider] || []).push(m);
+                        return acc;
+                    }, {});
+                    Object.entries(byProvider).forEach(([provider, items]) => {
+                        const group = document.createElement('optgroup');
+                        group.label = provider;
+                        items.forEach(model => {
+                            const option = document.createElement('option');
+                            option.value = `${model.provider}:${model.name}`;
+                            option.textContent = model.name;
+                            group.appendChild(option);
+                        });
+                        modelSelectHeader.appendChild(group);
+                    });
+                    // Set default
+                    const first = models[0];
+                    if (first) {
+                        const saved = localStorage.getItem('nifi_chat_model');
+                        modelSelectHeader.value = saved || `${first.provider}:${first.name}`;
+                        // Ensure the width fits the selected option text (shrink to fit)
+                        this.fitSelectToContent(modelSelectHeader);
+                    }
                 }
             }
         } catch (error) {
@@ -1260,31 +1297,92 @@ class NiFiChatApp {
             const response = await fetch('/api/settings/nifi-servers');
             if (response.ok) {
                 const servers = await response.json();
-                const serverSelect = document.getElementById('nifi-server-select');
                 
-                serverSelect.innerHTML = '';
+                // Update both selectors using the new method
+                this.updateServerSelectors(servers);
+                
                 if (servers && servers.length > 0) {
-                    servers.forEach(server => {
-                        const option = document.createElement('option');
-                        option.value = server.id;
-                        option.textContent = server.name;
-                        serverSelect.appendChild(option);
-                    });
+                    // Set default for both selectors
+                    const defaultServerId = servers[0].id;
+                    const headerSelect = document.getElementById('nifi-server-select-header');
                     
-                    // Set default
-                    serverSelect.value = servers[0].id;
-                } else {
-                    serverSelect.innerHTML = '<option value="">No servers available</option>';
+                    if (headerSelect) {
+                        const saved = localStorage.getItem('nifi_chat_selected_server');
+                        headerSelect.value = saved || defaultServerId;
+                    }
+                    
+                    // Check the health of the default server
+                    await this.checkNiFiServerHealth(headerSelect ? headerSelect.value : defaultServerId);
                 }
             } else {
                 console.error('Failed to load NiFi servers:', response.status);
-                const serverSelect = document.getElementById('nifi-server-select');
-                serverSelect.innerHTML = '<option value="">Error loading servers</option>';
+                this.updateServerSelectors([]);
             }
         } catch (error) {
             console.error('Error loading NiFi servers:', error);
-            const serverSelect = document.getElementById('nifi-server-select');
-            serverSelect.innerHTML = '<option value="">Error loading servers</option>';
+            this.updateServerSelectors([]);
+        }
+    }
+
+    async changeNiFiServer(serverId) {
+        try {
+            console.log(`Changing NiFi server to: ${serverId}`);
+            
+            // Update both selectors to keep them in sync
+            const settingsSelect = document.getElementById('nifi-server-select');
+            const headerSelect = document.getElementById('nifi-server-select-header');
+            
+            if (settingsSelect) settingsSelect.value = serverId;
+            if (headerSelect) headerSelect.value = serverId;
+            
+            // Store the selection
+            localStorage.setItem('nifi_chat_selected_server', serverId);
+            
+            // Check the health of the new server
+            await this.checkNiFiServerHealth(serverId);
+            
+        } catch (error) {
+            console.error('Error changing NiFi server:', error);
+        }
+    }
+
+    async checkNiFiServerHealth(serverId) {
+        try {
+            this.updateNiFiConnectionStatus('checking');
+            
+            const response = await fetch(`/api/settings/nifi-server-health/${serverId}`);
+            if (response.ok) {
+                const healthData = await response.json();
+                
+                if (healthData.status === 'healthy') {
+                    this.updateNiFiConnectionStatus('healthy');
+                } else {
+                    this.updateNiFiConnectionStatus('unhealthy');
+                }
+            } else {
+                this.updateNiFiConnectionStatus('unhealthy');
+            }
+        } catch (error) {
+            console.error('Error checking NiFi server health:', error);
+            this.updateNiFiConnectionStatus('unhealthy');
+        }
+    }
+
+    updateServerSelectors(servers) {
+        const headerSelect = document.getElementById('nifi-server-select-header');
+        
+        if (headerSelect) {
+            headerSelect.innerHTML = '';
+            if (servers && servers.length > 0) {
+                servers.forEach(server => {
+                    const option = document.createElement('option');
+                    option.value = server.id;
+                    option.textContent = server.name;
+                    headerSelect.appendChild(option);
+                });
+            } else {
+                headerSelect.innerHTML = '<option value="">No servers available</option>';
+            }
         }
     }
     
@@ -1309,16 +1407,7 @@ class NiFiChatApp {
         }
     }
     
-    closeSettingsPanel() {
-        const settingsPanel = document.getElementById('settings-panel');
-        if (settingsPanel) {
-            settingsPanel.classList.remove('show');
-            setTimeout(() => {
-                settingsPanel.style.display = 'none';
-                settingsPanel.style.visibility = 'hidden';
-            }, 300);
-        }
-    }
+    // Settings panel removed
     
     copyConversation() {
         const messages = document.querySelectorAll('.message');

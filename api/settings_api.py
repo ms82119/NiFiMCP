@@ -176,3 +176,55 @@ async def get_config():
     except Exception as e:
         logger.error(f"Error getting config: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/nifi-server-health/{server_id}")
+async def check_nifi_server_health(server_id: str):
+    """Check the health of a specific NiFi server by attempting to connect and get process groups."""
+    try:
+        from nifi_mcp_server.nifi_client import NiFiClient
+        
+        # Get server configuration
+        server_config = settings.get_nifi_server_config(server_id)
+        if not server_config:
+            raise HTTPException(status_code=404, detail=f"Server {server_id} not found")
+        
+        # Extract connection details
+        # Support multiple config key variants for the NiFi API URL
+        base_url = (
+            server_config.get('base_url')
+            or server_config.get('api_url')
+            or server_config.get('url')
+        )
+        username = server_config.get('username')
+        password = server_config.get('password')
+        tls_verify = server_config.get('tls_verify', True)
+        
+        if not base_url:
+            raise HTTPException(status_code=400, detail="Server base_url not configured")
+        
+        # Create NiFi client and test connection
+        nifi_client = NiFiClient(base_url, username, password, tls_verify)
+        
+        try:
+            # Try to authenticate and get process groups (root level)
+            await nifi_client.authenticate()
+            await nifi_client.get_process_groups("root")
+            
+            return {
+                "server_id": server_id,
+                "status": "healthy",
+                "message": "Successfully connected and retrieved data"
+            }
+            
+        except Exception as nifi_error:
+            logger.warning(f"NiFi server {server_id} health check failed: {nifi_error}")
+            return {
+                "server_id": server_id,
+                "status": "unhealthy",
+                "message": f"Connection failed: {str(nifi_error)}"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error checking NiFi server health: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

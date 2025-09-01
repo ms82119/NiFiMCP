@@ -35,7 +35,7 @@ class ThemeManager {
     updateThemeIcon() {
         const themeIcon = document.querySelector('.theme-icon');
         if (themeIcon) {
-            themeIcon.textContent = this.currentTheme === 'light' ? '🌙' : '☀️';
+            themeIcon.textContent = this.currentTheme === 'light' ? '☀️' : '🌙';
         }
     }
     

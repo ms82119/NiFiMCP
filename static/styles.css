@@ -313,6 +313,106 @@ body {
     50% { opacity: 0.5; }
 }
 
+/* NiFi server selector and enhanced status */
+.nifi-server-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.server-label {
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.8);
+    white-space: nowrap;
+}
+
+.server-select {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: white;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.8rem;
+    min-width: 80px;
+    width: auto;
+}
+
+/* Ensure extra space so selected name isn't clipped by native arrow */
+#model-select-header {
+    padding-right: 1.75rem;
+}
+
+.server-select:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    filter: grayscale(35%);
+}
+
+.server-select:focus {
+    outline: none;
+    border-color: rgba(255, 255, 255, 0.5);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1);
+}
+
+.server-select option {
+    background: #1e293b;
+    color: white;
+}
+
+/* Model selector shares same look */
+.model-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.connection-status {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.8rem;
+}
+
+.connection-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.connection-indicator.unhealthy {
+    background-color: #f59e0b;
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
+}
+
+/* Execution settings in header */
+.exec-settings {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.exec-item {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.exec-item.disabled {
+    opacity: 0.6;
+}
+
+.exec-number {
+    width: 80px;
+}
+
 /* Main Content */
 .main-content {
     flex: 1;
