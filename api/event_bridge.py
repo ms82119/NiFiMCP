@@ -153,10 +153,14 @@ class EventBridge:
             response_content = event_data.get("response_content")
             is_status_report = event_data.get("is_status_report", False)
             
+            # Add detailed logging for debugging
+            self.bound_logger.debug(f"LLM_COMPLETE event: content_length={len(response_content) if response_content else 0}, is_status_report={is_status_report}")
+            
             # Check if this is a final LLM response with content
             if response_content and not is_status_report:
                 # This is the final assistant response - send as workflow_complete
                 # But NOT for status reports (those are handled separately)
+                self.bound_logger.info(f"Emitting final LLM response as workflow_complete: {len(response_content)} chars")
                 return {
                     "type": "workflow_complete",
                     "request_id": user_request_id,
@@ -178,17 +182,31 @@ class EventBridge:
                     "timestamp": str(event.id)
                 }
             elif response_content and is_status_report:
-                # This is a status report - send as a status update, not workflow completion
+                # This is a status report - send in the same shape the UI renders final responses
+                self.bound_logger.info(f"Emitting status report as workflow_complete: {len(response_content)} chars")
                 return {
-                    "type": "workflow_status",
+                    "type": "workflow_complete",
                     "request_id": user_request_id,
-                    "status": "status_report",
-                    "message": f"Status Report: {tokens_in:,} in, {tokens_out:,} out",
-                    "data": event_data,
+                    "result": {
+                        "content": response_content,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "tool_calls": tool_calls,
+                        "metadata": {
+                            "token_count_in": tokens_in,
+                            "token_count_out": tokens_out,
+                            "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                            "loop_count": event_data.get("loop_count", 0),
+                            "is_status_report": True,
+                            "model_name": event_data.get("model", "unknown"),
+                            "provider": event_data.get("provider", "unknown")
+                        }
+                    },
                     "timestamp": str(event.id)
                 }
             else:
                 # This is an intermediate LLM step - send as status update
+                self.bound_logger.debug(f"Emitting intermediate LLM step as workflow_status: {tokens_in} in, {tokens_out} out")
                 tool_summary = ""
                 if isinstance(tool_calls, list) and tool_calls:
                     names = [tc.get('function', {}).get('name', 'unknown') for tc in tool_calls]
@@ -311,11 +329,14 @@ class EventBridge:
             }
             
         elif event.event_type == EventTypes.STATUS_REPORT_COMPLETE:
+            # Provide a consistent payload that also includes content for UI rendering paths
+            status_content = event_data.get("status_content")
             return {
-                "type": "workflow_status",
+                "type": "workflow_complete" if status_content else "workflow_status",
                 "request_id": user_request_id,
-                "status": "processing",
-                "message": "📊 Status report complete",
+                "result": {"content": status_content} if status_content else None,
+                "status": "processing" if not status_content else None,
+                "message": "📊 Status report complete" if not status_content else None,
                 "timestamp": str(event.id)
             }
             

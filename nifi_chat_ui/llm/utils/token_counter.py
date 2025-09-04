@@ -152,7 +152,7 @@ class TokenCounter:
                 total_tokens += len(json.dumps(message["tool_calls"])) // 4
             
         # Calculate tokens for tool definitions
-        if tools:
+        if tools is not None:  # Changed from 'if tools:' to 'if tools is not None:'
             tools_str = ""
             try:
                 import json
@@ -191,5 +191,8 @@ class TokenCounter:
                     
             except Exception as e:
                 logger.warning(f"Error estimating token count for tool definitions: {e}")
+        else:
+            # Log when tools is None for debugging
+            logger.debug("No tools provided for token calculation")
 
         return total_tokens 

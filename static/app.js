@@ -366,6 +366,16 @@ class NiFiChatApp {
         console.log('Workflow completed:', data);
         
         const requestId = data.request_id;
+        // Guard against duplicate workflow_complete events causing double-save
+        if (!this.finalMessageCreated) {
+            this.finalMessageCreated = {};
+        }
+        if (this.finalMessageCreated[requestId]) {
+            console.log('Final message already created for request (early guard):', requestId);
+            return;
+        }
+        // Set immediately to avoid race if multiple events arrive close together
+        this.finalMessageCreated[requestId] = true;
         
         // Stop the live timer
         this.stopLiveTimer(requestId);
@@ -379,11 +389,7 @@ class NiFiChatApp {
             liveContainer.remove();
         }
         
-        // Check if we've already created a final message for this request
-        if (this.finalMessageCreated && this.finalMessageCreated[requestId]) {
-            console.log('Final message already created for request:', requestId);
-            return;
-        }
+        // (secondary check no longer needed due to early guard)
         
         if (data.result && data.result.content) {
             // Add the final content to aggregated content
@@ -402,11 +408,7 @@ class NiFiChatApp {
         // Create the final aggregated message (only once per request)
         this.createFinalAggregatedMessage(requestId, data.result);
         
-        // Mark that we've created the final message for this request
-        if (!this.finalMessageCreated) {
-            this.finalMessageCreated = {};
-        }
-        this.finalMessageCreated[requestId] = true;
+        // Flag already set at entry
         
         this.currentWorkflowId = null;
     }
@@ -487,9 +489,12 @@ class NiFiChatApp {
         }
         
         // Add elapsed time at the end (from aggregated status)
+        let elapsed = null;
+        let messagesInRequest = null;
         if (this.aggregatedStatus && this.aggregatedStatus[requestId]) {
             const status = this.aggregatedStatus[requestId];
-            const elapsed = Math.floor((Date.now() - status.start_time) / 1000);
+            elapsed = Math.floor((Date.now() - status.start_time) / 1000);
+            messagesInRequest = status.messages_in_request || null;
             stats.push(`⏱️ ${elapsed}s`);
         }
         
@@ -507,8 +512,12 @@ class NiFiChatApp {
         // Scroll to bottom
         this.scrollToBottom();
         
-        // Save the complete response to database for persistence
-        this.saveCompleteResponse(requestId, html, result);
+        // Save the complete response to database for persistence with enriched metadata
+        const enrichedMetadata = Object.assign({}, result?.metadata || {});
+        if (elapsed !== null) enrichedMetadata.elapsed_seconds = elapsed;
+        if (messagesInRequest !== null) enrichedMetadata.messages_in_request = messagesInRequest;
+        const mergedResult = { metadata: enrichedMetadata };
+        this.saveCompleteResponse(requestId, html, mergedResult);
         
         // Clean up aggregated data for this request
         if (this.aggregatedContent && this.aggregatedContent[requestId]) {
@@ -755,6 +764,36 @@ class NiFiChatApp {
             </div>
         `;
     }
+
+    buildExecutionSummaryFromMetadata(metadata) {
+        try {
+            const stats = [];
+            const model = metadata?.model_name && metadata.model_name !== 'unknown' ? metadata.model_name : null;
+            if (model) stats.push(`🤖 ${model}`);
+            const tIn = metadata?.token_count_in;
+            const tOut = metadata?.token_count_out;
+            if (typeof tIn === 'number' && typeof tOut === 'number') {
+                stats.push(`📊 ${tIn.toLocaleString()}/${tOut.toLocaleString()}`);
+            }
+            const toolsCount = metadata?.tool_calls_count;
+            if (typeof toolsCount === 'number') {
+                stats.push(`🔧 ${toolsCount} tools executed`);
+            }
+            const loops = metadata?.loop_count;
+            if (typeof loops === 'number') {
+                stats.push(`🔄 ${loops} iterations`);
+            }
+            // We don't have elapsed time on refresh; omit to avoid inconsistency
+            if (!stats.length) return '';
+            return `
+                <div class="execution-summary">
+                    <div class="summary-stats">${stats.join(' | ')}</div>
+                </div>
+            `;
+        } catch (_) {
+            return '';
+        }
+    }
     
     startLiveTimer(requestId) {
         // Stop any existing timer for this request
@@ -858,22 +897,29 @@ class NiFiChatApp {
                         content.includes('<br') || content.includes('<table') ||
                         content.includes('<p>') || content.includes('<h'));
         
-        // Check if this is an assistant message with tool results
-        if (role === 'assistant' && metadata && metadata.has_tool_results) {
-            contentDiv.innerHTML = this.formatToolResults(content, metadata);
-        } else if (hasHtml) {
-            // Content already contains HTML, clean it up and use it directly without re-formatting
-            const cleanedContent = this.cleanupHtmlContent(content);
-            contentDiv.innerHTML = cleanedContent;
+        if (hasHtml) {
+            contentDiv.innerHTML = content;
             
-            // Re-render Mermaid diagrams in the loaded content
-            if (this.markdownRenderer && cleanedContent.includes('mermaid-container')) {
-                setTimeout(() => {
-                    this.markdownRenderer.autoRenderMermaidDiagrams();
-                }, 100);
-            }
+            // Standardize/normalize execution-summary for assistant history messages
+            try {
+                if (role === 'assistant' && metadata) {
+                    const summaryHtml = this.buildExecutionSummaryFromMetadata(metadata);
+                    if (summaryHtml) {
+                        const existing = contentDiv.querySelector('.execution-summary .summary-stats');
+                        if (existing) {
+                            // Replace existing stats with standardized version
+                            existing.innerHTML = summaryHtml
+                                .match(/<div class=\"summary-stats\">([\s\S]*?)<\/div>/)?.[1] || existing.innerHTML;
+                        } else {
+                            const wrapper = document.createElement('div');
+                            wrapper.innerHTML = `<hr>${summaryHtml}`;
+                            contentDiv.appendChild(wrapper);
+                        }
+                    }
+                }
+            } catch (_) {}
         } else {
-            // Format content (basic markdown-like formatting)
+            // Format as markdown/HTML
             contentDiv.innerHTML = this.formatMessage(content);
         }
         

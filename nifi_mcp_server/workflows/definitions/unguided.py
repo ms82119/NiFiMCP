@@ -493,7 +493,21 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             
             # Get conversation history from database for status report (not golden context)
             # The golden context only has current session messages, but we want full history for status
-            conversation_history = execution_state.get("messages", [])
+            # CRITICAL FIX: Get messages for THIS SPECIFIC REQUEST ID, not all session messages
+            try:
+                from api.storage import storage
+                user_request_id = execution_state.get("user_request_id")
+                if user_request_id:
+                    conversation_history = storage.get_llm_conversation_history(request_id=user_request_id)
+                    self.bound_logger.info(f"Status report: Retrieved {len(conversation_history)} messages for request {user_request_id}")
+                else:
+                    self.bound_logger.warning("No user_request_id found in execution state")
+                    conversation_history = []
+            except Exception as e:
+                self.bound_logger.error(f"Failed to get conversation history from database: {e}")
+                # Fallback to execution state messages (less ideal but prevents crashes)
+                conversation_history = execution_state.get("messages", [])
+                self.bound_logger.warning(f"Using execution state messages as fallback: {len(conversation_history)} messages")
             
             if not conversation_history:
                 self.bound_logger.warning("No execution state messages found - this should not happen")
@@ -501,22 +515,21 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             
             # Filter messages and limit to recent context
             self.bound_logger.info(f"Status report: Processing {len(conversation_history)} messages from conversation history")
-            valid_messages = []
-            for msg in conversation_history[-15:]:  # Keep last 15 messages for context
-                # Include user, assistant, and tool messages for complete context
-                if msg.get("role") in ["user", "assistant", "tool"]:
-                    content = msg.get("content", "")
-                    # Accept messages with content or tool_calls (assistant messages might have empty content but tool_calls)
-                    if content or msg.get("tool_calls"):
-                        valid_messages.append({
-                            "role": msg["role"],
-                            "content": content,
-                            "tool_calls": msg.get("tool_calls"),  # Include tool_calls for context
-                            "tool_call_id": msg.get("tool_call_id")  # Include tool_call_id for tool messages
-                        })
-                        self.bound_logger.debug(f"Status report: Included message - role={msg['role']}, content_length={len(content)}, has_tool_calls={bool(msg.get('tool_calls'))}")
             
-            self.bound_logger.info(f"Status report: Found {len(valid_messages)} valid messages for context")
+            # EXCELLENT IDEA: For status reports, include ALL messages from the specific conversation
+            # Let smart pruning handle token limits intelligently instead of arbitrary message counting
+            valid_messages = conversation_history.copy()
+            self.bound_logger.info(f"Status report: Using all {len(valid_messages)} messages from conversation, smart pruning will handle token limits")
+
+            # Convert database format to LLM format before smart pruning
+            try:
+                from nifi_chat_ui.utils.history_utils import convert_db_messages_to_llm, summarize_and_validate
+            except Exception:
+                # Relative import fallback
+                from ...nifi_chat_ui.utils.history_utils import convert_db_messages_to_llm, summarize_and_validate  # type: ignore
+
+            valid_messages = convert_db_messages_to_llm(valid_messages, logger=self.bound_logger)
+            summarize_and_validate(valid_messages, logger=self.bound_logger, tag="status_preprune")
             
             # Log what we found for debugging
             if valid_messages:
@@ -614,6 +627,112 @@ Keep this concise but informative.
             await self.event_emitter.emit(EventTypes.STATUS_REPORT_ERROR, {
                 "error": str(e)
             }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
+
+    def _convert_database_to_llm_format(self, database_messages: List[Dict]) -> List[Dict]:
+        """
+        Convert database format messages to LLM format for smart pruning.
+        
+        Database messages have this structure:
+        {
+          "id": 765,
+          "request_id": "...",
+          "role": "assistant",
+          "content": "",
+          "metadata": {
+            "tool_calls": [...],
+            "format": "llm_conversation"
+          }
+        }
+        
+        LLM format expects:
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [...]
+        }
+        
+        Args:
+            database_messages: Messages in database format
+            
+        Returns:
+            Messages converted to LLM format
+        """
+        if not database_messages:
+            return []
+        
+        try:
+            llm_format_messages = []
+            
+            for i, message in enumerate(database_messages):
+                role = message.get("role")
+                
+                if role == "system":
+                    # System messages are already in correct format
+                    llm_format_messages.append({
+                        "role": "system",
+                        "content": message.get("content", "")
+                    })
+                    
+                elif role == "user":
+                    # User messages are already in correct format
+                    llm_format_messages.append({
+                        "role": "user",
+                        "content": message.get("content", "")
+                    })
+                    
+                elif role == "assistant":
+                    # Convert assistant messages
+                    llm_message = {
+                        "role": "assistant",
+                        "content": message.get("content", "")
+                    }
+                    
+                    # Check if tool_calls are in metadata
+                    metadata = message.get("metadata", {})
+                    if isinstance(metadata, dict) and "tool_calls" in metadata:
+                        tool_calls = metadata["tool_calls"]
+                        if tool_calls:
+                            llm_message["tool_calls"] = tool_calls
+                            self.bound_logger.debug(f"Converted assistant message {i}: {len(tool_calls)} tool calls")
+                    
+                    llm_format_messages.append(llm_message)
+                    
+                elif role == "tool":
+                    # Convert tool messages
+                    llm_message = {
+                        "role": "tool",
+                        "content": message.get("content", "")
+                    }
+                    
+                    # Check if tool_call_id is in metadata
+                    metadata = message.get("metadata", {})
+                    if isinstance(metadata, dict) and "tool_call_id" in metadata:
+                        llm_message["tool_call_id"] = metadata["tool_call_id"]
+                        self.bound_logger.debug(f"Converted tool message {i}: tool_call_id={metadata['tool_call_id']}")
+                    else:
+                        # Try to find tool_call_id in the message itself
+                        tool_call_id = message.get("tool_call_id")
+                        if tool_call_id:
+                            llm_message["tool_call_id"] = tool_call_id
+                            self.bound_logger.debug(f"Converted tool message {i}: tool_call_id={tool_call_id}")
+                        else:
+                            self.bound_logger.warning(f"Tool message {i} missing tool_call_id, skipping")
+                            continue
+                    
+                    llm_format_messages.append(llm_message)
+                    
+                else:
+                    # Unknown role - skip it
+                    self.bound_logger.warning(f"Skipping message {i} with unknown role: {role}")
+                    continue
+            
+            self.bound_logger.info(f"Database to LLM format conversion: {len(database_messages)} -> {len(llm_format_messages)} messages")
+            return llm_format_messages
+            
+        except Exception as e:
+            self.bound_logger.error(f"Error during database to LLM format conversion: {e}")
+            # Return original messages on error to avoid breaking the workflow
+            return database_messages
 
 
 def create_unguided_workflow() -> Any:

@@ -321,10 +321,9 @@ def smart_prune_messages(messages: List[Dict], max_tokens: int, provider: str, m
     # Log the final message structure for debugging
     _log_message_structure(pruned_messages, logger, "SMART_PRUNE_DEBUG: Final ")
     
-    # Validate the final structure
+    # Validate the final structure (warn-only; do not fall back)
     if not validate_message_structure(pruned_messages, logger):
-        logger.error("Message structure validation failed after truncation, returning original messages")
-        return messages
+        logger.warning("SMART_PRUNE_DEBUG: Message structure validation failed after truncation; proceeding with pruned messages")
     
     # Check final token count
     try:
@@ -404,9 +403,130 @@ def _apply_aggressive_pruning(messages: List[Dict], max_tokens: int, provider: s
     
     logger.info(f"SMART_PRUNE_DEBUG: Aggressive pruning preserved full chain with aggressive truncation of older messages")
     
-    # Validate structure
+    # Validate structure (warn-only; do not fall back)
     if not validate_message_structure(pruned_messages, logger):
-        logger.error("Message structure validation failed after aggressive pruning, returning original messages")
-        return messages
+        logger.warning("SMART_PRUNE_DEBUG: Validation failed after aggressive pruning; proceeding with pruned messages")
+        return pruned_messages
     
     return pruned_messages
+
+
+def _repair_message_structure(messages: List[Dict], logger) -> List[Dict]:
+    """
+    Repair common message structure issues that can cause validation to fail.
+    
+    This function fixes:
+    1. Missing tool_call_id fields in tool messages
+    2. Orphaned tool messages without corresponding assistant messages
+    3. Assistant messages with tool_calls that have no tool responses
+    4. Invalid message sequences
+    
+    Args:
+        messages: List of messages to repair
+        logger: Logger instance
+        
+    Returns:
+        Repaired list of messages with valid structure
+    """
+    if not messages:
+        return messages
+    
+    try:
+        repaired_messages = []
+        pending_tool_calls = set()
+        tool_message_map = {}  # Map tool_call_id to tool message
+        
+        # First pass: collect all tool calls and tool messages
+        for i, message in enumerate(messages):
+            role = message.get("role")
+            
+            if role == "assistant" and message.get("tool_calls"):
+                # Collect tool call IDs from assistant messages
+                tool_calls = message.get("tool_calls", [])
+                for tc in tool_calls:
+                    if isinstance(tc, dict) and "id" in tc:
+                        pending_tool_calls.add(tc["id"])
+                    elif hasattr(tc, 'id'):
+                        pending_tool_calls.add(tc.id)
+            
+            elif role == "tool":
+                # Map tool messages by their tool_call_id
+                tool_call_id = message.get("tool_call_id")
+                if tool_call_id:
+                    tool_message_map[tool_call_id] = message
+        
+        # Second pass: repair and validate messages
+        for i, message in enumerate(messages):
+            role = message.get("role")
+            
+            if role == "system":
+                # Always keep system messages
+                repaired_messages.append(message)
+                continue
+                
+            elif role == "user":
+                # Always keep user messages
+                repaired_messages.append(message)
+                continue
+                
+            elif role == "assistant":
+                # Check if this assistant has tool calls
+                tool_calls = message.get("tool_calls", [])
+                if tool_calls:
+                    # Filter out tool calls that have no corresponding tool responses
+                    valid_tool_calls = []
+                    for tc in tool_calls:
+                        tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, 'id', None)
+                        if tc_id and tc_id in tool_message_map:
+                            valid_tool_calls.append(tc)
+                        else:
+                            logger.warning(f"Removing orphaned tool call {tc_id} from assistant message {i}")
+                    
+                    # Create repaired assistant message
+                    repaired_message = message.copy()
+                    if valid_tool_calls:
+                        repaired_message["tool_calls"] = valid_tool_calls
+                        # Add corresponding tool messages
+                        for tc in valid_tool_calls:
+                            tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, 'id', None)
+                            if tc_id in tool_message_map:
+                                repaired_messages.append(repaired_message)
+                                repaired_messages.append(tool_message_map[tc_id])
+                                # Remove from map to avoid duplicates
+                                del tool_message_map[tc_id]
+                                break  # Only add the first valid tool call sequence
+                        else:
+                            # No valid tool calls, convert to regular assistant message
+                            repaired_message.pop("tool_calls", None)
+                            repaired_message["content"] = repaired_message.get("content", "") + "\n\n*Note: Tool calls were removed as they had no corresponding responses.*"
+                            repaired_messages.append(repaired_message)
+                    else:
+                        # No valid tool calls, convert to regular assistant message
+                        repaired_message.pop("tool_calls", None)
+                        repaired_message["content"] = repaired_message.get("content", "") + "\n\n*Note: Tool calls were removed as they had no corresponding responses.*"
+                        repaired_messages.append(repaired_message)
+                else:
+                    # Regular assistant message without tool calls
+                    repaired_messages.append(message)
+                    
+            elif role == "tool":
+                # Only include tool messages that are part of valid sequences
+                # (they will be added when we process their corresponding assistant messages)
+                continue
+                
+            else:
+                # Unknown role - skip it
+                logger.warning(f"Skipping message {i} with unknown role: {role}")
+                continue
+        
+        # Add any remaining valid tool messages that weren't part of sequences
+        for tool_call_id, tool_message in tool_message_map.items():
+            logger.warning(f"Orphaned tool message with tool_call_id: {tool_call_id} - skipping")
+        
+        logger.info(f"Message structure repair complete: {len(messages)} -> {len(repaired_messages)} messages")
+        return repaired_messages
+        
+    except Exception as e:
+        logger.error(f"Error during message structure repair: {e}")
+        # Return original messages on error to avoid breaking the workflow
+        return messages

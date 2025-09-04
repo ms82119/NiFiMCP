@@ -112,6 +112,17 @@ class ChatManager:
                     bound_logger.warning(f"Invalid tools parameter: {type(tools)}, defaulting to no tools")
                     tools = None
             
+            # IMPORTANT: Even if tools are None, we should still process the LLM response
+            # This ensures that text-only responses (like status reports) still get displayed
+            if tools is None:
+                bound_logger.info("Running in text-only mode (no tools available)")
+                # Add a note about text-only mode
+                text_only_note = "\n\n**ℹ️ Text-Only Mode**: Running without tool support. I can provide guidance and explanations, but cannot execute NiFi operations directly."
+                system_prompt += text_only_note
+                
+                # Preserve historical tool messages and assistant.tool_calls; only omit the top-level tools parameter
+                bound_logger.info("Preserving historical tool messages and assistant.tool_calls; only omitting top-level tools parameter")
+            
             # Send message to provider, always pass model_name
             response = provider_instance.send_message(
                 messages, system_prompt, model_name, tools, user_request_id, action_id

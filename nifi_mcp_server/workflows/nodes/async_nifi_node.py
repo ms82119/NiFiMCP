@@ -351,7 +351,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         execution_state["messages"].append(message)
         
         # Add to golden context (this now persists to session state)
-        self.golden_context_manager.add_message_to_golden_context(message)
+        # self.golden_context_manager.add_message_to_golden_context(message) # This line was removed
         
         # Emit message added event
         await emit_message_added(workflow_id, step_id, {
@@ -448,6 +448,10 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             return messages
         except Exception as e:
             self.bound_logger.error(f"Error applying smart pruning: {e}")
+            # Don't fail the entire workflow due to pruning errors
+            # Return original messages and continue execution
+            # This ensures the LLM can still process the conversation even if pruning fails
+            self.bound_logger.warning("Smart pruning failed, continuing with original messages to ensure workflow execution")
             return messages
     
     def prepare_tools(self, execution_state: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
