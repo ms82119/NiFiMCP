@@ -39,8 +39,12 @@ class NiFiChatApp {
             temp.style.font = window.getComputedStyle(selectEl).font;
             temp.textContent = selectEl.options[selectEl.selectedIndex]?.text || '';
             document.body.appendChild(temp);
-            const padding = 32; // extra space for native arrow to avoid clipping
-            selectEl.style.width = Math.max(80, temp.offsetWidth + padding) + 'px';
+            const padding = 96; // Chrome needs more headroom for the native arrow and padding
+            // Give Chrome a larger minimum so text isn't clipped
+            const targetWidth = Math.max(150, temp.offsetWidth + padding);
+            selectEl.style.width = targetWidth + 'px';
+            // Also set minWidth so it won't shrink smaller than computed size
+            selectEl.style.minWidth = targetWidth + 'px';
             document.body.removeChild(temp);
         } catch (_) {}
     }
@@ -107,21 +111,12 @@ class NiFiChatApp {
             });
         }
 
-        // Auto-prune toggles tokens enable state
-        const autoPruneCheckbox = document.getElementById('auto-prune-history');
+        // Tokens select: adjust width to fit content and treat "No limit" as auto-prune off
         const tokensSelect = document.getElementById('max-tokens-limit');
-        const tokensWrapper = tokensSelect ? tokensSelect.closest('.exec-item') : null;
-        if (autoPruneCheckbox && tokensSelect) {
-            const syncTokensDisabled = () => {
-                const disabled = !autoPruneCheckbox.checked;
-                tokensSelect.disabled = disabled;
-                if (tokensWrapper) {
-                    tokensWrapper.classList.toggle('disabled', disabled);
-                }
-            };
-            autoPruneCheckbox.addEventListener('change', syncTokensDisabled);
-            // initialize on load
-            syncTokensDisabled();
+        if (tokensSelect) {
+            const fit = () => this.fitSelectToContent(tokensSelect);
+            tokensSelect.addEventListener('change', fit);
+            fit();
         }
         
         // Settings panel NiFi selector removed; header handles changes
@@ -288,9 +283,11 @@ class NiFiChatApp {
             const serverSelect = document.getElementById('nifi-server-select-header');
             const workflowSelect = document.getElementById('workflow-select');
             
-            // Get smart purging settings
-            const autoPruneHistory = document.getElementById('auto-prune-history').checked;
-            const maxTokensLimit = parseInt(document.getElementById('max-tokens-limit').value);
+            // Get smart purging settings (No limit => autoPrune false and omit limit)
+            const tokensSelectEl = document.getElementById('max-tokens-limit');
+            const selectedTokens = parseInt(tokensSelectEl.value);
+            const autoPruneHistory = selectedTokens !== 0; // if 0 => no limit => don't prune
+            const maxTokensLimit = selectedTokens === 0 ? null : selectedTokens;
             const maxActions = parseInt(document.getElementById('max-actions').value);
             
             let provider = 'openai';
@@ -370,10 +367,18 @@ class NiFiChatApp {
         if (!this.finalMessageCreated) {
             this.finalMessageCreated = {};
         }
-        if (this.finalMessageCreated[requestId]) {
+        
+        // Only process if we haven't created a final message yet, OR if this event has complete metadata
+        const hasCompleteMetadata = data.result?.metadata && 
+            data.result.metadata.model_name && 
+            data.result.metadata.model_name !== 'unknown' &&
+            data.result.metadata.token_count_in > 0;
+            
+        if (this.finalMessageCreated[requestId] && !hasCompleteMetadata) {
             console.log('Final message already created for request (early guard):', requestId);
             return;
         }
+        
         // Set immediately to avoid race if multiple events arrive close together
         this.finalMessageCreated[requestId] = true;
         
@@ -473,10 +478,7 @@ class NiFiChatApp {
             stats.push(`📊 ${result.metadata.token_count_in.toLocaleString()}/${result.metadata.token_count_out.toLocaleString()}`);
         }
         
-        // Add tool calls count from workflow completion
-        if (result.metadata && result.metadata.tool_calls_count) {
-            stats.push(`🔧 ${result.metadata.tool_calls_count} tools executed`);
-        }
+        // Tool calls count removed from summary stats as requested
         
         // Add iteration count from workflow completion
         if (result.metadata && result.metadata.loop_count) {
@@ -630,9 +632,14 @@ class NiFiChatApp {
             if (data.message.includes('LLM step:')) {
                 stepLine = `🤖 ${data.message}`;
             } else if (data.message.includes('Executing:')) {
-                stepLine = `🔧 ${data.message}`;
+                // Emphasize single-word tool name
+                stepLine = `🔧 ${data.message.replace(/Executing:\s*(\w+)/, (m, tool) => {
+                    return 'Executing: <span class="tool-chip">' + tool + '</span>';
+                })}`;
             } else if (data.message.includes('Tool Completed:')) {
-                stepLine = `✅ ${data.message}`;
+                stepLine = `✅ ${data.message.replace(/Tool Completed:\s*(\w+)/, (m, tool) => {
+                    return 'Tool Completed: <span class="tool-chip tool-chip-success">' + tool + '</span>';
+                })}`;
             }
             // Workflow start message gets no icon
             
@@ -768,22 +775,38 @@ class NiFiChatApp {
     buildExecutionSummaryFromMetadata(metadata) {
         try {
             const stats = [];
+            
+            // Add model name if available
             const model = metadata?.model_name && metadata.model_name !== 'unknown' ? metadata.model_name : null;
             if (model) stats.push(`🤖 ${model}`);
+            
+            // Add token counts
             const tIn = metadata?.token_count_in;
             const tOut = metadata?.token_count_out;
             if (typeof tIn === 'number' && typeof tOut === 'number') {
                 stats.push(`📊 ${tIn.toLocaleString()}/${tOut.toLocaleString()}`);
             }
-            const toolsCount = metadata?.tool_calls_count;
-            if (typeof toolsCount === 'number') {
-                stats.push(`🔧 ${toolsCount} tools executed`);
-            }
+            
+            // Tool calls count removed from summary stats as requested
+            
+            // Add iteration count
             const loops = metadata?.loop_count;
             if (typeof loops === 'number') {
                 stats.push(`🔄 ${loops} iterations`);
             }
-            // We don't have elapsed time on refresh; omit to avoid inconsistency
+            
+            // Add message count if available (from enriched metadata)
+            const messagesInRequest = metadata?.messages_in_request;
+            if (typeof messagesInRequest === 'number') {
+                stats.push(`💬 ${messagesInRequest} msgs`);
+            }
+            
+            // Add elapsed time if available (from enriched metadata)
+            const elapsed = metadata?.elapsed_seconds;
+            if (typeof elapsed === 'number') {
+                stats.push(`⏱️ ${elapsed}s`);
+            }
+            
             if (!stats.length) return '';
             return `
                 <div class="execution-summary">
@@ -952,8 +975,19 @@ class NiFiChatApp {
         // Apply styling to Request and Action IDs in the message
         let formattedContent = content
             .replace(/\(Req: ([^)]+)\)/g, '<span class="request-id">Req: $1</span>')
-            .replace(/\(Act: ([^)]+)\)/g, '<span class="action-id">Act: $1</span>')
-            .replace(/`([^`]+)`/g, '<code>$1</code>');
+            .replace(/\(Act: ([^)]+)\)/g, '<span class="action-id">Act: $1</span>');
+        
+        // Handle tool name formatting for Executing and Tool Completed messages
+        if (formattedContent.includes('🔧 Executing:')) {
+            formattedContent = formattedContent.replace(/🔧 Executing: `([^`]+)`/g, '🔧 Executing: <span class="tool-chip">$1</span>');
+        }
+        
+        if (formattedContent.includes('✅ Tool Completed:')) {
+            formattedContent = formattedContent.replace(/✅ Tool Completed: `([^`]+)`/g, '✅ Tool Completed: <span class="tool-chip tool-chip-success">$1</span>');
+        }
+        
+        // Convert remaining backticks to code tags (for other content like args)
+        formattedContent = formattedContent.replace(/`([^`]+)`/g, '<code>$1</code>');
         
         // Only add br tags if content doesn't already contain HTML
         if (!formattedContent.includes('<') || !formattedContent.includes('>')) {

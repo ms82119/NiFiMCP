@@ -6,6 +6,7 @@ using async nodes with real-time event emission for UI updates.
 """
 
 import json
+import time
 import uuid
 import sys
 import os
@@ -145,7 +146,9 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 "workflow_id": "unguided",
                 "step_id": "async_initialize_execution",
                 "auto_prune_history": prep_res.get("auto_prune_history", True),  # Add auto-prune setting
-                "max_tokens_limit": prep_res.get("max_tokens_limit", 16000)  # Add max tokens limit setting
+                "max_tokens_limit": prep_res.get("max_tokens_limit", 16000),  # Add max tokens limit setting
+                "start_time": time.time(),  # Track start time for elapsed seconds calculation
+                "messages_in_request": len(initial_messages) if initial_messages else 0  # Track message count
             }
             
             # Apply smart pruning to initial context if auto-prune is enabled
@@ -610,7 +613,16 @@ Keep this concise but informative.
                     "loop_count": execution_state.get("loop_count", 0),
                     "provider": execution_state.get("provider", "unknown"),
                     "model": execution_state.get("model_name", "unknown"),
-                    "is_status_report": True  # Flag to identify this as a status report
+                    "model_name": execution_state.get("model_name", "unknown"),  # Add explicit model_name field
+                    "is_status_report": True,  # Flag to identify this as a status report
+                    # Include cumulative metadata for proper summary stats
+                    "total_tokens_in": execution_state.get("request_tokens_in", 0) + status_response.get("token_count_in", 0),
+                    "total_tokens_out": execution_state.get("request_tokens_out", 0) + status_response.get("token_count_out", 0),
+                    "tool_calls_executed": execution_state.get("tool_calls_executed", 0),
+                    "executed_tools": execution_state.get("executed_tools", []),
+                    # Add message count and elapsed time for status reports
+                    "messages_in_request": execution_state.get("messages_in_request", 0),
+                    "elapsed_seconds": int(time.time() - execution_state.get("start_time", time.time()))
                 }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
                 
                 # Mark that we've emitted a status report to prevent duplicate workflow completion

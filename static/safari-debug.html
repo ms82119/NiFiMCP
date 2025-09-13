@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Safari Theme Debug</title>
+    <link rel="stylesheet" href="/static/styles.css?v=2025-08-31-2">
+    <link rel="stylesheet" href="/static/themes.css?v=2025-08-31-1">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        .debug-container {
+            max-width: 1000px;
+            margin: 2rem auto;
+            padding: 2rem;
+        }
+        
+        .debug-section {
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+        }
+        
+        .debug-section h3 {
+            margin-top: 0;
+            color: var(--text-primary);
+        }
+        
+        .test-button {
+            background: var(--primary-gradient);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            margin-right: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .test-message {
+            background: var(--primary-gradient);
+            color: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin: 1rem 0;
+        }
+        
+        .debug-info {
+            background: var(--bg-tertiary);
+            padding: 1rem;
+            border-radius: 0.5rem;
+            font-family: monospace;
+            font-size: 0.9rem;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .color-swatch {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            margin-right: 0.5rem;
+            vertical-align: middle;
+        }
+        
+        .theme-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .theme-card {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            padding: 1rem;
+            text-align: center;
+        }
+        
+        .theme-card h4 {
+            margin-top: 0;
+            color: var(--text-primary);
+        }
+        
+        .theme-card button {
+            background: var(--primary-gradient);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.25rem;
+            cursor: pointer;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="debug-container">
+        <h1>🔍 Safari Theme Debug Tool</h1>
+        
+        <div class="debug-section">
+            <h3>Browser Detection</h3>
+            <div class="debug-info" id="browser-info">
+                Loading browser information...
+            </div>
+        </div>
+        
+        <div class="debug-section">
+            <h3>Current Theme State</h3>
+            <div class="debug-info" id="theme-state">
+                Loading theme state...
+            </div>
+        </div>
+        
+        <div class="debug-section">
+            <h3>CSS Variables Debug</h3>
+            <div class="debug-info" id="css-vars">
+                Loading CSS variables...
+            </div>
+        </div>
+        
+        <div class="debug-section">
+            <h3>Theme Test Grid</h3>
+            <p>Click any theme button to test theme switching:</p>
+            <div class="theme-grid">
+                <div class="theme-card">
+                    <h4>Modern Blue</h4>
+                    <button onclick="testTheme('modern-blue')">Apply</button>
+                </div>
+                <div class="theme-card">
+                    <h4>Clean Green</h4>
+                    <button onclick="testTheme('clean-green')">Apply</button>
+                </div>
+                <div class="theme-card">
+                    <h4>Professional Gray</h4>
+                    <button onclick="testTheme('professional-gray')">Apply</button>
+                </div>
+                <div class="theme-card">
+                    <h4>Warm Orange</h4>
+                    <button onclick="testTheme('warm-orange')">Apply</button>
+                </div>
+                <div class="theme-card">
+                    <h4>Minimalist</h4>
+                    <button onclick="testTheme('minimalist')">Apply</button>
+                </div>
+                <div class="theme-card">
+                    <h4>Dark Purple</h4>
+                    <button onclick="testTheme('dark-purple')">Apply</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="debug-section">
+            <h3>Mode Toggle Test</h3>
+            <p>Current mode: <span id="current-mode">light</span></p>
+            <button class="test-button" onclick="toggleMode()">Toggle Light/Dark Mode</button>
+        </div>
+        
+        <div class="debug-section">
+            <h3>Visual Test Elements</h3>
+            <p>These elements should change color when you switch themes:</p>
+            <button class="test-button">Test Button</button>
+            <div class="test-message">Test Message with Gradient Background</div>
+        </div>
+        
+        <div class="debug-section">
+            <h3>Force Refresh Test</h3>
+            <p>If themes aren't working, try these force refresh methods:</p>
+            <button class="test-button" onclick="forceRefresh1()">Force Refresh Method 1</button>
+            <button class="test-button" onclick="forceRefresh2()">Force Refresh Method 2</button>
+            <button class="test-button" onclick="forceRefresh3()">Force Refresh Method 3</button>
+        </div>
+    </div>
+
+    <script src="/static/js/safari-theme-fix.js"></script>
+    <script>
+        // Browser detection
+        function getBrowserInfo() {
+            const userAgent = navigator.userAgent;
+            const isSafari = /^((?!chrome|android).)*safari/i.test(userAgent);
+            const isChrome = /chrome/i.test(userAgent);
+            const isFirefox = /firefox/i.test(userAgent);
+            
+            let browser = 'Unknown';
+            if (isSafari) browser = 'Safari';
+            else if (isChrome) browser = 'Chrome';
+            else if (isFirefox) browser = 'Firefox';
+            
+            return {
+                browser,
+                userAgent,
+                isSafari,
+                supportsCSSVariables: CSS.supports('color', 'var(--test)'),
+                supportsWebkitGradients: CSS.supports('background', '-webkit-linear-gradient(45deg, red, blue)')
+            };
+        }
+        
+        // Display browser info
+        const browserInfo = getBrowserInfo();
+        document.getElementById('browser-info').innerHTML = `
+Browser: ${browserInfo.browser}
+Safari: ${browserInfo.isSafari}
+CSS Variables Support: ${browserInfo.supportsCSSVariables}
+Webkit Gradients Support: ${browserInfo.supportsWebkitGradients}
+User Agent: ${browserInfo.userAgent}
+        `;
+        
+        // Theme management
+        let currentPreset = 'modern-blue';
+        let currentMode = 'light';
+        let safariFix = null;
+        
+        if (browserInfo.isSafari) {
+            console.log('Safari detected, initializing Safari theme fix');
+            safariFix = new SafariThemeFix();
+        }
+        
+        function updateDebugInfo() {
+            const root = document.documentElement;
+            const computedStyle = getComputedStyle(root);
+            
+            // Theme state
+            const themeState = `
+HTML Attributes:
+data-theme: ${root.getAttribute('data-theme')}
+data-theme-preset: ${root.getAttribute('data-theme-preset')}
+
+CSS Classes:
+${root.className}
+
+Current Preset: ${currentPreset}
+Current Mode: ${currentMode}
+            `;
+            document.getElementById('theme-state').textContent = themeState;
+            
+            // CSS variables
+            const cssVars = [
+                '--primary-color',
+                '--primary-gradient',
+                '--bg-primary',
+                '--bg-secondary',
+                '--text-primary',
+                '--border-color'
+            ];
+            
+            let cssInfo = 'Current CSS Variables:\n';
+            cssVars.forEach(varName => {
+                const value = computedStyle.getPropertyValue(varName);
+                cssInfo += `${varName}: ${value}\n`;
+            });
+            
+            document.getElementById('css-vars').textContent = cssInfo;
+        }
+        
+        function testTheme(preset) {
+            console.log('Testing theme:', preset);
+            currentPreset = preset;
+            
+            if (browserInfo.isSafari && safariFix) {
+                console.log('Using Safari fix for theme application');
+                safariFix.applyTheme(preset, currentMode);
+            } else {
+                console.log('Using standard theme application');
+                document.documentElement.setAttribute('data-theme-preset', preset);
+                document.documentElement.setAttribute('data-theme', currentMode);
+            }
+            
+            setTimeout(updateDebugInfo, 100);
+        }
+        
+        function toggleMode() {
+            currentMode = currentMode === 'light' ? 'dark' : 'light';
+            document.getElementById('current-mode').textContent = currentMode;
+            
+            if (browserInfo.isSafari && safariFix) {
+                console.log('Using Safari fix for mode toggle');
+                safariFix.applyTheme(currentPreset, currentMode);
+            } else {
+                console.log('Using standard mode toggle');
+                document.documentElement.setAttribute('data-theme', currentMode);
+            }
+            
+            setTimeout(updateDebugInfo, 100);
+        }
+        
+        function forceRefresh1() {
+            console.log('Force refresh method 1: Reload page');
+            window.location.reload();
+        }
+        
+        function forceRefresh2() {
+            console.log('Force refresh method 2: Force style recalculation');
+            const root = document.documentElement;
+            root.style.transform = 'translateZ(0)';
+            root.offsetHeight;
+            root.style.transform = '';
+            updateDebugInfo();
+        }
+        
+        function forceRefresh3() {
+            console.log('Force refresh method 3: Reapply current theme');
+            if (browserInfo.isSafari && safariFix) {
+                safariFix.applyTheme(currentPreset, currentMode);
+            }
+            setTimeout(updateDebugInfo, 100);
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            updateDebugInfo();
+        });
+    </script>
+</body>
+</html>
+

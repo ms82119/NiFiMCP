@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NiFi Chat UI</title>
     <link rel="stylesheet" href="/static/styles.css?v=2025-08-31-2">
+    <link rel="stylesheet" href="/static/themes.css?v=2025-08-31-1">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -14,7 +15,60 @@
             <div class="header-content">
                 <h1 class="app-title">🤖 NiFi Chat UI</h1>
                 <div class="header-controls">
-                    <button id="theme-toggle" class="theme-toggle" title="Toggle theme">
+                    <!-- Theme Selector -->
+                    <div class="theme-selector">
+                        <button id="theme-selector-btn" class="theme-selector-btn" title="Select theme">
+                            <span class="theme-preview"></span>
+                            <span class="theme-name">Modern Blue</span>
+                            <span>▼</span>
+                        </button>
+                        <div id="theme-selector-dropdown" class="theme-selector-dropdown">
+                            <div class="theme-option" data-theme-preset="modern-blue">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Modern Blue</div>
+                                    <div class="theme-description">Clean and professional</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="professional-gray">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Professional Gray</div>
+                                    <div class="theme-description">Corporate and neutral</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="warm-orange">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Warm Orange</div>
+                                    <div class="theme-description">Energetic and friendly</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="clean-green">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Clean Green</div>
+                                    <div class="theme-description">Natural and calming</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="minimalist">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Minimalist</div>
+                                    <div class="theme-description">Simple and clean</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="dark-purple">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Dark Purple</div>
+                                    <div class="theme-description">Original purple theme</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark mode">
                         <span class="theme-icon">☀️</span>
                     </button>
 
@@ -26,12 +80,9 @@
                         </select>
                         <div class="exec-settings">
                             <label class="exec-item">
-                                <input type="checkbox" id="auto-prune-history" checked>
-                                <span>Auto-prune</span>
-                            </label>
-                            <label class="exec-item">
                                 <span class="server-label">Tokens:</span>
                                 <select id="max-tokens-limit" class="server-select">
+                                    <option value="0">No limit</option>
                                     <option value="4000">4,000</option>
                                     <option value="8000">8,000</option>
                                     <option value="16000" selected>16,000</option>
@@ -140,6 +191,7 @@
                                 <span class="btn-icon">⚙️</span>
                                 Workflow: <span id="current-workflow">unguided</span>
                             </button>
+                            
                             <button id="copy-conversation-btn-footer" class="btn btn-secondary btn-small">
                                 <span class="btn-icon">📋</span>
                                 Copy Chat
@@ -222,6 +274,7 @@
         </div>
     </div>
 
+    <script src="/static/js/safari-theme-fix.js"></script>
     <script type="module" src="/static/app.js"></script>
 </body>
 </html>

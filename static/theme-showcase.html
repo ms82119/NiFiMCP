@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NiFi Chat UI - Theme Showcase</title>
+    <link rel="stylesheet" href="/static/styles.css?v=2025-08-31-2">
+    <link rel="stylesheet" href="/static/themes.css?v=2025-08-31-1">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        .showcase-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .showcase-header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+        
+        .showcase-header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+        
+        .showcase-header p {
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+        }
+        
+        .theme-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+        
+        .theme-card {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 1rem;
+            overflow: hidden;
+            box-shadow: 0 4px 20px var(--shadow-color);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .theme-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 30px var(--shadow-color);
+        }
+        
+        .theme-header {
+            padding: 1.5rem;
+            background: var(--primary-gradient);
+            background: -webkit-linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            color: white;
+            text-align: center;
+        }
+        
+        .theme-header h3 {
+            margin: 0 0 0.5rem 0;
+            font-size: 1.5rem;
+        }
+        
+        .theme-header p {
+            margin: 0;
+            opacity: 0.9;
+            font-size: 0.9rem;
+        }
+        
+        .theme-preview {
+            padding: 1.5rem;
+        }
+        
+        .preview-section {
+            margin-bottom: 1.5rem;
+        }
+        
+        .preview-section:last-child {
+            margin-bottom: 0;
+        }
+        
+        .preview-section h4 {
+            margin: 0 0 0.75rem 0;
+            color: var(--text-primary);
+            font-size: 1rem;
+        }
+        
+        .preview-message {
+            padding: 0.75rem 1rem;
+            border-radius: 0.75rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+        
+        .preview-message.user {
+            background: var(--primary-gradient);
+            background: -webkit-linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            color: white;
+            margin-left: 2rem;
+        }
+        
+        .preview-message.assistant {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            margin-right: 2rem;
+        }
+        
+        .preview-button {
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            background: var(--primary-gradient);
+            background: -webkit-linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            font-size: 0.9rem;
+            cursor: pointer;
+            margin-right: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .preview-input {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 0.9rem;
+        }
+        
+        .theme-actions {
+            padding: 1rem 1.5rem;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 0.5rem;
+            justify-content: center;
+        }
+        
+        .theme-btn {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s ease;
+        }
+        
+        .theme-btn:hover {
+            background: var(--bg-tertiary);
+        }
+        
+        .theme-btn.primary {
+            background: var(--primary-gradient);
+            background: -webkit-linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            color: white;
+            border: none;
+        }
+        
+        .theme-btn.primary:hover {
+            opacity: 0.9;
+        }
+        
+        .controls {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            padding: 1rem;
+            box-shadow: 0 4px 20px var(--shadow-color);
+            z-index: 1000;
+        }
+        
+        .control-group {
+            margin-bottom: 1rem;
+        }
+        
+        .control-group:last-child {
+            margin-bottom: 0;
+        }
+        
+        .control-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+        
+        .control-group select {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+        
+        .back-link {
+            position: fixed;
+            top: 1rem;
+            left: 1rem;
+            background: #3b82f6; /* keep link stable regardless of preview */
+            color: white;
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-weight: 500;
+            box-shadow: 0 4px 20px var(--shadow-color);
+            z-index: 1000;
+        }
+        
+        .back-link:hover {
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+    <a href="/static/index.html" class="back-link">← Back to Chat</a>
+    
+    <div class="controls">
+        <div class="control-group">
+            <label for="theme-preset-select">Theme Preset:</label>
+            <select id="theme-preset-select">
+                <option value="modern-blue">Modern Blue</option>
+                <option value="professional-gray">Professional Gray</option>
+                <option value="warm-orange">Warm Orange</option>
+                <option value="clean-green">Clean Green</option>
+                <option value="minimalist">Minimalist</option>
+                <option value="dark-purple">Dark Purple</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="theme-mode-select">Mode:</label>
+            <select id="theme-mode-select">
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="showcase-container">
+        <div class="showcase-header">
+            <h1>🎨 Theme Showcase</h1>
+            <p>Compare all available themes and find your perfect style</p>
+        </div>
+
+        <div class="theme-grid">
+            <!-- Modern Blue Theme -->
+            <div class="theme-card" data-theme-preset="modern-blue">
+                <div class="theme-header">
+                    <h3>Modern Blue</h3>
+                    <p>Clean and professional</p>
+                </div>
+                <div class="theme-preview">
+                    <div class="preview-section">
+                        <h4>Chat Messages</h4>
+                        <div class="preview-message user">Hello, how can I help you today?</div>
+                        <div class="preview-message assistant">I'm here to assist you with your NiFi workflows!</div>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Buttons</h4>
+                        <button class="preview-button">Primary Action</button>
+                        <button class="preview-button" style="background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color);">Secondary</button>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Input Field</h4>
+                        <input type="text" class="preview-input" placeholder="Type your message here...">
+                    </div>
+                </div>
+                <div class="theme-actions">
+                    <button class="theme-btn primary" onclick="applyTheme('modern-blue')">Apply Theme</button>
+                    <button class="theme-btn" onclick="previewTheme('modern-blue')">Preview</button>
+                </div>
+            </div>
+
+            <!-- Professional Gray Theme -->
+            <div class="theme-card" data-theme-preset="professional-gray">
+                <div class="theme-header">
+                    <h3>Professional Gray</h3>
+                    <p>Corporate and neutral</p>
+                </div>
+                <div class="theme-preview">
+                    <div class="preview-section">
+                        <h4>Chat Messages</h4>
+                        <div class="preview-message user">Hello, how can I help you today?</div>
+                        <div class="preview-message assistant">I'm here to assist you with your NiFi workflows!</div>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Buttons</h4>
+                        <button class="preview-button">Primary Action</button>
+                        <button class="preview-button" style="background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color);">Secondary</button>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Input Field</h4>
+                        <input type="text" class="preview-input" placeholder="Type your message here...">
+                    </div>
+                </div>
+                <div class="theme-actions">
+                    <button class="theme-btn primary" onclick="applyTheme('professional-gray')">Apply Theme</button>
+                    <button class="theme-btn" onclick="previewTheme('professional-gray')">Preview</button>
+                </div>
+            </div>
+
+            <!-- Warm Orange Theme -->
+            <div class="theme-card" data-theme-preset="warm-orange">
+                <div class="theme-header">
+                    <h3>Warm Orange</h3>
+                    <p>Energetic and friendly</p>
+                </div>
+                <div class="theme-preview">
+                    <div class="preview-section">
+                        <h4>Chat Messages</h4>
+                        <div class="preview-message user">Hello, how can I help you today?</div>
+                        <div class="preview-message assistant">I'm here to assist you with your NiFi workflows!</div>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Buttons</h4>
+                        <button class="preview-button">Primary Action</button>
+                        <button class="preview-button" style="background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color);">Secondary</button>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Input Field</h4>
+                        <input type="text" class="preview-input" placeholder="Type your message here...">
+                    </div>
+                </div>
+                <div class="theme-actions">
+                    <button class="theme-btn primary" onclick="applyTheme('warm-orange')">Apply Theme</button>
+                    <button class="theme-btn" onclick="previewTheme('warm-orange')">Preview</button>
+                </div>
+            </div>
+
+            <!-- Clean Green Theme -->
+            <div class="theme-card" data-theme-preset="clean-green">
+                <div class="theme-header">
+                    <h3>Clean Green</h3>
+                    <p>Natural and calming</p>
+                </div>
+                <div class="theme-preview">
+                    <div class="preview-section">
+                        <h4>Chat Messages</h4>
+                        <div class="preview-message user">Hello, how can I help you today?</div>
+                        <div class="preview-message assistant">I'm here to assist you with your NiFi workflows!</div>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Buttons</h4>
+                        <button class="preview-button">Primary Action</button>
+                        <button class="preview-button" style="background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color);">Secondary</button>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Input Field</h4>
+                        <input type="text" class="preview-input" placeholder="Type your message here...">
+                    </div>
+                </div>
+                <div class="theme-actions">
+                    <button class="theme-btn primary" onclick="applyTheme('clean-green')">Apply Theme</button>
+                    <button class="theme-btn" onclick="previewTheme('clean-green')">Preview</button>
+                </div>
+            </div>
+
+            <!-- Minimalist Theme -->
+            <div class="theme-card" data-theme-preset="minimalist">
+                <div class="theme-header">
+                    <h3>Minimalist</h3>
+                    <p>Simple and clean</p>
+                </div>
+                <div class="theme-preview">
+                    <div class="preview-section">
+                        <h4>Chat Messages</h4>
+                        <div class="preview-message user">Hello, how can I help you today?</div>
+                        <div class="preview-message assistant">I'm here to assist you with your NiFi workflows!</div>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Buttons</h4>
+                        <button class="preview-button">Primary Action</button>
+                        <button class="preview-button" style="background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color);">Secondary</button>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Input Field</h4>
+                        <input type="text" class="preview-input" placeholder="Type your message here...">
+                    </div>
+                </div>
+                <div class="theme-actions">
+                    <button class="theme-btn primary" onclick="applyTheme('minimalist')">Apply Theme</button>
+                    <button class="theme-btn" onclick="previewTheme('minimalist')">Preview</button>
+                </div>
+            </div>
+
+            <!-- Dark Purple Theme -->
+            <div class="theme-card" data-theme-preset="dark-purple">
+                <div class="theme-header">
+                    <h3>Dark Purple</h3>
+                    <p>Original purple theme</p>
+                </div>
+                <div class="theme-preview">
+                    <div class="preview-section">
+                        <h4>Chat Messages</h4>
+                        <div class="preview-message user">Hello, how can I help you today?</div>
+                        <div class="preview-message assistant">I'm here to assist you with your NiFi workflows!</div>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Buttons</h4>
+                        <button class="preview-button">Primary Action</button>
+                        <button class="preview-button" style="background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color);">Secondary</button>
+                    </div>
+                    <div class="preview-section">
+                        <h4>Input Field</h4>
+                        <input type="text" class="preview-input" placeholder="Type your message here...">
+                    </div>
+                </div>
+                <div class="theme-actions">
+                    <button class="theme-btn primary" onclick="applyTheme('dark-purple')">Apply Theme</button>
+                    <button class="theme-btn" onclick="previewTheme('dark-purple')">Preview</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/safari-theme-fix.js"></script>
+    <script>
+        // Theme management
+        let currentPreset = 'modern-blue';
+        let currentMode = 'light';
+        let safariFix = null;
+        let isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+        
+        if (isSafari) {
+            console.log('Safari detected in showcase, initializing Safari theme fix');
+            safariFix = new SafariThemeFix();
+        }
+
+        function applyTheme(preset) {
+            currentPreset = preset;
+            
+            if (isSafari && safariFix) {
+                // Use Safari-specific theme application
+                safariFix.applyTheme(preset, currentMode);
+            } else {
+                // Standard theme application
+                document.documentElement.setAttribute('data-theme-preset', preset);
+                document.documentElement.setAttribute('data-theme', currentMode);
+            }
+            
+            localStorage.setItem('themePreset', preset);
+            localStorage.setItem('theme', currentMode);
+            
+            // Update controls
+            document.getElementById('theme-preset-select').value = preset;
+        }
+
+        function previewTheme(preset) {
+            if (isSafari && safariFix) {
+                // Use Safari-specific theme application
+                safariFix.applyTheme(preset, currentMode);
+            } else {
+                // Standard theme application
+                document.documentElement.setAttribute('data-theme-preset', preset);
+                document.documentElement.setAttribute('data-theme', currentMode);
+            }
+        }
+
+        // Control event listeners
+        document.getElementById('theme-preset-select').addEventListener('change', (e) => {
+            applyTheme(e.target.value);
+        });
+
+        document.getElementById('theme-mode-select').addEventListener('change', (e) => {
+            currentMode = e.target.value;
+            
+            if (isSafari && safariFix) {
+                // Use Safari-specific theme application
+                safariFix.applyTheme(currentPreset, currentMode);
+            } else {
+                // Standard theme application
+                document.documentElement.setAttribute('data-theme', currentMode);
+            }
+            
+            localStorage.setItem('theme', currentMode);
+        });
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedPreset = localStorage.getItem('themePreset') || 'modern-blue';
+            const savedMode = localStorage.getItem('theme') || 'light';
+            
+            currentPreset = savedPreset;
+            currentMode = savedMode;
+            
+            document.getElementById('theme-preset-select').value = savedPreset;
+            document.getElementById('theme-mode-select').value = savedMode;
+            
+            applyTheme(savedPreset);
+        });
+    </script>
+</body>
+</html>

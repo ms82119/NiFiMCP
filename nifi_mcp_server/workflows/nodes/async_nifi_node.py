@@ -162,7 +162,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             "provider": execution_state.get("provider", "unknown"),
             "model": execution_state.get("model_name", "unknown"),
             "model_name": execution_state.get("model_name", "unknown"),  # Explicit model name for UI
-            "messages_in_request": len([msg for msg in messages if msg.get("role") in ["user", "assistant", "tool"]]),  # Count non-system messages
+            "messages_in_request": len([msg for msg in messages if msg.get("role") in ["user", "assistant", "tool"]]) + 1,  # Count non-system messages + 1 for system message
             "tools_available": len(tools) if tools else 0,  # Count available tools
             "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
         }, user_request_id)
@@ -222,7 +222,10 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 "tokens_in": response_data.get("token_count_in", 0),
                 "tokens_out": response_data.get("token_count_out", 0),
                 "status": "success",
-                "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
+                "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
+                "provider": execution_state.get("provider", "unknown"),
+                "model": execution_state.get("model_name", "unknown"),
+                "model_name": execution_state.get("model_name", "unknown")  # Add explicit model_name field
             }, user_request_id)
             
             return response_data

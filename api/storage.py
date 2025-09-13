@@ -73,19 +73,31 @@ class ChatStorage:
         """Save a chat message to the database."""
         try:
             with sqlite3.connect(self.db_path) as conn:
-                # For assistant messages, check if we already have a UI conversation format message for this request
-                if role == "assistant":
+                # For assistant UI messages, upsert (merge) instead of early-return
+                if role == "assistant" and metadata and metadata.get("format") == "ui_conversation":
                     cursor = conn.execute(
-                        """SELECT id FROM messages 
-                           WHERE request_id = ? AND role = ? 
+                        """SELECT id, metadata FROM messages 
+                           WHERE request_id = ? AND role = 'assistant' 
                            AND json_extract(metadata, '$.format') = 'ui_conversation'
                            ORDER BY timestamp DESC LIMIT 1""",
-                        (request_id, role)
+                        (request_id,)
                     )
                     existing = cursor.fetchone()
-                    
                     if existing:
-                        self.logger.debug(f"UI conversation format assistant message already exists for request {request_id}")
+                        # Merge metadata and update content
+                        existing_id = existing[0]
+                        try:
+                            existing_meta = json.loads(existing[1]) if existing[1] else {}
+                        except Exception:
+                            existing_meta = {}
+                        merged_meta = existing_meta or {}
+                        merged_meta.update(metadata or {})
+                        conn.execute(
+                            """UPDATE messages SET content = ?, provider = ?, model_name = ?, nifi_server_id = ?, metadata = ?
+                               WHERE id = ?""",
+                            (content, provider, model_name, nifi_server_id, json.dumps(merged_meta), existing_id)
+                        )
+                        self.logger.debug(f"Updated UI assistant message for request {request_id}")
                         return
                 
                 metadata_json = json.dumps(metadata) if metadata else None

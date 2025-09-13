@@ -175,7 +175,7 @@ class EventBridge:
                             "tool_calls_count": len(tool_calls) if tool_calls else 0,
                             "loop_count": event_data.get("loop_count", 0),  # Include iteration count
                             "is_status_report": False,  # This is not a status report
-                            "model_name": event_data.get("model", "unknown"),  # Include model name for consistent display
+                            "model_name": event_data.get("model_name", event_data.get("model", "unknown")),  # Include model name for consistent display
                             "provider": event_data.get("provider", "unknown")  # Include provider for consistent display
                         }
                     },
@@ -184,22 +184,30 @@ class EventBridge:
             elif response_content and is_status_report:
                 # This is a status report - send in the same shape the UI renders final responses
                 self.bound_logger.info(f"Emitting status report as workflow_complete: {len(response_content)} chars")
+                
+                # Use cumulative token counts for status reports to match normal workflow completion
+                total_tokens_in = event_data.get("total_tokens_in", tokens_in)
+                total_tokens_out = event_data.get("total_tokens_out", tokens_out)
+                tool_calls_executed = event_data.get("tool_calls_executed", len(tool_calls) if tool_calls else 0)
+                
                 return {
                     "type": "workflow_complete",
                     "request_id": user_request_id,
                     "result": {
                         "content": response_content,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
+                        "tokens_in": total_tokens_in,
+                        "tokens_out": total_tokens_out,
                         "tool_calls": tool_calls,
                         "metadata": {
-                            "token_count_in": tokens_in,
-                            "token_count_out": tokens_out,
-                            "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                            "token_count_in": total_tokens_in,
+                            "token_count_out": total_tokens_out,
+                            "tool_calls_count": tool_calls_executed,
                             "loop_count": event_data.get("loop_count", 0),
                             "is_status_report": True,
-                            "model_name": event_data.get("model", "unknown"),
-                            "provider": event_data.get("provider", "unknown")
+                            "model_name": event_data.get("model_name", event_data.get("model", "unknown")),
+                            "provider": event_data.get("provider", "unknown"),
+                            "messages_in_request": event_data.get("messages_in_request", 0),
+                            "elapsed_seconds": event_data.get("elapsed_seconds", 0)
                         }
                     },
                     "timestamp": str(event.id)

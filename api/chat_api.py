@@ -231,6 +231,7 @@ async def execute_workflow(
         logger.info(f"=== BACKGROUND TASK STARTED for request {request_id} ===")
         logger.info(f"Starting workflow execution for request {request_id}")
         logger.info(f"Input parameters: user_input='{user_input[:50]}...', objective='{objective}', provider='{provider}', model='{model_name}', nifi_server='{nifi_server_id}'")
+        logger.info(f"DEBUG: provider='{provider}', model_name='{model_name}'")
         
         # Broadcast workflow start
         await manager.broadcast_json({
@@ -312,6 +313,7 @@ async def execute_workflow(
         
         # Execute workflow using the existing PocketFlow system
         logger.info(f"Executing workflow with shared state: {list(shared_state.keys())}")
+        logger.info(f"DEBUG: shared_state provider='{shared_state.get('provider')}', model_name='{shared_state.get('model_name')}'")
         logger.info(f"Conversation history: {len(messages_for_context)} messages")
         
         # Create async executor for the workflow
