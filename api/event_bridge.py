@@ -25,13 +25,19 @@ class EventBridge:
     def __init__(self):
         self.event_emitter = get_event_emitter()
         self.bound_logger = logger.bind(component="EventBridge")
+        self._started = False
         
     async def start(self):
         """Start the event bridge."""
+        if self._started:
+            self.bound_logger.warning("Event bridge already started, skipping")
+            return
+            
         self.bound_logger.info("Starting event bridge")
         
         # Register callback for PocketFlow events
         self.event_emitter.on(self._handle_pocketflow_event)
+        self._started = True
         
         self.bound_logger.info("Event bridge started - listening for PocketFlow events")
     
@@ -100,12 +106,19 @@ class EventBridge:
             }
             
         elif event.event_type == EventTypes.WORKFLOW_COMPLETE:
-            # Send workflow completion event to UI with cumulative data
+            # Send workflow completion event to UI with cumulative data and final content
+            final_content = event_data.get("final_content", None)
+            final_tokens_in = event_data.get("final_tokens_in", 0)
+            final_tokens_out = event_data.get("final_tokens_out", 0)
+            
+            # Determine if this includes a status report
+            is_status_report = final_content and "### 📋 Status Report" in final_content
+            
             return {
                 "type": "workflow_complete",
                 "request_id": user_request_id,
                 "result": {
-                    "content": None,  # No specific content for workflow completion
+                    "content": final_content,  # Include final content (status report or normal response)
                     "tokens_in": event_data.get("total_tokens_in", 0),  # Use cumulative total
                     "tokens_out": event_data.get("total_tokens_out", 0),  # Use cumulative total
                     "tool_calls": [],
@@ -114,9 +127,11 @@ class EventBridge:
                         "token_count_out": event_data.get("total_tokens_out", 0),  # Use cumulative total
                         "tool_calls_count": event_data.get("tool_calls_executed", 0),
                         "loop_count": event_data.get("loop_count", 0),
-                        "is_status_report": False,  # This is workflow completion, not status report
+                        "is_status_report": is_status_report,  # Determine based on content
                         "model_name": event_data.get("model_name", "unknown"),
-                        "provider": event_data.get("provider", "unknown")
+                        "provider": event_data.get("provider", "unknown"),
+                        "messages_in_request": event_data.get("messages_in_request", 0),
+                        "elapsed_seconds": event_data.get("elapsed_seconds", 0)
                     }
                 },
                 "timestamp": str(event.id)
@@ -156,29 +171,17 @@ class EventBridge:
             # Add detailed logging for debugging
             self.bound_logger.debug(f"LLM_COMPLETE event: content_length={len(response_content) if response_content else 0}, is_status_report={is_status_report}")
             
-            # Check if this is a final LLM response with content
+            # LLM_COMPLETE events are now only for intermediate responses
+            # Final responses are handled by WORKFLOW_COMPLETE events
             if response_content and not is_status_report:
-                # This is the final assistant response - send as workflow_complete
-                # But NOT for status reports (those are handled separately)
-                self.bound_logger.info(f"Emitting final LLM response as workflow_complete: {len(response_content)} chars")
+                # This is an intermediate LLM response - send as status update
+                self.bound_logger.debug(f"LLM response received, sending as status update: {len(response_content)} chars")
                 return {
-                    "type": "workflow_complete",
+                    "type": "workflow_status",
                     "request_id": user_request_id,
-                    "result": {
-                        "content": response_content,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "tool_calls": tool_calls,
-                        "metadata": {
-                            "token_count_in": tokens_in,
-                            "token_count_out": tokens_out,
-                            "tool_calls_count": len(tool_calls) if tool_calls else 0,
-                            "loop_count": event_data.get("loop_count", 0),  # Include iteration count
-                            "is_status_report": False,  # This is not a status report
-                            "model_name": event_data.get("model_name", event_data.get("model", "unknown")),  # Include model name for consistent display
-                            "provider": event_data.get("provider", "unknown")  # Include provider for consistent display
-                        }
-                    },
+                    "status": "processing",
+                    "message": f"LLM response received: {len(response_content)} chars",
+                    "data": event_data,
                     "timestamp": str(event.id)
                 }
             elif response_content and is_status_report:
@@ -327,26 +330,6 @@ class EventBridge:
                 "timestamp": str(event.id)
             }
             
-        elif event.event_type == EventTypes.STATUS_REPORT_START:
-            return {
-                "type": "workflow_status",
-                "request_id": user_request_id,
-                "status": "processing",
-                "message": "📊 Generating status report...",
-                "timestamp": str(event.id)
-            }
-            
-        elif event.event_type == EventTypes.STATUS_REPORT_COMPLETE:
-            # Provide a consistent payload that also includes content for UI rendering paths
-            status_content = event_data.get("status_content")
-            return {
-                "type": "workflow_complete" if status_content else "workflow_status",
-                "request_id": user_request_id,
-                "result": {"content": status_content} if status_content else None,
-                "status": "processing" if not status_content else None,
-                "message": "📊 Status report complete" if not status_content else None,
-                "timestamp": str(event.id)
-            }
             
         elif event.event_type == EventTypes.MESSAGE_ADDED:
             # This is for internal message tracking - don't send to UI

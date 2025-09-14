@@ -82,8 +82,8 @@ class MarkdownRenderer {
                         <div class="mermaid-header">
                             <span class="mermaid-title">📊 Flow Diagram</span>
                             <div class="mermaid-controls">
-                                <button class="mermaid-btn" onclick="window.app.markdownRenderer.renderMermaid('${diagramId}', \`${this.escapeHtml(code)}\`)">Re-render</button>
-                                <button class="mermaid-btn" onclick="window.app.markdownRenderer.exportMermaid('${diagramId}', \`${this.escapeHtml(code)}\`)">Export SVG</button>
+                                <button class="mermaid-btn" onclick="window.app.markdownRenderer.renderMermaid('${diagramId}', \`${code.replace(/`/g, '\\`')}\`)">Re-render</button>
+                                <button class="mermaid-btn" onclick="window.app.markdownRenderer.exportMermaid('${diagramId}', \`${code.replace(/`/g, '\\`')}\`)">Export SVG</button>
                             </div>
                         </div>
                         <div id="${diagramId}" class="mermaid-container" data-mermaid-code="${this.escapeHtml(code)}">
@@ -113,6 +113,12 @@ class MarkdownRenderer {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+    
+    unescapeHtml(text) {
+        const div = document.createElement('div');
+        div.innerHTML = text;
+        return div.textContent || div.innerText || '';
     }
     
     render(content) {
@@ -199,9 +205,10 @@ class MarkdownRenderer {
                     const loadingDiv = container.querySelector('.mermaid-loading');
                     
                     if (loadingDiv) {
-                        // Get the Mermaid code from the data attribute
-                        const mermaidCode = container.getAttribute('data-mermaid-code');
-                        if (mermaidCode) {
+                        // Get the Mermaid code from the data attribute and unescape it
+                        const escapedMermaidCode = container.getAttribute('data-mermaid-code');
+                        if (escapedMermaidCode) {
+                            const mermaidCode = this.unescapeHtml(escapedMermaidCode);
                             this.renderMermaid(container.id, mermaidCode);
                         }
                     }
@@ -211,30 +218,16 @@ class MarkdownRenderer {
     }
     
     cleanMermaidCode(code) {
-        // Remove HTML tags that might be in the code
+        // Minimal cleaning - just remove HTML tags and normalize whitespace
         let cleaned = code.replace(/<br\s*\/?>/gi, '\n');  // Replace <br> with newlines
         cleaned = cleaned.replace(/<[^>]*>/g, '');  // Remove any other HTML tags
         
-        // Fix common Mermaid syntax issues
-        cleaned = cleaned.replace(/&lt;/g, '<');  // Fix escaped <
-        cleaned = cleaned.replace(/&gt;/g, '>');  // Fix escaped >
-        cleaned = cleaned.replace(/&amp;/g, '&');  // Fix escaped &
+        // Fix HTML entities that might be in the code
+        cleaned = cleaned.replace(/&lt;/g, '<');
+        cleaned = cleaned.replace(/&gt;/g, '>');
+        cleaned = cleaned.replace(/&amp;/g, '&');
         
-        // Fix node IDs with parentheses - replace with underscores
-        cleaned = cleaned.replace(/\[([^\]]*\([^)]*\)[^\]]*)\]/g, (match, content) => {
-            // Replace parentheses with underscores in node content
-            const fixedContent = content.replace(/[()]/g, '_');
-            return `[${fixedContent}]`;
-        });
-        
-        // Fix node IDs with other problematic characters
-        cleaned = cleaned.replace(/\[([^\]]*[^\w\s\-_][^\]]*)\]/g, (match, content) => {
-            // Replace problematic characters with underscores
-            const fixedContent = content.replace(/[^\w\s\-_]/g, '_');
-            return `[${fixedContent}]`;
-        });
-        
-        // Remove extra whitespace and normalize line endings
+        // Just trim whitespace - don't modify the Mermaid syntax
         cleaned = cleaned.trim();
         
         return cleaned;
@@ -296,6 +289,24 @@ class MarkdownRenderer {
             console.error('Error exporting Mermaid diagram:', error);
             alert('Error exporting diagram: ' + error.message);
         }
+    }
+    
+    // Debug function to test Mermaid rendering
+    debugMermaidRendering() {
+        console.log('=== Mermaid Debug ===');
+        const mermaidBlocks = document.querySelectorAll('.markdown-mermaid-block');
+        mermaidBlocks.forEach((block, index) => {
+            console.log(`Block ${index + 1}:`);
+            const container = block.querySelector('.mermaid-container');
+            if (container) {
+                const escapedCode = container.getAttribute('data-mermaid-code');
+                console.log('  Escaped code:', escapedCode);
+                const unescapedCode = this.unescapeHtml(escapedCode);
+                console.log('  Unescaped code:', unescapedCode);
+                const cleanedCode = this.cleanMermaidCode(unescapedCode);
+                console.log('  Cleaned code:', cleanedCode);
+            }
+        });
     }
 }
 

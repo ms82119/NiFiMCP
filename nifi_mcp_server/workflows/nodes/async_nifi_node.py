@@ -428,7 +428,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 self.bound_logger.debug("No tools available for token calculation, using empty list")
             
             # Get max tokens limit
-            max_tokens = execution_state.get("max_tokens_limit", 16000)
+            max_tokens = execution_state.get("max_tokens_limit", 32000)
             
             # Log the pruning attempt details
             self.bound_logger.debug(f"Smart pruning attempt: {len(messages)} messages, max_tokens={max_tokens}, tools_count={len(tools)}")

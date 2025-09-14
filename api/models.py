@@ -19,7 +19,7 @@ class ChatMessage(BaseModel):
     selected_nifi_server_id: Optional[str] = Field(None, description="NiFi server ID to use")
     # Smart purging settings
     auto_prune_history: Optional[bool] = Field(True, description="Whether to automatically prune conversation history")
-    max_tokens_limit: Optional[int] = Field(16000, description="Maximum tokens limit for conversation context")
+    max_tokens_limit: Optional[int] = Field(32000, description="Maximum tokens limit for conversation context")
     max_loop_iterations: Optional[int] = Field(10, description="Maximum number of workflow iterations")
 
 

@@ -223,7 +223,7 @@ async def execute_workflow(
     model_name: str = "gpt-4o-mini",
     nifi_server_id: Optional[str] = None,
     auto_prune_history: bool = True,
-    max_tokens_limit: int = 16000,
+    max_tokens_limit: int = 32000,
     max_loop_iterations: int = 10
 ):
     """Execute workflow using existing PocketFlow workflow system."""

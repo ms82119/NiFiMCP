@@ -91,6 +91,7 @@ class NiFiChatApp {
         if (objectiveInput) {
             objectiveInput.addEventListener('input', () => {
                 this.autoResizeTextarea(objectiveInput);
+                this.updateObjectiveCharCount();
             });
         }
         
@@ -447,9 +448,8 @@ class NiFiChatApp {
             if (html) html += '<hr>';
             html += '<div class="aggregated-content">';
             this.aggregatedContent[requestId].forEach(content => {
-                // Clean completion phrases before formatting
-                const cleanedContent = this.cleanCompletionPhrases(content);
-                html += `<div class="content-part">${this.formatMessage(cleanedContent)}</div>`;
+                // Content is already cleaned when added to aggregatedContent, no need to clean again
+                html += `<div class="content-part">${this.formatMessage(content)}</div>`;
             });
             html += '</div>';
         }
@@ -1321,6 +1321,7 @@ class NiFiChatApp {
             const objectiveInput = document.getElementById('objective-input');
             if (objectiveInput) {
                 objectiveInput.value = savedObjective;
+                this.updateObjectiveCharCount(); // Initialize character count
             }
             
             // Initialize current workflow display
@@ -1523,8 +1524,36 @@ function closeErrorModal() {
 
 // Initialize the application when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
-    window.app = new NiFiChatApp();
+    if (!window.app) {
+        window.app = new NiFiChatApp();
+    }
+    
+    // Add global debug function for Mermaid
+    window.debugMermaid = () => {
+        if (window.app && window.app.markdownRenderer) {
+            window.app.markdownRenderer.debugMermaidRendering();
+        } else {
+            console.error('App or markdownRenderer not initialized yet');
+        }
+    };
 });
+
+// Also add it immediately if DOM is already loaded
+if (document.readyState === 'loading') {
+    // DOM is still loading, wait for DOMContentLoaded
+} else {
+    // DOM is already loaded, add the function now
+    if (!window.app) {
+        window.app = new NiFiChatApp();
+    }
+    window.debugMermaid = () => {
+        if (window.app && window.app.markdownRenderer) {
+            window.app.markdownRenderer.debugMermaidRendering();
+        } else {
+            console.error('App or markdownRenderer not initialized yet');
+        }
+    };
+}
 
 // Handle page visibility changes for connection management
 document.addEventListener('visibilitychange', () => {

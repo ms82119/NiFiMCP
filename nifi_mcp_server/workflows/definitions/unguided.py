@@ -105,7 +105,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             "max_loop_iterations": shared.get("max_loop_iterations", 10),
             "workflow_id": "unguided",
             "step_id": "async_initialize_execution",
-            "max_tokens_limit": shared.get("max_tokens_limit", 16000),
+            "max_tokens_limit": shared.get("max_tokens_limit", 32000),
             "auto_prune_history": shared.get("auto_prune_history", True)  # Pass through auto-prune setting
         }
         
@@ -146,7 +146,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 "workflow_id": "unguided",
                 "step_id": "async_initialize_execution",
                 "auto_prune_history": prep_res.get("auto_prune_history", True),  # Add auto-prune setting
-                "max_tokens_limit": prep_res.get("max_tokens_limit", 16000),  # Add max tokens limit setting
+                "max_tokens_limit": prep_res.get("max_tokens_limit", 32000),  # Add max tokens limit setting
                 "start_time": time.time(),  # Track start time for elapsed seconds calculation
                 "messages_in_request": len(initial_messages) if initial_messages else 0  # Track message count
             }
@@ -398,16 +398,29 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 task_complete = True
                 self.bound_logger.info("No tool calls requested, assuming task complete")
         
-        # Check if status report is needed (only if workflow completed normally, not due to errors)
+        # Check if status report is needed and generate it as the final step
+        final_content = llm_content or ""
+        final_tokens_in = 0
+        final_tokens_out = 0
+        
         if not execution_state.get("error_occurred", False):
             needs_status_report = await self._check_status_report_needed(
                 execution_state, task_complete, max_iterations_reached, llm_content or ""
             )
             
             if needs_status_report:
-                await self._request_status_report(execution_state)
+                # Generate status report as the final step of the workflow
+                status_content, status_tokens_in, status_tokens_out = await self._generate_status_report_content(execution_state)
+                if status_content:
+                    final_content = status_content
+                    final_tokens_in = status_tokens_in
+                    final_tokens_out = status_tokens_out
+                    
+                    # Update cumulative token counts
+                    execution_state["request_tokens_in"] += final_tokens_in
+                    execution_state["request_tokens_out"] += final_tokens_out
         
-        # Emit workflow completion event
+        # Emit workflow completion event with final content
         await self.event_emitter.emit(EventTypes.WORKFLOW_COMPLETE, {
             "loop_count": execution_state["loop_count"],
             "total_tokens_in": execution_state["request_tokens_in"],
@@ -420,7 +433,12 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             "stopped_due_to_failures": consecutive_failures >= max_consecutive_failures,
             "error_occurred": execution_state.get("error_occurred", False),
             "model_name": execution_state.get("model_name", "unknown"),
-            "provider": execution_state.get("provider", "unknown")
+            "provider": execution_state.get("provider", "unknown"),
+            "messages_in_request": execution_state.get("messages_in_request", 0),
+            "elapsed_seconds": int(time.time() - execution_state.get("start_time", time.time())),
+            "final_content": final_content,
+            "final_tokens_in": final_tokens_in,
+            "final_tokens_out": final_tokens_out
         }, execution_state["workflow_id"], execution_state["step_id"], execution_state["user_request_id"])
         
         return {
@@ -480,23 +498,12 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
         
         return False
     
-    async def _request_status_report(self, execution_state: Dict[str, Any]):
-        """Request a status report from the LLM using centralized golden context."""
+    async def _generate_status_report_content(self, execution_state: Dict[str, Any]) -> tuple[str, int, int]:
+        """Generate status report content as the final step of the workflow."""
         try:
-            self.bound_logger.info("Requesting status report from LLM")
+            self.bound_logger.info("Generating status report content as final workflow step")
             
-            # Emit status report start event
-            await self.event_emitter.emit(EventTypes.STATUS_REPORT_START, {
-                "workflow_id": execution_state.get("workflow_id", "unguided"),
-                "step_id": execution_state.get("step_id", "async_initialize_execution"),
-                "iterations": execution_state.get("loop_count", 0),
-                "tools_executed": execution_state.get("executed_tools", []),
-                "max_iterations_reached": execution_state.get("max_iterations_reached", False)
-            }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
-            
-            # Get conversation history from database for status report (not golden context)
-            # The golden context only has current session messages, but we want full history for status
-            # CRITICAL FIX: Get messages for THIS SPECIFIC REQUEST ID, not all session messages
+            # Get conversation history from database for status report
             try:
                 from api.storage import storage
                 user_request_id = execution_state.get("user_request_id")
@@ -508,7 +515,6 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                     conversation_history = []
             except Exception as e:
                 self.bound_logger.error(f"Failed to get conversation history from database: {e}")
-                # Fallback to execution state messages (less ideal but prevents crashes)
                 conversation_history = execution_state.get("messages", [])
                 self.bound_logger.warning(f"Using execution state messages as fallback: {len(conversation_history)} messages")
             
@@ -519,8 +525,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
             # Filter messages and limit to recent context
             self.bound_logger.info(f"Status report: Processing {len(conversation_history)} messages from conversation history")
             
-            # EXCELLENT IDEA: For status reports, include ALL messages from the specific conversation
-            # Let smart pruning handle token limits intelligently instead of arbitrary message counting
+            # Use all messages from the specific conversation
             valid_messages = conversation_history.copy()
             self.bound_logger.info(f"Status report: Using all {len(valid_messages)} messages from conversation, smart pruning will handle token limits")
 
@@ -533,16 +538,6 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
 
             valid_messages = convert_db_messages_to_llm(valid_messages, logger=self.bound_logger)
             summarize_and_validate(valid_messages, logger=self.bound_logger, tag="status_preprune")
-            
-            # Log what we found for debugging
-            if valid_messages:
-                for i, msg in enumerate(valid_messages):
-                    self.bound_logger.debug(f"Status report message {i}: role={msg['role']}, content_length={len(msg.get('content', ''))}")
-            
-            # Ensure we have at least some context
-            if not valid_messages:
-                self.bound_logger.warning("No valid messages found, creating minimal context")
-                valid_messages = []
             
             # Apply smart pruning to the context messages using centralized function
             valid_messages = self.apply_smart_pruning_to_messages(valid_messages, execution_state)
@@ -573,7 +568,7 @@ Keep this concise but informative.
             
             status_response = chat_manager.get_llm_response(
                 messages=status_messages,
-                system_prompt=original_system_prompt,  # Use original system prompt for context
+                system_prompt=original_system_prompt,
                 provider=execution_state.get("provider"),
                 model_name=execution_state.get("model_name"),
                 user_request_id=execution_state.get("user_request_id"),
@@ -581,10 +576,13 @@ Keep this concise but informative.
             )
             
             if status_response and status_response.get("content"):
-                # Create status report message
+                # Format the status report content
+                formatted_content = f"### 📋 Status Report\n\n{status_response['content']}"
+                
+                # Add status report message to workflow
                 status_message = {
                     "role": "assistant",
-                    "content": f"### 📋 Status Report\n\n{status_response['content']}",
+                    "content": formatted_content,
                     "is_status_report": True,
                     "token_count_in": status_response.get("token_count_in", 0),
                     "token_count_out": status_response.get("token_count_out", 0),
@@ -596,49 +594,20 @@ Keep this concise but informative.
                 # Add status report to workflow with automatic golden context management
                 await self.add_workflow_message(status_message, execution_state)
                 
-                # Emit status report complete event
-                await self.event_emitter.emit(EventTypes.STATUS_REPORT_COMPLETE, {
-                    "status_content": status_response["content"],
-                    "token_count_in": status_response.get("token_count_in", 0),
-                    "token_count_out": status_response.get("token_count_out", 0)
-                }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
-                
-                # Emit a regular LLM_COMPLETE event for the status report (generic approach)
-                # This makes status reports use the same format as regular completions
-                await self.event_emitter.emit(EventTypes.LLM_COMPLETE, {
-                    "response_content": status_response["content"],  # This will trigger workflow_complete
-                    "tokens_in": status_response.get("token_count_in", 0),
-                    "tokens_out": status_response.get("token_count_out", 0),
-                    "tool_calls": [],  # Status report has no tool calls
-                    "loop_count": execution_state.get("loop_count", 0),
-                    "provider": execution_state.get("provider", "unknown"),
-                    "model": execution_state.get("model_name", "unknown"),
-                    "model_name": execution_state.get("model_name", "unknown"),  # Add explicit model_name field
-                    "is_status_report": True,  # Flag to identify this as a status report
-                    # Include cumulative metadata for proper summary stats
-                    "total_tokens_in": execution_state.get("request_tokens_in", 0) + status_response.get("token_count_in", 0),
-                    "total_tokens_out": execution_state.get("request_tokens_out", 0) + status_response.get("token_count_out", 0),
-                    "tool_calls_executed": execution_state.get("tool_calls_executed", 0),
-                    "executed_tools": execution_state.get("executed_tools", []),
-                    # Add message count and elapsed time for status reports
-                    "messages_in_request": execution_state.get("messages_in_request", 0),
-                    "elapsed_seconds": int(time.time() - execution_state.get("start_time", time.time()))
-                }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
-                
-                # Mark that we've emitted a status report to prevent duplicate workflow completion
-                execution_state["status_report_emitted"] = True
-                
-                self.bound_logger.info("Status report generated using generic LLM_COMPLETE event")
-                
+                self.bound_logger.info("Status report content generated successfully")
+                return (
+                    formatted_content,
+                    status_response.get("token_count_in", 0),
+                    status_response.get("token_count_out", 0)
+                )
             else:
-                self.bound_logger.warning("Status report request failed - no content received")
+                self.bound_logger.warning("Status report generation failed - no content received")
+                return ("", 0, 0)
                 
         except Exception as e:
-            self.bound_logger.error(f"Failed to generate status report: {e}", exc_info=True)
-            # Emit status report error event
-            await self.event_emitter.emit(EventTypes.STATUS_REPORT_ERROR, {
-                "error": str(e)
-            }, execution_state.get("workflow_id", "unguided"), execution_state.get("step_id", "async_initialize_execution"), execution_state.get("user_request_id"))
+            self.bound_logger.error(f"Error generating status report content: {e}")
+            return ("", 0, 0)
+
 
     def _convert_database_to_llm_format(self, database_messages: List[Dict]) -> List[Dict]:
         """

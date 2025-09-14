@@ -6,11 +6,28 @@ It has been tested with Nifi versions 1.23 and 1.28, but could work on other ver
 
 It's ability to read and document existing flows is very good.  It's ability to create new and modify existing flows is OK, but often takes several iterations and some user help. My future plans are to refine the tools to improve this aspect.  I may also introduce some tools to help it debug flows itself.
 
+## Version Information
+
+**Current Version: 2.0** - FastAPI/JavaScript Client
+
+This repository contains two different UI implementations:
+
+- **Version 2.0+ (Current)**: Modern FastAPI backend with JavaScript frontend
+- **Version 1.4 and earlier**: Streamlit-based interface
+
+Please follow the appropriate setup instructions below based on the version you're using.
+
 ### Example Conversations
 - [Build A New Flow From A Spec](./docs/examples/ExampleConversation-Build-o4-mini.md) - See how the system creates a complete NiFi flow from requirements
 - [Debug An Existing Flow](./docs/examples/ExampleConversationForDebugging.md) - Watch the system diagnose and fix issues in an existing flow
 
 ## Recent Updates
+
+**Version 2.0 - Major UI Overhaul**
+- Migrated from Streamlit to FastAPI/JavaScript client for improved performance and user experience
+- Enhanced real-time WebSocket communication for better workflow status updates
+- Improved message handling and duplicate message prevention
+- Modern, responsive UI with better accessibility and mobile support
 
 For the latest updates and release notes, see the [GitHub Releases page](https://github.com/ms82119/NiFiMCP/releases).
 
@@ -24,7 +41,7 @@ After this I will consider looking into support for more models.  I will say tha
 
 **Note:** These instructions should also be followed after pulling a new version as there may be new package requirements.
 
-To set up the development environment and install all dependencies, follow these steps:
+### Common Setup Steps (All Versions)
 
 1. **Clone the Repository:**
    ```bash
@@ -63,11 +80,27 @@ To set up the development environment and install all dependencies, follow these
    uvicorn nifi_mcp_server.server:app --reload --port 8000
    ```
 
+### Version 2.0+ (Current) - FastAPI/JavaScript Client
+
+7. **Run the FastAPI Client:**
+   Start the FastAPI client with:
+   ```bash
+   uvicorn api.main:app --reload --port 3000
+   ```
+
+8. **Access the Application:**
+   Open your browser and navigate to: `http://localhost:3000`
+
+### Version 1.4 and Earlier - Streamlit Client
+
 7. **Run the Streamlit Client:**
    Start the Streamlit client with:
    ```bash
    python -m streamlit run nifi_chat_ui/app.py
    ```
+
+8. **Access the Application:**
+   Open your browser and navigate to the URL shown in the terminal (typically `http://localhost:8501`)
 
 ## Usage Tips
 
