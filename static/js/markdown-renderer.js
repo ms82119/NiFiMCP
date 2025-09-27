@@ -37,13 +37,24 @@ class MarkdownRenderer {
     
     configureMermaid() {
         if (typeof mermaid !== 'undefined') {
+            // Check if we're in dark mode
+            const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark';
+            
             mermaid.initialize({
                 startOnLoad: false,
-                theme: 'default',
+                theme: isDarkMode ? 'dark' : 'default',
                 flowchart: {
                     useMaxWidth: true,
                     htmlLabels: true
-                }
+                },
+                themeVariables: isDarkMode ? {
+                    primaryColor: '#60a5fa',
+                    primaryTextColor: '#1f2937',
+                    primaryBorderColor: '#374151',
+                    lineColor: '#60a5fa',
+                    secondaryColor: '#ffffff',
+                    tertiaryColor: '#f3f4f6'
+                } : undefined
             });
         }
     }
@@ -218,7 +229,7 @@ class MarkdownRenderer {
     }
     
     cleanMermaidCode(code) {
-        // Minimal cleaning - just remove HTML tags and normalize whitespace
+        // Remove HTML tags and normalize whitespace
         let cleaned = code.replace(/<br\s*\/?>/gi, '\n');  // Replace <br> with newlines
         cleaned = cleaned.replace(/<[^>]*>/g, '');  // Remove any other HTML tags
         
@@ -227,10 +238,138 @@ class MarkdownRenderer {
         cleaned = cleaned.replace(/&gt;/g, '>');
         cleaned = cleaned.replace(/&amp;/g, '&');
         
-        // Just trim whitespace - don't modify the Mermaid syntax
+        // More comprehensive approach to fix node labels
+        // First, identify all node definitions and fix them systematically
+        const lines = cleaned.split('\n');
+        const fixedLines = lines.map(line => {
+            // Skip empty lines and connection lines (arrows)
+            if (!line.trim() || line.includes('-->') || line.includes('->')) {
+                return line;
+            }
+            
+            // Handle node definitions like: NODE_ID(Node Label)
+            // Use a more robust approach that manually handles parentheses
+            const trimmedLine = line.trim();
+            const nodeMatch = trimmedLine.match(/^(\w+)\(/);
+            if (nodeMatch) {
+                const nodeId = nodeMatch[1];
+                const indent = line.match(/^(\s*)/)[1];
+                const trailing = line.match(/(\s*)$/)[1];
+                
+                // Find the matching closing parenthesis
+                const openParenIndex = trimmedLine.indexOf('(');
+                let parenCount = 0;
+                let closeParenIndex = -1;
+                
+                for (let i = openParenIndex; i < trimmedLine.length; i++) {
+                    if (trimmedLine[i] === '(') {
+                        parenCount++;
+                    } else if (trimmedLine[i] === ')') {
+                        parenCount--;
+                        if (parenCount === 0) {
+                            closeParenIndex = i;
+                            break;
+                        }
+                    }
+                }
+                
+                if (closeParenIndex !== -1) {
+                    const label = trimmedLine.substring(openParenIndex + 1, closeParenIndex);
+                    
+                    // Clean the node ID (remove any problematic characters)
+                    const cleanNodeId = nodeId.replace(/[^a-zA-Z0-9_]/g, '_');
+                    
+                    // Clean the label and wrap in quotes
+                    let cleanLabel = label.trim();
+                    
+                    // Always wrap labels in quotes for safety - this is the most reliable approach
+                    cleanLabel = `"${cleanLabel}"`;
+                    
+                    return `${indent}${cleanNodeId}(${cleanLabel})${trailing}`;
+                }
+            }
+            
+            return line;
+        });
+        
+        cleaned = fixedLines.join('\n');
+        
+        // Normalize whitespace but preserve structure
+        cleaned = cleaned.replace(/\n\s*\n/g, '\n');  // Remove empty lines
+        cleaned = cleaned.replace(/^\s+|\s+$/gm, '');  // Trim each line
         cleaned = cleaned.trim();
         
         return cleaned;
+    }
+    
+    // More aggressive cleaning for problematic Mermaid code
+    aggressiveCleanMermaidCode(code) {
+        let cleaned = this.cleanMermaidCode(code);
+        
+        // If the basic cleaning didn't work, try more aggressive approaches
+        const lines = cleaned.split('\n');
+        const fixedLines = lines.map(line => {
+            // Skip empty lines and connection lines
+            if (!line.trim() || line.includes('-->') || line.includes('->')) {
+                return line;
+            }
+            
+            // For node definitions, be more aggressive about cleaning
+            const nodeMatch = line.match(/^(\s*)(\w+)\(([^)]+)\)(\s*)$/);
+            if (nodeMatch) {
+                const [, indent, nodeId, label, trailing] = nodeMatch;
+                
+                // Clean node ID more aggressively
+                const cleanNodeId = nodeId.replace(/[^a-zA-Z0-9]/g, '_');
+                
+                // Simplify the label - remove problematic characters and wrap in quotes
+                let cleanLabel = label.trim()
+                    .replace(/[()]/g, '')  // Remove parentheses
+                    .replace(/\s+/g, ' ')   // Normalize spaces
+                    .replace(/[^\w\s-]/g, '')  // Remove special characters except word chars, spaces, and hyphens
+                    .trim();
+                
+                // Always wrap in quotes for safety
+                cleanLabel = `"${cleanLabel}"`;
+                
+                return `${indent}${cleanNodeId}(${cleanLabel})${trailing}`;
+            }
+            
+            return line;
+        });
+        
+        return fixedLines.join('\n').trim();
+    }
+    
+    // Reconfigure Mermaid for theme changes
+    reconfigureMermaid() {
+        if (typeof mermaid !== 'undefined') {
+            this.configureMermaid();
+        }
+    }
+    
+    // Re-render all Mermaid diagrams for theme changes
+    async reRenderAllMermaidDiagrams() {
+        if (typeof mermaid === 'undefined') {
+            console.error('Mermaid.js not loaded');
+            return;
+        }
+        
+        // Reconfigure Mermaid with new theme
+        this.reconfigureMermaid();
+        
+        // Find all rendered Mermaid diagrams and re-render them
+        const mermaidBlocks = document.querySelectorAll('.markdown-mermaid-block');
+        for (const block of mermaidBlocks) {
+            const container = block.querySelector('.mermaid-container');
+            if (container && container.classList.contains('rendered')) {
+                const mermaidCode = container.getAttribute('data-mermaid-code');
+                if (mermaidCode) {
+                    const unescapedCode = this.unescapeHtml(mermaidCode);
+                    await this.renderMermaid(container.id, unescapedCode);
+                }
+            }
+        }
     }
     
     // Render Mermaid diagram
@@ -247,6 +386,10 @@ class MarkdownRenderer {
             // Clean the Mermaid code before rendering
             const cleanedCode = this.cleanMermaidCode(mermaidCode);
             
+            // Debug logging
+            console.log('Original Mermaid code:', mermaidCode);
+            console.log('Cleaned Mermaid code:', cleanedCode);
+            
             // Clear the container and render the diagram
             container.innerHTML = '';
             container.className = 'mermaid-container rendered';
@@ -256,9 +399,33 @@ class MarkdownRenderer {
             
         } catch (error) {
             console.error('Error rendering Mermaid diagram:', error);
+            console.error('Original code:', mermaidCode);
+            console.error('Cleaned code:', this.cleanMermaidCode(mermaidCode));
+            
             const container = document.getElementById(containerId);
             if (container) {
-                container.innerHTML = `<div class="mermaid-error">❌ Error rendering diagram: ${error.message}</div>`;
+                // Try a more aggressive cleaning approach as fallback
+                const fallbackCode = this.aggressiveCleanMermaidCode(mermaidCode);
+                console.log('Trying fallback cleaning:', fallbackCode);
+                
+                try {
+                    const { svg } = await mermaid.render(containerId + '-fallback-svg', fallbackCode);
+                    container.innerHTML = svg;
+                    console.log('Fallback rendering succeeded');
+                } catch (fallbackError) {
+                    console.error('Fallback rendering also failed:', fallbackError);
+                    container.innerHTML = `<div class="mermaid-error">
+                        ❌ Error rendering diagram: ${error.message}
+                        <details>
+                            <summary>Show original code</summary>
+                            <pre>${this.escapeHtml(mermaidCode)}</pre>
+                        </details>
+                        <details>
+                            <summary>Show cleaned code</summary>
+                            <pre>${this.escapeHtml(this.cleanMermaidCode(mermaidCode))}</pre>
+                        </details>
+                    </div>`;
+                }
             }
         }
     }
@@ -305,8 +472,65 @@ class MarkdownRenderer {
                 console.log('  Unescaped code:', unescapedCode);
                 const cleanedCode = this.cleanMermaidCode(unescapedCode);
                 console.log('  Cleaned code:', cleanedCode);
+                
+                // Test if the cleaned code would parse
+                try {
+                    if (typeof mermaid !== 'undefined') {
+                        console.log('  Testing Mermaid parsing...');
+                        // Just test the parsing without rendering
+                        mermaid.parse(cleanedCode);
+                        console.log('  ✅ Mermaid code should parse successfully');
+                    } else {
+                        console.log('  ⚠️ Mermaid.js not loaded, cannot test parsing');
+                    }
+                } catch (parseError) {
+                    console.log('  ❌ Mermaid parsing error:', parseError.message);
+                    
+                    // Try aggressive cleaning as fallback
+                    const aggressiveCleaned = this.aggressiveCleanMermaidCode(unescapedCode);
+                    console.log('  Trying aggressive cleaning:', aggressiveCleaned);
+                    try {
+                        mermaid.parse(aggressiveCleaned);
+                        console.log('  ✅ Aggressive cleaning should work');
+                    } catch (aggressiveError) {
+                        console.log('  ❌ Even aggressive cleaning failed:', aggressiveError.message);
+                    }
+                }
             }
         });
+    }
+    
+    // Test function for specific problematic code
+    testMermaidCleaning(testCode) {
+        console.log('=== Testing Mermaid Cleaning ===');
+        console.log('Original code:');
+        console.log(testCode);
+        console.log('\nCleaned code:');
+        const cleaned = this.cleanMermaidCode(testCode);
+        console.log(cleaned);
+        
+        if (typeof mermaid !== 'undefined') {
+            try {
+                mermaid.parse(cleaned);
+                console.log('✅ Cleaned code should parse successfully');
+            } catch (error) {
+                console.log('❌ Cleaned code still has parsing issues:', error.message);
+                
+                // Try aggressive cleaning
+                const aggressiveCleaned = this.aggressiveCleanMermaidCode(testCode);
+                console.log('\nAggressive cleaning:');
+                console.log(aggressiveCleaned);
+                
+                try {
+                    mermaid.parse(aggressiveCleaned);
+                    console.log('✅ Aggressive cleaning should work');
+                } catch (aggressiveError) {
+                    console.log('❌ Even aggressive cleaning failed:', aggressiveError.message);
+                }
+            }
+        } else {
+            console.log('⚠️ Mermaid.js not loaded, cannot test parsing');
+        }
     }
 }
 

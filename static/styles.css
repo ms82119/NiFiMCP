@@ -918,6 +918,67 @@ body {
     font-style: italic;
 }
 
+/* Dark mode styles for Mermaid diagrams */
+[data-theme="dark"] .mermaid-container svg {
+    /* Force light colors for better visibility in dark mode */
+    background: transparent !important;
+}
+
+[data-theme="dark"] .mermaid-container svg .node rect,
+[data-theme="dark"] .mermaid-container svg .node circle,
+[data-theme="dark"] .mermaid-container svg .node ellipse,
+[data-theme="dark"] .mermaid-container svg .node polygon {
+    fill: #ffffff !important;
+    stroke: #374151 !important;
+    stroke-width: 2px !important;
+}
+
+[data-theme="dark"] .mermaid-container svg .node .label {
+    color: #1f2937 !important;
+    fill: #1f2937 !important;
+    font-weight: 500 !important;
+}
+
+[data-theme="dark"] .mermaid-container svg .edgePath .path {
+    stroke: #60a5fa !important;
+    stroke-width: 2px !important;
+}
+
+[data-theme="dark"] .mermaid-container svg .edgeLabel {
+    background: #ffffff !important;
+    color: #1f2937 !important;
+    fill: #1f2937 !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 4px !important;
+    padding: 2px 6px !important;
+}
+
+[data-theme="dark"] .mermaid-container svg .arrowheadPath {
+    fill: #60a5fa !important;
+}
+
+[data-theme="dark"] .mermaid-container svg .flowchart-link {
+    stroke: #60a5fa !important;
+    stroke-width: 2px !important;
+}
+
+/* Additional dark mode fixes for different Mermaid diagram types */
+[data-theme="dark"] .mermaid-container svg .cluster rect {
+    fill: #f3f4f6 !important;
+    stroke: #9ca3af !important;
+    stroke-width: 1px !important;
+}
+
+[data-theme="dark"] .mermaid-container svg .cluster .cluster-label {
+    fill: #1f2937 !important;
+    font-weight: 600 !important;
+}
+
+[data-theme="dark"] .mermaid-container svg .titleText {
+    fill: #1f2937 !important;
+    font-weight: 600 !important;
+}
+
 /* Phase filtering */
 .phase-filters {
     margin-bottom: 1rem;

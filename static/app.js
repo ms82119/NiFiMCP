@@ -1536,6 +1536,15 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('App or markdownRenderer not initialized yet');
         }
     };
+    
+    // Add global test function for Mermaid cleaning
+    window.testMermaidCleaning = (testCode) => {
+        if (window.app && window.app.markdownRenderer) {
+            window.app.markdownRenderer.testMermaidCleaning(testCode);
+        } else {
+            console.error('App or markdownRenderer not initialized yet');
+        }
+    };
 });
 
 // Also add it immediately if DOM is already loaded

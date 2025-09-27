@@ -118,6 +118,9 @@ class ThemeManager {
         localStorage.setItem('theme', this.currentTheme);
         // Use unified applyTheme so Safari path is honored
         this.applyTheme();
+        
+        // Re-render Mermaid diagrams for theme change
+        this.reRenderMermaidDiagrams();
     }
     
     setThemePreset(presetId) {
@@ -127,6 +130,9 @@ class ThemeManager {
         
         // Apply the theme using the appropriate method
         this.applyTheme();
+        
+        // Re-render Mermaid diagrams for theme change
+        this.reRenderMermaidDiagrams();
         
         // Debug: Check if the preset was applied
         console.log('Theme preset applied:', {
@@ -154,6 +160,20 @@ class ThemeManager {
         if (themeIcon) {
             themeIcon.textContent = this.currentTheme === 'light' ? '☀️' : '🌙';
         }
+    }
+    
+    // Re-render Mermaid diagrams when theme changes
+    async reRenderMermaidDiagrams() {
+        // Wait a bit for the theme to be applied
+        setTimeout(async () => {
+            if (window.app && window.app.markdownRenderer) {
+                try {
+                    await window.app.markdownRenderer.reRenderAllMermaidDiagrams();
+                } catch (error) {
+                    console.error('Error re-rendering Mermaid diagrams:', error);
+                }
+            }
+        }, 100);
     }
     
     updateThemeSelector() {
