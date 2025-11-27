@@ -21,6 +21,9 @@ class NiFiChatApp {
         // Tracking for final messages to prevent duplicates
         this.finalMessageCreated = {};
         
+        // Server configurations cache
+        this.serverConfigs = {};
+        
         // Initialize managers
         this.themeManager = new ThemeManager();
         this.modalManager = new ModalManager();
@@ -1379,6 +1382,15 @@ class NiFiChatApp {
             if (response.ok) {
                 const servers = await response.json();
                 
+                // Store server configs for later use
+                this.serverConfigs = {};
+                servers.forEach(server => {
+                    this.serverConfigs[server.id] = {
+                        name: server.name,
+                        config: server.config
+                    };
+                });
+                
                 // Update both selectors using the new method
                 this.updateServerSelectors(servers);
                 
@@ -1427,10 +1439,317 @@ class NiFiChatApp {
         }
     }
 
+    async promptForCredentials(serverId, serverName, isOIDC = false, loginUri = null) {
+        return new Promise((resolve, reject) => {
+            console.log(`Prompting for credentials for server: ${serverId} (${serverName}), OIDC: ${isOIDC}`);
+            
+            // Check if modal already exists
+            const existingModal = document.getElementById('credential-modal');
+            if (existingModal) {
+                console.log('Credential modal already exists, reusing it');
+                // Focus on the existing modal
+                const tokenInput = existingModal.querySelector('#auth-token');
+                const usernameInput = existingModal.querySelector('#auth-username');
+                if (tokenInput) {
+                    tokenInput.focus();
+                } else if (usernameInput) {
+                    usernameInput.focus();
+                }
+                // Wait for the existing modal to resolve - attach to its form submission
+                const existingForm = existingModal.querySelector('#credential-form');
+                if (existingForm) {
+                    // Create a one-time listener that resolves when form is submitted
+                    const oneTimeSubmit = async (e) => {
+                        e.preventDefault();
+                        const existingTokenInput = existingModal.querySelector('#auth-token');
+                        const existingUsernameInput = existingModal.querySelector('#auth-username');
+                        const existingPasswordInput = existingModal.querySelector('#auth-password');
+                        
+                        let credentials = {};
+                        if (existingTokenInput) {
+                            const token = existingTokenInput.value.trim();
+                            if (!token) {
+                                const errorDiv = existingModal.querySelector('#credential-error');
+                                if (errorDiv) {
+                                    errorDiv.textContent = 'Please enter an access token';
+                                    errorDiv.style.display = 'block';
+                                }
+                                return;
+                            }
+                            credentials = { token };
+                        } else {
+                            const username = existingUsernameInput?.value.trim();
+                            const password = existingPasswordInput?.value;
+                            if (!username || !password) {
+                                const errorDiv = existingModal.querySelector('#credential-error');
+                                if (errorDiv) {
+                                    errorDiv.textContent = 'Please enter both username and password';
+                                    errorDiv.style.display = 'block';
+                                }
+                                return;
+                            }
+                            credentials = { username, password };
+                        }
+                        
+                        try {
+                            const response = await fetch(`/api/settings/nifi-servers/${serverId}/credentials`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify(credentials)
+                            });
+                            
+                            if (!response.ok) {
+                                const errorData = await response.json().catch(() => ({ detail: 'Failed to store credentials' }));
+                                throw new Error(errorData.detail || 'Failed to store credentials');
+                            }
+                            
+                            existingForm.removeEventListener('submit', oneTimeSubmit);
+                            resolve(credentials);
+                        } catch (error) {
+                            const errorDiv = existingModal.querySelector('#credential-error');
+                            if (errorDiv) {
+                                errorDiv.textContent = `Failed to authenticate: ${error.message}`;
+                                errorDiv.style.display = 'block';
+                            }
+                            // Don't reject, let user try again
+                        }
+                    };
+                    existingForm.addEventListener('submit', oneTimeSubmit);
+                } else {
+                    // If form doesn't exist, reject immediately
+                    reject(new Error('Existing modal found but form is missing'));
+                }
+                return;
+            }
+            
+            // Create modal for credential input
+            const modal = document.createElement('div');
+            modal.className = 'modal';
+            modal.id = 'credential-modal';
+            modal.style.display = 'flex';
+            modal.style.alignItems = 'center';
+            modal.style.justifyContent = 'center';
+            modal.style.position = 'fixed';
+            modal.style.top = '0';
+            modal.style.left = '0';
+            modal.style.width = '100%';
+            modal.style.height = '100%';
+            modal.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+            modal.style.zIndex = '10000';
+            
+            // Build modal content based on authentication type
+            let modalContent = '';
+            if (isOIDC) {
+                // OIDC token entry
+                modalContent = `
+                    <div class="modal-content" style="background: var(--bg-color, #fff); padding: 2rem; border-radius: 8px; max-width: 500px; width: 90%; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                        <h3 style="margin-top: 0;">OIDC Authentication Required</h3>
+                        <p>This NiFi server requires OIDC/OAuth2 authentication. Please authenticate in your browser and paste the access token below.</p>
+                        ${loginUri ? `<p style="margin-bottom: 1rem;"><a href="${loginUri}" target="_blank" style="color: #007bff; text-decoration: underline;">Open Login Page</a> to authenticate</p>` : ''}
+                        <form id="credential-form">
+                            <div style="margin-bottom: 1rem;">
+                                <label for="auth-token" style="display: block; margin-bottom: 0.5rem;">Access Token:</label>
+                                <textarea id="auth-token" required rows="4" placeholder="Paste your access token here..."
+                                          style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; font-family: monospace; font-size: 0.9em;"></textarea>
+                            </div>
+                            <div id="credential-error" style="color: red; margin-bottom: 1rem; display: none;"></div>
+                            <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+                                <button type="button" id="cancel-auth" 
+                                        style="padding: 0.5rem 1rem; border: 1px solid #ddd; border-radius: 4px; background: #f5f5f5; cursor: pointer;">
+                                    Cancel
+                                </button>
+                                <button type="submit" id="submit-auth"
+                                        style="padding: 0.5rem 1rem; border: none; border-radius: 4px; background: #007bff; color: white; cursor: pointer;">
+                                    Authenticate
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                `;
+            } else {
+                // Username/password entry
+                modalContent = `
+                    <div class="modal-content" style="background: var(--bg-color, #fff); padding: 2rem; border-radius: 8px; max-width: 400px; width: 90%; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                        <h3 style="margin-top: 0;">Authentication Required</h3>
+                        <p>Please enter your credentials for <strong>${serverName}</strong>:</p>
+                        <form id="credential-form">
+                            <div style="margin-bottom: 1rem;">
+                                <label for="auth-username" style="display: block; margin-bottom: 0.5rem;">Username:</label>
+                                <input type="text" id="auth-username" required autocomplete="username" 
+                                       style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label for="auth-password" style="display: block; margin-bottom: 0.5rem;">Password:</label>
+                                <input type="password" id="auth-password" required autocomplete="current-password"
+                                       style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+                            </div>
+                            <div id="credential-error" style="color: red; margin-bottom: 1rem; display: none;"></div>
+                            <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+                                <button type="button" id="cancel-auth" 
+                                        style="padding: 0.5rem 1rem; border: 1px solid #ddd; border-radius: 4px; background: #f5f5f5; cursor: pointer;">
+                                    Cancel
+                                </button>
+                                <button type="submit" id="submit-auth"
+                                        style="padding: 0.5rem 1rem; border: none; border-radius: 4px; background: #007bff; color: white; cursor: pointer;">
+                                    Authenticate
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                `;
+            }
+            
+            modal.innerHTML = modalContent;
+            document.body.appendChild(modal);
+            console.log('Credential modal added to DOM');
+            
+            const form = modal.querySelector('#credential-form');
+            const cancelBtn = modal.querySelector('#cancel-auth');
+            const submitBtn = modal.querySelector('#submit-auth');
+            const errorDiv = modal.querySelector('#credential-error');
+            const tokenInput = modal.querySelector('#auth-token');
+            const usernameInput = modal.querySelector('#auth-username');
+            const passwordInput = modal.querySelector('#auth-password');
+            
+            // Focus on appropriate input
+            if (tokenInput) {
+                setTimeout(() => tokenInput.focus(), 100);
+            } else if (usernameInput) {
+                setTimeout(() => usernameInput.focus(), 100);
+            }
+            
+            const cleanup = () => {
+                document.body.removeChild(modal);
+                document.removeEventListener('keydown', escapeHandler);
+            };
+            
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                
+                let credentials = {};
+                if (isOIDC && tokenInput) {
+                    const token = tokenInput.value.trim();
+                    if (!token) {
+                        errorDiv.textContent = 'Please enter an access token';
+                        errorDiv.style.display = 'block';
+                        return;
+                    }
+                    credentials = { token };
+                } else {
+                    const username = usernameInput.value.trim();
+                    const password = passwordInput.value;
+                    if (!username || !password) {
+                        errorDiv.textContent = 'Please enter both username and password';
+                        errorDiv.style.display = 'block';
+                        return;
+                    }
+                    credentials = { username, password };
+                }
+                
+                // Disable submit button during submission
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Authenticating...';
+                errorDiv.style.display = 'none';
+                
+                try {
+                    console.log(`Submitting credentials for server: ${serverId}`);
+                    // Submit credentials to backend
+                    const response = await fetch(`/api/settings/nifi-servers/${serverId}/credentials`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(credentials)
+                    });
+                    
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({ detail: 'Failed to store credentials' }));
+                        throw new Error(errorData.detail || 'Failed to store credentials');
+                    }
+                    
+                    console.log('Credentials stored successfully');
+                    cleanup();
+                    resolve(credentials);
+                } catch (error) {
+                    console.error('Error storing credentials:', error);
+                    errorDiv.textContent = `Failed to authenticate: ${error.message}`;
+                    errorDiv.style.display = 'block';
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Authenticate';
+                    // Don't reject, let user try again
+                }
+            });
+            
+            cancelBtn.addEventListener('click', () => {
+                console.log('Credential prompt cancelled');
+                cleanup();
+                reject(new Error('Authentication cancelled'));
+            });
+            
+            // Close on escape key
+            const escapeHandler = (e) => {
+                if (e.key === 'Escape') {
+                    console.log('Credential prompt cancelled via Escape key');
+                    cleanup();
+                    reject(new Error('Authentication cancelled'));
+                }
+            };
+            document.addEventListener('keydown', escapeHandler);
+        });
+    }
+
     async checkNiFiServerHealth(serverId) {
         try {
             this.updateNiFiConnectionStatus('checking');
             
+            // First check if credentials are needed
+            let needsCredentials = false;
+            let serverName = serverId;
+            
+            try {
+                const authConfigResponse = await fetch(`/api/settings/nifi-servers/${serverId}/auth-config`);
+                if (authConfigResponse.ok) {
+                    const authConfig = await authConfigResponse.json();
+                    const authConfigData = authConfig.authenticationConfiguration || {};
+                    
+                    // Check if OIDC is required or if username/password are missing from config
+                    const hasOIDC = authConfigData.externalLoginRequired === true;
+                    const loginUri = authConfigData.loginUri || null;
+                    const configUsername = this.serverConfigs && this.serverConfigs[serverId]?.config?.username;
+                    // Check if username is missing or empty
+                    const hasConfigCredentials = configUsername && configUsername.trim() !== '';
+                    
+                    console.log(`Auth check for ${serverId}: OIDC=${hasOIDC}, hasConfigCreds=${hasConfigCredentials}, loginUri=${loginUri}`);
+                    
+                    needsCredentials = hasOIDC || !hasConfigCredentials;
+                    serverName = (this.serverConfigs && this.serverConfigs[serverId]?.name) || serverId;
+                    
+                    if (needsCredentials) {
+                        console.log(`Credentials needed for ${serverId}, prompting user...`);
+                        // Prompt for credentials BEFORE trying health check
+                        try {
+                            await this.promptForCredentials(serverId, serverName, hasOIDC, loginUri);
+                            console.log(`Credentials submitted for ${serverId}, proceeding with health check`);
+                            // After credentials are submitted, continue with health check
+                        } catch (promptError) {
+                            console.log(`Credential prompt cancelled or failed for ${serverId}:`, promptError);
+                            // User cancelled or error - mark as unhealthy
+                            this.updateNiFiConnectionStatus('unhealthy');
+                            return;
+                        }
+                    }
+                }
+            } catch (authError) {
+                // If auth config check fails, continue with health check
+                // Set needsCredentials to true as fallback - we'll check the health check response
+                // to determine if credentials are actually needed
+                console.debug('Could not check auth config:', authError);
+                needsCredentials = true; // Fallback: assume credentials might be needed
+            }
+            
+            // Now perform the actual health check
             const response = await fetch(`/api/settings/nifi-server-health/${serverId}`);
             if (response.ok) {
                 const healthData = await response.json();
@@ -1438,7 +1757,44 @@ class NiFiChatApp {
                 if (healthData.status === 'healthy') {
                     this.updateNiFiConnectionStatus('healthy');
                 } else {
-                    this.updateNiFiConnectionStatus('unhealthy');
+                    // If health check fails and we haven't prompted yet, try prompting
+                    // Check if credentials are needed based on health check message or if auth config check failed
+                    const needsCredsFromHealth = healthData.message && (
+                        healthData.message.includes('Credentials not available') ||
+                        healthData.message.includes('authentication') ||
+                        healthData.message.includes('Authentication')
+                    );
+                    if ((needsCredentials || needsCredsFromHealth) && healthData.message) {
+                        try {
+                            // Get auth config again to determine if OIDC
+                            const authConfigResponse = await fetch(`/api/settings/nifi-servers/${serverId}/auth-config`);
+                            let isOIDC = false;
+                            let loginUri = null;
+                            if (authConfigResponse.ok) {
+                                const authConfig = await authConfigResponse.json();
+                                const authConfigData = authConfig.authenticationConfiguration || {};
+                                isOIDC = authConfigData.externalLoginRequired === true;
+                                loginUri = authConfigData.loginUri || null;
+                            }
+                            await this.promptForCredentials(serverId, serverName, isOIDC, loginUri);
+                            // Retry health check after credentials are submitted
+                            const retryResponse = await fetch(`/api/settings/nifi-server-health/${serverId}`);
+                            if (retryResponse.ok) {
+                                const retryHealthData = await retryResponse.json();
+                                if (retryHealthData.status === 'healthy') {
+                                    this.updateNiFiConnectionStatus('healthy');
+                                } else {
+                                    this.updateNiFiConnectionStatus('unhealthy');
+                                }
+                            } else {
+                                this.updateNiFiConnectionStatus('unhealthy');
+                            }
+                        } catch (promptError) {
+                            this.updateNiFiConnectionStatus('unhealthy');
+                        }
+                    } else {
+                        this.updateNiFiConnectionStatus('unhealthy');
+                    }
                 }
             } else {
                 this.updateNiFiConnectionStatus('unhealthy');

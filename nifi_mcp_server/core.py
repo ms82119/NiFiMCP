@@ -27,33 +27,87 @@ logger.info("MCP instance initialized in core.")
 # Simple cache for authenticated clients within a request scope? (Could use contextvars or pass around)
 # For now, create per request/call.
 
+# Global credential store (in-memory, per server)
+from typing import Dict, Tuple, Callable, Awaitable, Optional
+_credential_store: Dict[str, Tuple[str, str]] = {}  # username, password
+_credential_callbacks: Dict[str, Callable[[str], Awaitable[Tuple[str, str]]]] = {}
+
+# Import persistent token store (file-based, shared across processes)
+from nifi_mcp_server.token_store import set_token, get_token, clear_token, get_token_store_keys
+
+def set_credential_callback(server_id: str, callback: Callable[[str], Awaitable[Tuple[str, str]]]):
+    """Set a credential callback for a specific server."""
+    _credential_callbacks[server_id] = callback
+
+def set_credentials(server_id: str, username: str, password: str):
+    """Set credentials for a server (for web UI use)."""
+    _credential_store[server_id] = (username, password)
+
+def clear_credentials(server_id: str):
+    """Clear stored credentials and tokens for a server."""
+    if server_id in _credential_store:
+        del _credential_store[server_id]
+    clear_token(server_id)  # Use persistent token store
+
+async def _get_credential_callback(server_id: str) -> Callable[[str], Awaitable[Tuple[str, str]]]:
+    """Create a credential callback function for a server."""
+    async def callback(sid: str) -> Tuple[str, str]:
+        # First check in-memory store
+        if sid in _credential_store:
+            return _credential_store[sid]
+        
+        # Check if there's a custom callback
+        if sid in _credential_callbacks:
+            return await _credential_callbacks[sid](sid)
+        
+        # Fallback: raise error
+        raise NiFiAuthenticationError(
+            f"Credentials not available for server {sid}. "
+            f"Please provide credentials via the API or credential callback."
+        )
+    return callback
+
 async def get_nifi_client(server_id: str, bound_logger = logger) -> NiFiClient:
     """Gets or creates an authenticated NiFi client for the specified server ID."""
     bound_logger.info(f"Requesting NiFi client for server ID: {server_id}")
+    
+    # Check if token exists before creating client (for debugging)
+    from nifi_mcp_server.token_store import get_token, get_token_store_keys
+    token_check = get_token(server_id)
+    if token_check:
+        bound_logger.debug(f"Token exists in store for {server_id} (length: {len(token_check)})")
+    else:
+        available = get_token_store_keys()
+        bound_logger.debug(f"No token in store for {server_id}. Available tokens: {available}")
+    
     server_conf = get_nifi_server_config(server_id)
     if not server_conf:
         bound_logger.error(f"Configuration for NiFi server ID '{server_id}' not found.")
         raise ValueError(f"NiFi server configuration not found for ID: {server_id}")
 
+    # Get credential callback
+    credential_callback = await _get_credential_callback(server_id)
+
     client = NiFiClient(
         base_url=server_conf.get('url'),
-        username=server_conf.get('username'),
-        password=server_conf.get('password'),
-        tls_verify=server_conf.get('tls_verify', True)
+        username=server_conf.get('username'),  # May be None
+        password=server_conf.get('password'),  # May be None
+        tls_verify=server_conf.get('tls_verify', True),
+        credential_callback=credential_callback
     )
     bound_logger.debug(f"Instantiated NiFiClient for {server_conf.get('url')}")
 
     try:
         # Ensure client is authenticated
         if not client.is_authenticated:
-            bound_logger.info(f"Authenticating NiFi client for {server_conf.get('url')}")
-            await client.authenticate()
+            bound_logger.info(f"Authenticating NiFi client for {server_conf.get('url')} (server_id: {server_id})")
+            await client.authenticate(server_id=server_id)
             bound_logger.info(f"Authentication successful for {server_conf.get('url')}")
         else:
             bound_logger.debug(f"NiFi client for {server_conf.get('url')} is already authenticated (cached?)")
         return client
     except NiFiAuthenticationError as e:
-        bound_logger.error(f"Authentication failed for NiFi server {server_id} ({server_conf.get('url')}): {e}")
+        bound_logger.error(f"Authentication failed for NiFi server {server_id} ({server_conf.get('url')}): {e}", exc_info=True)
         # Close the client if auth fails to release resources
         await client.close()
         raise # Re-raise the authentication error

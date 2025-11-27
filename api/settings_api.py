@@ -6,7 +6,7 @@ configuration data like models, NiFi servers, workflows, and tools.
 """
 
 from typing import List, Dict, Any
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
 from loguru import logger
 
 from config import settings
@@ -182,33 +182,19 @@ async def get_config():
 async def check_nifi_server_health(server_id: str):
     """Check the health of a specific NiFi server by attempting to connect and get process groups."""
     try:
-        from nifi_mcp_server.nifi_client import NiFiClient
+        from nifi_mcp_server.core import get_nifi_client
         
         # Get server configuration
         server_config = settings.get_nifi_server_config(server_id)
         if not server_config:
             raise HTTPException(status_code=404, detail=f"Server {server_id} not found")
         
-        # Extract connection details
-        # Support multiple config key variants for the NiFi API URL
-        base_url = (
-            server_config.get('base_url')
-            or server_config.get('api_url')
-            or server_config.get('url')
-        )
-        username = server_config.get('username')
-        password = server_config.get('password')
-        tls_verify = server_config.get('tls_verify', True)
-        
-        if not base_url:
-            raise HTTPException(status_code=400, detail="Server base_url not configured")
-        
-        # Create NiFi client and test connection
-        nifi_client = NiFiClient(base_url, username, password, tls_verify)
-        
+        nifi_client = None
         try:
-            # Try to authenticate and get process groups (root level)
-            await nifi_client.authenticate()
+            # Use the factory function which handles credential callbacks
+            nifi_client = await get_nifi_client(server_id, bound_logger=logger)
+            
+            # Try to get process groups (root level) to verify connection
             await nifi_client.get_process_groups("root")
             
             return {
@@ -224,7 +210,120 @@ async def check_nifi_server_health(server_id: str):
                 "status": "unhealthy",
                 "message": f"Connection failed: {str(nifi_error)}"
             }
+        finally:
+            # Ensure client is closed to prevent resource leaks
+            if nifi_client:
+                try:
+                    await nifi_client.close()
+                except Exception as close_error:
+                    logger.warning(f"Error closing NiFi client: {close_error}")
             
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is (e.g., 404 for server not found)
+        raise
     except Exception as e:
         logger.error(f"Error checking NiFi server health: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/nifi-servers/{server_id}/credentials")
+async def submit_credentials(server_id: str, credentials: dict = Body(...)):
+    """Submit credentials for a NiFi server.
+    
+    This endpoint allows the frontend to submit username/password
+    or access token when authentication is required.
+    
+    For OIDC servers, accepts:
+    - token: Access token string
+    
+    For NiFi 1.x servers, accepts:
+    - username: Username string
+    - password: Password string
+    """
+    try:
+        from nifi_mcp_server.core import set_credentials
+        from nifi_mcp_server.token_store import set_token
+        
+        # Check if this is a token (for OIDC) or username/password
+        token = credentials.get("token")
+        username = credentials.get("username")
+        password = credentials.get("password")
+        
+        if token:
+            # Store token for OIDC authentication
+            token_trimmed = token.strip()
+            logger.info(f"Storing access token for server {server_id} (token length: {len(token_trimmed)})")
+            set_token(server_id, token_trimmed)
+            logger.info(f"Access token stored successfully for server {server_id}")
+        elif username and password:
+            # Store username/password for standard authentication
+            set_credentials(server_id, username, password)
+            logger.info(f"Credentials stored for server {server_id}")
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Either 'token' (for OIDC) or 'username' and 'password' (for standard auth) are required"
+            )
+        
+        return {
+            "status": "success",
+            "message": "Credentials stored successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error storing credentials: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/nifi-servers/{server_id}/credentials")
+async def clear_server_credentials(server_id: str):
+    """Clear stored credentials for a NiFi server."""
+    try:
+        from nifi_mcp_server.core import clear_credentials
+        
+        clear_credentials(server_id)
+        logger.info(f"Credentials cleared for server {server_id}")
+        return {
+            "status": "success",
+            "message": "Credentials cleared successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error clearing credentials: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/nifi-servers/{server_id}/auth-config")
+async def get_server_auth_config(server_id: str):
+    """Get authentication configuration for a NiFi server."""
+    client = None
+    try:
+        from nifi_mcp_server.nifi_client import NiFiClient
+        
+        server_config = settings.get_nifi_server_config(server_id)
+        if not server_config:
+            raise HTTPException(status_code=404, detail=f"Server {server_id} not found")
+        
+        base_url = server_config.get('url')
+        if not base_url:
+            raise HTTPException(status_code=400, detail="Server URL not configured")
+        
+        # Create a temporary client to check auth config
+        client = NiFiClient(
+            base_url=base_url,
+            tls_verify=server_config.get('tls_verify', True)
+        )
+        auth_config = await client.get_authentication_config()
+        
+        return auth_config
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error getting auth config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Ensure client is closed even if an exception occurs
+        if client:
+            try:
+                await client.close()
+            except Exception as close_error:
+                logger.warning(f"Error closing NiFi client in auth-config endpoint: {close_error}")

@@ -3,7 +3,7 @@ import logging
 from loguru import logger
 import httpx
 import uuid
-from typing import Optional, Dict, Any, Union, List, Literal, Tuple
+from typing import Optional, Dict, Any, Union, List, Literal, Tuple, Callable, Awaitable
 from mcp.server.fastmcp.exceptions import ToolError
 import asyncio
 import time
@@ -29,14 +29,17 @@ class AuthParams:
 class NiFiClient:
     """A simple asynchronous client for the NiFi REST API."""
 
-    def __init__(self, base_url: str, username: Optional[str] = None, password: Optional[str] = None, tls_verify: bool = True):
+    def __init__(self, base_url: str, username: Optional[str] = None, password: Optional[str] = None, 
+                 tls_verify: bool = True, credential_callback: Optional[Callable[[str], Awaitable[Tuple[str, str]]]] = None):
         """Initializes the NiFiClient.
 
         Args:
             base_url: The base URL of the NiFi API (e.g., "https://localhost:8443/nifi-api"). Required.
-            username: The username for NiFi authentication. Required if password is provided.
-            password: The password for NiFi authentication. Required if username is provided.
+            username: The username for NiFi authentication. Optional - will prompt if not provided.
+            password: The password for NiFi authentication. Optional - will prompt if not provided.
             tls_verify: Whether to verify the server's TLS certificate. Defaults to True.
+            credential_callback: Optional async callback function that takes a server_id and returns (username, password).
+                                If provided, will be called when credentials are needed.
         """
         if not base_url:
             raise ValueError("base_url is required for NiFiClient")
@@ -44,8 +47,10 @@ class NiFiClient:
         self.username = username
         self.password = password
         self.tls_verify = tls_verify
+        self.credential_callback = credential_callback
         self._client = None
         self._token = None
+        self._auth_config = None  # Cache auth configuration
         # Generate a unique client ID for this instance, used for revisions
         self._client_id = str(uuid.uuid4())
         logger.info(f"NiFiClient initialized for {self.base_url} with client ID: {self._client_id}")
@@ -65,8 +70,13 @@ class NiFiClient:
              self._client = None
 
         headers = {}
+        cookies = {}
         if self._token:
+            # Try both Authorization header and cookie format
+            # Some NiFi 2.x OIDC setups expect the token in a cookie
             headers["Authorization"] = f"Bearer {self._token}"
+            # Also set as cookie (NiFi 2.x OIDC may require this)
+            cookies["__Secure-Authorization-Bearer"] = self._token
             # NiFi often requires client ID for state changes, let's check if we need it here
             # Might need to parse initial response or call another endpoint if needed.
 
@@ -74,40 +84,266 @@ class NiFiClient:
             base_url=self.base_url,
             verify=self.tls_verify,
             headers=headers,
+            cookies=cookies if cookies else None,
             timeout=30.0 # Keep timeout
         )
         return self._client
 
-    async def authenticate(self):
-        """Authenticates with NiFi and stores the token."""
-        # Use a temporary client for the auth request itself, as it doesn't need the token header
+    async def get_authentication_config(self) -> Dict[str, Any]:
+        """Gets the authentication configuration from NiFi."""
+        if self._auth_config:
+            return self._auth_config
+            
+        async with httpx.AsyncClient(base_url=self.base_url, verify=self.tls_verify) as client:
+            endpoint = "/authentication/configuration"
+            try:
+                response = await client.get(endpoint)
+                response.raise_for_status()
+                self._auth_config = response.json()
+                return self._auth_config
+            except httpx.HTTPStatusError as e:
+                logger.debug(f"Auth config endpoint returned {e.response.status_code} - {e.response.text}")
+                # If endpoint doesn't exist (NiFi 1.x) or requires auth (401), assume username/password auth
+                if e.response.status_code in (404, 401):
+                    # 404 = endpoint doesn't exist (NiFi 1.x)
+                    # 401 = endpoint requires authentication (NiFi 1.x or 2.x with auth required)
+                    # In both cases, assume we can use username/password authentication
+                    self._auth_config = {"authenticationConfiguration": {"externalLoginRequired": False, "loginSupported": True}}
+                    return self._auth_config
+                raise NiFiAuthenticationError(f"Failed to get auth config: {e.response.status_code}") from e
+            except httpx.RequestError as e:
+                logger.error(f"Error getting auth config: {e}")
+                raise NiFiAuthenticationError(f"Error getting auth config: {e}") from e
+
+    async def _get_credentials(self, server_id: Optional[str] = None) -> Tuple[str, str]:
+        """Gets credentials, prompting if not available."""
+        # Normalize empty strings to None
+        username = self.username
+        password = self.password
+        
+        # Treat empty strings and None as missing
+        if username and isinstance(username, str):
+            username = username.strip()
+            if username == "":
+                username = None
+        if password and isinstance(password, str):
+            if password == "":
+                password = None
+        
+        # If we have a callback and credentials are missing, use it
+        if (not username or not password) and self.credential_callback:
+            logger.debug(f"Credentials missing for server {server_id}, using callback")
+            try:
+                username, password = await self.credential_callback(server_id or "unknown")
+                if username and password:
+                    logger.debug(f"Credentials retrieved from callback for server {server_id}")
+                    return username, password
+            except Exception as e:
+                logger.error(f"Error getting credentials from callback: {e}")
+                raise NiFiAuthenticationError(f"Failed to get credentials: {e}") from e
+        
+        # If still missing, raise error (in web context, callback should be provided)
+        if not username or not password:
+            raise NiFiAuthenticationError(
+                "Credentials not provided and no credential callback available. "
+                "Please provide username/password in config or implement credential_callback."
+            )
+        
+        return username, password
+
+    async def _authenticate_oidc(self, username: str, password: str) -> str:
+        """Authenticates using OIDC/OAuth2 with username/password.
+        
+        Attempts multiple authentication methods:
+        1. OAuth2 Resource Owner Password Credentials grant
+        2. Basic Auth with username/password
+        3. Direct token exchange endpoints
+        
+        Note: Many OIDC providers don't support username/password programmatically
+        and require browser-based authentication flow.
+        """
+        auth_config = await self.get_authentication_config()
+        auth_config_data = auth_config.get("authenticationConfiguration", {})
+        login_uri = auth_config_data.get("loginUri", "")
+        
+        logger.info(f"Attempting OIDC authentication for {self.base_url}")
+        
+        import base64
+        
+        # Prepare Basic Auth header
+        credentials_b64 = base64.b64encode(f"{username}:{password}".encode()).decode()
+        basic_auth_header = f"Basic {credentials_b64}"
+        
+        async with httpx.AsyncClient(base_url=self.base_url, verify=self.tls_verify) as client:
+            try:
+                # Try multiple endpoints and methods
+                token_endpoints = [
+                    ("/access/oidc/exchange", "form"),  # NiFi-specific OIDC exchange
+                    ("/oauth2/token", "form"),  # Standard OAuth2 token endpoint
+                    ("/access/token", "form"),  # Fallback to standard endpoint
+                    ("/access/oidc/exchange", "basic"),  # Try with Basic Auth
+                    ("/oauth2/token", "basic"),  # Try with Basic Auth
+                ]
+                
+                for endpoint, auth_method in token_endpoints:
+                    try:
+                        logger.debug(f"Trying OIDC authentication at {endpoint} with {auth_method} auth")
+                        
+                        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+                        data = {}
+                        
+                        if auth_method == "basic":
+                            # Use Basic Auth header
+                            headers["Authorization"] = basic_auth_header
+                            # Some endpoints might still need grant_type in body
+                            data = {"grant_type": "password"}
+                        else:
+                            # Use form data with username/password
+                            data = {
+                                "username": username,
+                                "password": password,
+                                "grant_type": "password"
+                            }
+                        
+                        response = await client.post(
+                            endpoint,
+                            data=data,
+                            headers=headers
+                        )
+                        
+                        if response.status_code == 200:
+                            # Try to parse as JSON first (OAuth2 standard)
+                            try:
+                                token_data = response.json()
+                                token = token_data.get("access_token") or token_data.get("token") or token_data.get("id_token")
+                                if token:
+                                    logger.info(f"OIDC authentication successful via {endpoint} with {auth_method} auth")
+                                    return token
+                            except:
+                                # If not JSON, treat as plain text token
+                                token = response.text.strip()
+                                if token and len(token) > 10:  # Basic sanity check
+                                    logger.info(f"OIDC authentication successful via {endpoint} with {auth_method} auth")
+                                    return token
+                    except httpx.HTTPStatusError as e:
+                        # Log but continue trying other methods
+                        if e.response.status_code not in (404, 401, 409):
+                            logger.debug(f"Endpoint {endpoint} ({auth_method}) returned {e.response.status_code}: {e.response.text[:200]}")
+                        continue
+                    except Exception as e:
+                        logger.debug(f"Error trying {endpoint} ({auth_method}): {e}, trying next...")
+                        continue
+                
+                # If all endpoints failed, provide detailed error message
+                auth_config_str = f"Login URI: {login_uri}" if login_uri else "No login URI configured"
+                raise NiFiAuthenticationError(
+                    f"OIDC authentication failed. This NiFi 2.x server requires OIDC/OAuth2 authentication, "
+                    f"but programmatic username/password authentication is not supported by the OIDC provider. "
+                    f"{auth_config_str}. "
+                    f"Please contact your administrator to obtain an API access token, or use browser-based authentication "
+                    f"to obtain a token that can be used for API access."
+                )
+                
+            except NiFiAuthenticationError:
+                raise
+            except httpx.RequestError as e:
+                logger.error(f"Network error during OIDC authentication: {e}")
+                raise NiFiAuthenticationError(f"Network error during OIDC authentication: {e}") from e
+
+    async def authenticate(self, server_id: Optional[str] = None):
+        """Authenticates with NiFi and stores the token.
+        
+        Args:
+            server_id: Optional server ID for credential callback context.
+        """
+        # Get authentication configuration
+        auth_config = await self.get_authentication_config()
+        auth_config_data = auth_config.get("authenticationConfiguration", {})
+        
+        external_login_required = auth_config_data.get("externalLoginRequired", False)
+        login_supported = auth_config_data.get("loginSupported", True)
+        
+        if external_login_required:
+            # OIDC/OAuth2 authentication required
+            logger.info(f"NiFi server requires OIDC/OAuth2 authentication (server_id: {server_id})")
+            
+            # First check if we have a token stored directly
+            if server_id:
+                from nifi_mcp_server.token_store import get_token, get_token_store_keys
+                logger.debug(f"Checking for stored token for server_id: {server_id}")
+                stored_token = get_token(server_id)
+                if stored_token:
+                    # Validate token format (should be a JWT with 3 parts separated by dots)
+                    token_parts = stored_token.split('.')
+                    if len(token_parts) == 3:
+                        logger.info(f"Using stored access token for OIDC authentication (token length: {len(stored_token)}, JWT format valid)")
+                    else:
+                        logger.warning(f"Token format may be invalid (expected JWT with 3 parts, got {len(token_parts)} parts)")
+                    self._token = stored_token
+                    # Force recreation of the main client with the token
+                    if self._client:
+                        await self._client.aclose()
+                    self._client = None
+                    logger.debug(f"Token set, client recreated. is_authenticated={self.is_authenticated}")
+                    return
+                else:
+                    available_servers = get_token_store_keys()
+                    logger.warning(
+                        f"No stored token found for OIDC server {server_id}. "
+                        f"Available tokens for servers: {available_servers}. "
+                        f"Token store keys: {available_servers}"
+                    )
+            else:
+                logger.warning(f"OIDC authentication required but server_id is None - cannot retrieve stored token")
+            
+            # If no token found, raise error - OIDC requires token, not username/password
+            raise NiFiAuthenticationError(
+                f"OIDC authentication requires an access token. "
+                f"No token found for server {server_id}. "
+                f"Please provide an access token via the credential prompt or API."
+            )
+        
+        # Fall back to username/password authentication (NiFi 1.x style)
+        # Get credentials (prompt if needed)
+        username, password = await self._get_credentials(server_id)
+        
+        # Fall back to username/password authentication (NiFi 1.x style)
         async with httpx.AsyncClient(base_url=self.base_url, verify=self.tls_verify) as auth_client:
             endpoint = "/access/token"
             try:
                 logger.info(f"Authenticating with NiFi at {self.base_url}{endpoint}")
                 response = await auth_client.post(
                     endpoint,
-                    data={"username": self.username, "password": self.password},
-                    headers={"Content-Type": "application/x-www-form-urlencoded"} # Correct header for form data
+                    data={"username": username, "password": password},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
                 )
                 response.raise_for_status()
-                self._token = response.text # Store the token
+                self._token = response.text
                 logger.info("Authentication successful.")
-
-                # Force recreation of the main client with the token on next call to _get_client
+                
+                # Force recreation of the main client with the token
                 if self._client:
                     await self._client.aclose()
                 self._client = None
 
             except httpx.HTTPStatusError as e:
-                logger.error(f"Authentication failed: {e.response.status_code} - {e.response.text}")
+                error_text = e.response.text
+                logger.error(f"Authentication failed: {e.response.status_code} - {error_text}")
+                
+                # Provide helpful error message for 409 (OIDC required)
+                if e.response.status_code == 409:
+                    raise NiFiAuthenticationError(
+                        f"Authentication failed: This NiFi server requires OIDC/OAuth2 authentication. "
+                        f"Please check the server configuration or contact your administrator."
+                    ) from e
+                
                 raise NiFiAuthenticationError(f"Authentication failed: {e.response.status_code}") from e
             except httpx.RequestError as e:
                 logger.error(f"An error occurred during authentication: {e}")
                 raise NiFiAuthenticationError(f"An error occurred during authentication: {e}") from e
             except Exception as e:
                 logger.error(f"An unexpected error occurred during authentication: {e}", exc_info=True)
-                raise NiFiAuthenticationError(f"An unexpected error occurred during authentication: {e}")
+                raise NiFiAuthenticationError(f"An unexpected error occurred during authentication: {e}") from e
 
     async def close(self):
         """Closes the underlying httpx client."""
@@ -887,7 +1123,22 @@ class NiFiClient:
             logger.info(f"Found {len(groups)} child process groups in group {process_group_id}.")
             return groups
         except httpx.HTTPStatusError as e:
-            logger.error(f"Failed to list process groups for group {process_group_id}: {e.response.status_code} - {e.response.text}")
+            error_text = e.response.text or ""
+            logger.error(f"Failed to list process groups for group {process_group_id}: {e.response.status_code} - {error_text}")
+            
+            # Handle token expiration (401 with "Session Expired" or similar)
+            if e.response.status_code == 401 and ("Session Expired" in error_text or "expired" in error_text.lower() or "unauthorized" in error_text.lower()):
+                logger.warning(f"Token appears to be expired (401 Unauthorized). Clearing token for potential re-authentication.")
+                self._token = None
+                # Force client recreation on next use
+                if self._client:
+                    await self._client.aclose()
+                    self._client = None
+                raise NiFiAuthenticationError(
+                    f"Authentication token has expired. Please provide a new access token. "
+                    f"Original error: {e.response.status_code} - {error_text}"
+                ) from e
+            
             raise ConnectionError(f"Failed to list process groups: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error listing process groups for group {process_group_id}: {e}")
