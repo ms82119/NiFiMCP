@@ -98,7 +98,14 @@ def context_patcher(record):
     step_id_from_ctx = ctx.get("step_id", "-") 
     if step_id_from_ctx != "-":
         record["extra"]["step_id"] = step_id_from_ctx
-    # Return not strictly needed if called internally by another patcher
+    
+    # NEW: Phase tracking for documentation workflow
+    phase_from_ctx = ctx.get("phase", "-")
+    if phase_from_ctx != "-":
+        record["extra"]["phase"] = phase_from_ctx
+    
+    # Return the modified record (required by loguru's patcher pattern)
+    return record
 # ------------------------------------ #
 
 # Define a middleware handler for interface logging to pre-process the data
@@ -114,6 +121,19 @@ def interface_logger_middleware(record):
         try:
             data = record["extra"].get("data", {})
             
+            # Extract phase from data if present (for workflow logs)
+            if record["extra"].get("interface") == "workflow":
+                phase = data.get("phase", record["extra"].get("phase", "-"))
+                record["extra"]["phase"] = phase
+                
+                # Extract event type if present
+                event_type = data.get("event_type", "-")
+                record["extra"]["event_type"] = event_type
+                
+                # Extract progress message if present
+                progress_msg = data.get("message", data.get("progress_message", ""))
+                record["extra"]["progress_message"] = progress_msg
+            
             # Serialize the data to JSON using our SafeJsonEncoder
             json_data = json.dumps(data, indent=2, cls=SafeJsonEncoder)
             
@@ -121,7 +141,9 @@ def interface_logger_middleware(record):
             record["extra"]["json_data"] = json_data
             
             # Add a field for the formatted message that will be used in the log format string
-            record["message"] = f"{record['extra']['interface']} {record['extra']['direction']}: {record['message']}"
+            # Safely get direction with fallback to "-" if not set
+            direction = record["extra"].get("direction", "-")
+            record["message"] = f"{record['extra']['interface']} {direction}: {record['message']}"
         except Exception as e:
             # If anything fails during preprocessing, log it and continue
             record["extra"]["json_data"] = json.dumps({"error": f"Failed to serialize data: {str(e)}"})
@@ -156,11 +178,20 @@ def setup_logging(context: str | None = None):
     # Configure logger to add default context IDs and patchers
     logger.configure(
         # Keep default extra values for logs outside request context
-        extra={"user_request_id": "-", "action_id": "-", "workflow_id": "-", "step_id": "-"},
+        extra={
+            "user_request_id": "-", 
+            "action_id": "-", 
+            "workflow_id": "-", 
+            "step_id": "-",
+            "phase": "-",           # NEW: Phase tracking for documentation workflow
+            "event_type": "-",      # NEW: Event type for workflow logs
+            "progress_message": "",  # NEW: Progress message for workflow logs
+            "direction": "-"        # NEW: Direction field for interface logs (request/response)
+        },
         # Chain the patchers: context_patcher runs, then interface_logger_middleware
         # Ensure context_patcher runs first by applying it to the record before passing to the next
         # patcher=lambda record: interface_logger_middleware(context_patcher(record))
-        # Note: context_patcher always returns the record, so 'or record' isn't strictly needed
+        # Note: context_patcher returns the record (required by loguru's patcher pattern)
 
         # Apply the combined patcher
         patcher=interface_logger_middleware
@@ -242,7 +273,9 @@ def setup_logging(context: str | None = None):
         
         # Workflow-specific format (no direction field needed)
         workflow_format = """
-{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {extra[interface]} | Req:{extra[user_request_id]} | Wf:{extra[workflow_id]} | Step:{extra[step_id]}
+{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {extra[interface]} | Phase:{extra[phase]:<12} | Req:{extra[user_request_id]} | Wf:{extra[workflow_id]} | Step:{extra[step_id]}
+Event: {extra[event_type]}
+Progress: {extra[progress_message]}
 {extra[json_data]}
 --------
 """

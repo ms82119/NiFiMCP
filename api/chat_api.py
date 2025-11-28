@@ -77,38 +77,20 @@ async def submit_chat(message: ChatMessage, background_tasks: BackgroundTasks):
         )
         
         # Start workflow execution in background
-        try:
-            # Temporarily force synchronous execution to debug
-            logger.info(f"Executing workflow synchronously for debugging")
-            await execute_workflow(
-                request_id=request_id,
-                user_input=message.content,
-                objective=message.objective,
-                provider=message.provider or "openai",
-                model_name=message.model_name or "gpt-4o-mini",
-                nifi_server_id=message.selected_nifi_server_id,
-                auto_prune_history=message.auto_prune_history,
-                max_tokens_limit=message.max_tokens_limit,
-                max_loop_iterations=message.max_loop_iterations
-            )
-            logger.info(f"Background task added successfully for request {request_id}")
-        except Exception as e:
-            logger.error(f"Failed to add background task: {e}", exc_info=True)
-            # Fallback: execute synchronously
-            logger.info(f"Falling back to synchronous execution for request {request_id}")
-            await execute_workflow(
-                request_id=request_id,
-                user_input=message.content,
-                objective=message.objective,
-                provider=message.provider or "openai",
-                model_name=message.model_name or "gpt-4o-mini",
-                nifi_server_id=message.selected_nifi_server_id,
-                auto_prune_history=message.auto_prune_history,
-                max_tokens_limit=message.max_tokens_limit,
-                max_loop_iterations=message.max_loop_iterations
-            )
+        background_tasks.add_task(
+            execute_workflow,
+            request_id=request_id,
+            user_input=message.content,
+            objective=message.objective,
+            provider=message.provider or "openai",
+            model_name=message.model_name or "gpt-4o-mini",
+            nifi_server_id=message.selected_nifi_server_id,
+            auto_prune_history=message.auto_prune_history,
+            max_tokens_limit=message.max_tokens_limit,
+            max_loop_iterations=message.max_loop_iterations
+        )
         
-        logger.info(f"Started workflow execution for request {request_id}")
+        logger.info(f"Background task added successfully for request {request_id}")
         
         return ChatResponse(
             status="started",

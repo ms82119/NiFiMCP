@@ -935,29 +935,207 @@ async def list_nifi_objects_with_streaming(
         local_logger.error(f"Unexpected error during streaming list: {e}", exc_info=True)
         raise ToolError(f"An unexpected error occurred: {e}") from e
 
+# Helper function to fetch a single object (extracted for reuse)
+async def _fetch_single_object_details(
+    object_type: str,
+    object_id: str,
+    nifi_client: NiFiClient,
+    local_logger,
+    user_request_id: str,
+    action_id: str
+) -> Dict:
+    """Internal helper to fetch details for a single object."""
+    details = {}
+    if object_type == "processor":
+        details = await nifi_client.get_processor_details(object_id)
+    elif object_type == "connection":
+        details = await nifi_client.get_connection(object_id)
+    elif object_type == "process_group":
+        details = await nifi_client.get_process_group_details(
+            object_id, user_request_id=user_request_id, action_id=action_id
+        )
+    elif object_type == "controller_service":
+        details = await nifi_client.get_controller_service_details(
+            object_id, user_request_id=user_request_id, action_id=action_id
+        )
+    elif object_type == "port":
+        # Need to determine if input or output port. Try input first.
+        try:
+            details = await nifi_client.get_input_port_details(object_id)
+            local_logger.debug(f"Object {object_id} identified as an input port.")
+        except ValueError:
+            local_logger.debug(f"Object {object_id} not found as input port, trying output port.")
+            try:
+                details = await nifi_client.get_output_port_details(object_id)
+                local_logger.debug(f"Object {object_id} identified as an output port.")
+            except ValueError as e_out:
+                local_logger.error(f"Could not find port with ID '{object_id}' as either input or output port.")
+                raise ToolError(f"Port with ID '{object_id}' not found.") from e_out
+    else:
+        raise ToolError(f"Invalid object_type specified: {object_type}")
+    return details
+
+
+# Helper functions for output formatting
+def _extract_summary(details: Dict) -> Dict:
+    """Extract essential fields only."""
+    component = details.get("component", {})
+    return {
+        "id": details.get("id"),
+        "name": component.get("name"),
+        "type": component.get("type"),
+        "state": component.get("state"),
+        "validationStatus": component.get("validationStatus"),
+        "relationships": [r.get("name") for r in component.get("relationships", [])]
+    }
+
+
+def _extract_business_properties(component: Dict) -> Dict:
+    """Extract business-relevant properties based on processor type."""
+    proc_type = component.get("type", "").split(".")[-1]
+    config = component.get("config", {})
+    properties = config.get("properties", {})
+    
+    result = {}
+    
+    if proc_type == "RouteOnAttribute":
+        for prop, value in properties.items():
+            if prop not in ["Routing Strategy"] and value:
+                result[prop] = value
+                
+    elif proc_type in ["ExecuteScript", "ExecuteGroovyScript"]:
+        script = properties.get("Script Body", "")
+        if script:
+            result["script_preview"] = script[:500] + ("..." if len(script) > 500 else "")
+            result["script_length"] = len(script)
+            
+    elif proc_type == "JoltTransformJSON":
+        spec = properties.get("Jolt Specification", "")
+        if spec:
+            result["jolt_spec"] = spec
+            
+    elif proc_type == "QueryRecord":
+        for prop, value in properties.items():
+            if value and ("query" in prop.lower() or "sql" in prop.lower()):
+                result[prop] = value
+                
+    elif proc_type == "InvokeHTTP":
+        result["url"] = properties.get("Remote URL", "")
+        result["method"] = properties.get("HTTP Method", "GET")
+        
+    elif proc_type in ["GetFile", "PutFile"]:
+        result["directory"] = properties.get("Directory", "")
+        result["file_filter"] = properties.get("File Filter", "")
+        
+    elif proc_type in ["ConsumeKafka", "PublishKafka", "ConsumeKafka_2_6", "PublishKafka_2_6"]:
+        result["topic"] = properties.get("topic", properties.get("Topic Name(s)", ""))
+        result["bootstrap_servers"] = properties.get("bootstrap.servers", "")
+    
+    return result
+
+
+def _extract_doc_optimized(details: Dict) -> Dict:
+    """Extract fields needed for documentation."""
+    component = details.get("component", {})
+    config = component.get("config", {})
+    properties = config.get("properties", {})
+    
+    # Extract expressions from properties
+    expressions = {}
+    for prop_name, prop_value in properties.items():
+        if prop_value and "${" in str(prop_value):
+            expressions[prop_name] = prop_value
+    
+    # Extract routing relationships
+    relationships = []
+    for rel in component.get("relationships", []):
+        relationships.append({
+            "name": rel.get("name"),
+            "autoTerminate": rel.get("autoTerminate", False)
+        })
+    
+    return {
+        "id": details.get("id"),
+        "name": component.get("name"),
+        "type": component.get("type"),
+        "state": component.get("state"),
+        "comments": component.get("comments", ""),
+        "expressions": expressions,
+        "relationships": relationships,
+        "business_properties": _extract_business_properties(component)
+    }
+
+
+def _format_output(
+    details: Dict, 
+    output_format: str, 
+    include_properties: bool
+) -> Dict:
+    """Format object details based on output format."""
+    
+    if output_format == "full":
+        if not include_properties:
+            # Remove properties if not needed
+            if "component" in details and "config" in details["component"]:
+                details = details.copy()
+                details["component"] = details["component"].copy()
+                details["component"]["config"] = details["component"]["config"].copy()
+                details["component"]["config"].pop("properties", None)
+        return details
+    
+    elif output_format == "summary":
+        return _extract_summary(details)
+    
+    elif output_format == "doc_optimized":
+        return _extract_doc_optimized(details)
+    
+    return details
+
+
 @mcp.tool()
 @tool_phases(["Review", "Build", "Modify", "Operate"])
 async def get_nifi_object_details(
     object_type: Literal["processor", "connection", "port", "process_group", "controller_service"],
-    object_id: str,
-    # mcp_context: dict = {} # Removed context parameter
-) -> Dict:
+    object_id: str | None = None,
+    object_ids: List[str] | None = None,
+    output_format: Literal["full", "summary", "doc_optimized"] = "full",
+    include_properties: bool = True,
+    max_parallel: int = 5
+) -> Dict | List[Dict]:
     """
-    Retrieves detailed information for a specific NiFi processor, connection, port, process group, or controller service.
+    Retrieves detailed information for one or more NiFi objects.
 
     Parameters
     ----------
     object_type : Literal["processor", "connection", "port", "process_group", "controller_service"]
         The type of NiFi object to retrieve details for.
-    object_id : str
-        The ID of the specific NiFi object.
-    # Removed mcp_context from docstring
+    object_id : str | None
+        Single object ID (for backward compatibility).
+    object_ids : List[str] | None
+        List of object IDs for batch retrieval.
+        Either object_id OR object_ids must be provided, not both.
+    output_format : Literal["full", "summary", "doc_optimized"]
+        - "full": Complete object details (default, backward compatible)
+        - "summary": Essential fields only (name, type, state, relationships)
+        - "doc_optimized": Fields needed for documentation (includes expressions, routing)
+    include_properties : bool
+        Whether to include processor properties (default True).
+        Set to False for lighter payloads when properties aren't needed.
+    max_parallel : int
+        Maximum parallel requests for batch mode (default 5).
 
     Returns
     -------
-    Dict
-        A dictionary containing the detailed entity information for the specified object, including component details, configuration, status, and revision.
+    Dict | List[Dict]
+        - Single object_id: Returns Dict (backward compatible)
+        - object_ids list: Returns List[Dict] with results for each ID
     """
+    # Validation
+    if object_id and object_ids:
+        raise ToolError("Provide either object_id or object_ids, not both.")
+    if not object_id and not object_ids:
+        raise ToolError("Must provide either object_id or object_ids.")
+    
     # Get client and logger from context variables
     nifi_client: Optional[NiFiClient] = current_nifi_client.get()
     local_logger = current_request_logger.get() or logger
@@ -967,73 +1145,81 @@ async def get_nifi_object_details(
     if not isinstance(nifi_client, NiFiClient):
          raise ToolError(f"Invalid NiFi client type found in context: {type(nifi_client)}")
          
-    # await ensure_authenticated(nifi_client, local_logger) # Removed
-    
     # --- Get IDs from context --- 
     user_request_id = current_user_request_id.get() or "-"
     action_id = current_action_id.get() or "-"
     # --------------------------
 
-    local_logger.info(f"Getting details for NiFi object type '{object_type}' with ID '{object_id}'")
-    nifi_req = {"operation": f"get_{object_type}_details", "id": object_id}
-    local_logger.bind(interface="nifi", direction="request", data=nifi_req).debug("Calling NiFi API")
+    # Single ID mode (backward compatible)
+    if object_id:
+        local_logger.info(f"Getting details for NiFi object type '{object_type}' with ID '{object_id}'")
+        nifi_req = {"operation": f"get_{object_type}_details", "id": object_id}
+        local_logger.bind(interface="nifi", direction="request", data=nifi_req).debug("Calling NiFi API")
 
-    try:
-        details = {}
-        if object_type == "processor":
-            details = await nifi_client.get_processor_details(object_id)
-        elif object_type == "connection":
-            details = await nifi_client.get_connection(object_id)
-        elif object_type == "process_group":
-            # Use the method that passes context IDs
-            details = await nifi_client.get_process_group_details(
-                object_id, user_request_id=user_request_id, action_id=action_id
+        try:
+            details = await _fetch_single_object_details(
+                object_type, object_id, nifi_client, local_logger, user_request_id, action_id
             )
-        elif object_type == "controller_service":
-            details = await nifi_client.get_controller_service_details(
-                object_id, user_request_id=user_request_id, action_id=action_id
-            )
-        elif object_type == "port":
-            # Need to determine if input or output port. Try input first.
-            try:
-                details = await nifi_client.get_input_port_details(object_id)
-                local_logger.debug(f"Object {object_id} identified as an input port.")
-            except ValueError:
-                local_logger.debug(f"Object {object_id} not found as input port, trying output port.")
-                try:
-                    details = await nifi_client.get_output_port_details(object_id)
-                    local_logger.debug(f"Object {object_id} identified as an output port.")
-                except ValueError as e_out:
-                    local_logger.error(f"Could not find port with ID '{object_id}' as either input or output port.")
-                    raise ToolError(f"Port with ID '{object_id}' not found.") from e_out
-        else:
-            # Should not happen due to Literal validation, but good practice
-            raise ToolError(f"Invalid object_type specified: {object_type}")
+            formatted = _format_output(details, output_format, include_properties)
             
-        local_logger.bind(interface="nifi", direction="response", data={
-            "object_id": object_id, 
-            "object_type": object_type, 
-            "has_details": bool(details)
+            local_logger.bind(interface="nifi", direction="response", data={
+                "object_id": object_id, 
+                "object_type": object_type, 
+                "has_details": bool(formatted)
             }).debug("Received from NiFi API")
-        local_logger.info(f"Successfully retrieved details for {object_type} {object_id}")
-        return details
+            local_logger.info(f"Successfully retrieved details for {object_type} {object_id}")
+            return formatted
 
-    except NiFiAuthenticationError as e:
-         local_logger.error(f"Authentication error getting details for {object_type} {object_id}: {e}", exc_info=False)
-         raise ToolError(f"Authentication error accessing NiFi: {e}") from e
-    except ValueError as e:
-        # Catch not found errors specifically
-        local_logger.warning(f"Could not find {object_type} with ID '{object_id}': {e}")
-        local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API")
-        raise ToolError(f"{object_type.capitalize()} with ID '{object_id}' not found.") from e
-    except (ConnectionError, ToolError) as e:
-        local_logger.error(f"Error getting details for {object_type} {object_id}: {e}", exc_info=False)
-        local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API")
-        raise ToolError(f"Error getting details for {object_type} {object_id}: {e}") from e
-    except Exception as e:
-        local_logger.error(f"Unexpected error getting details for {object_type} {object_id}: {e}", exc_info=True)
-        local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received unexpected error from NiFi API")
-        raise ToolError(f"An unexpected error occurred: {e}") from e
+        except NiFiAuthenticationError as e:
+            local_logger.error(f"Authentication error getting details for {object_type} {object_id}: {e}", exc_info=False)
+            raise ToolError(f"Authentication error accessing NiFi: {e}") from e
+        except ValueError as e:
+            local_logger.warning(f"Could not find {object_type} with ID '{object_id}': {e}")
+            local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API")
+            raise ToolError(f"{object_type.capitalize()} with ID '{object_id}' not found.") from e
+        except (ConnectionError, ToolError) as e:
+            local_logger.error(f"Error getting details for {object_type} {object_id}: {e}", exc_info=False)
+            local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API")
+            raise ToolError(f"Error getting details for {object_type} {object_id}: {e}") from e
+        except Exception as e:
+            local_logger.error(f"Unexpected error getting details for {object_type} {object_id}: {e}", exc_info=True)
+            local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received unexpected error from NiFi API")
+            raise ToolError(f"An unexpected error occurred: {e}") from e
+    
+    # Batch mode
+    local_logger.info(f"Batch fetching {len(object_ids)} {object_type} details")
+    
+    # Use semaphore to limit parallel requests
+    semaphore = asyncio.Semaphore(max_parallel)
+    
+    async def fetch_with_semaphore(obj_id: str) -> Dict:
+        async with semaphore:
+            try:
+                details = await _fetch_single_object_details(
+                    object_type, obj_id, nifi_client, local_logger, user_request_id, action_id
+                )
+                formatted = _format_output(details, output_format, include_properties)
+                return {
+                    "id": obj_id,
+                    "status": "success",
+                    "data": formatted
+                }
+            except Exception as e:
+                return {
+                    "id": obj_id,
+                    "status": "error",
+                    "error": str(e)
+                }
+    
+    # Execute all fetches in parallel (with semaphore limiting)
+    tasks = [fetch_with_semaphore(obj_id) for obj_id in object_ids]
+    results = await asyncio.gather(*tasks)
+    
+    # Log summary
+    success_count = sum(1 for r in results if r["status"] == "success")
+    local_logger.info(f"Batch fetch complete: {success_count}/{len(object_ids)} successful")
+    
+    return results
 
 @mcp.tool()
 @tool_phases(["Review", "Build", "Modify", "Operate"])

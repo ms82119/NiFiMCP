@@ -372,14 +372,9 @@ class NiFiChatApp {
             this.finalMessageCreated = {};
         }
         
-        // Only process if we haven't created a final message yet, OR if this event has complete metadata
-        const hasCompleteMetadata = data.result?.metadata && 
-            data.result.metadata.model_name && 
-            data.result.metadata.model_name !== 'unknown' &&
-            data.result.metadata.token_count_in > 0;
-            
-        if (this.finalMessageCreated[requestId] && !hasCompleteMetadata) {
-            console.log('Final message already created for request (early guard):', requestId);
+        // NEVER create duplicate final messages, regardless of metadata
+        if (this.finalMessageCreated[requestId]) {
+            console.log('Final message already created for request, ignoring duplicate:', requestId);
             return;
         }
         
@@ -646,9 +641,15 @@ class NiFiChatApp {
             }
             // Workflow start message gets no icon
             
-            // Avoid duplicate consecutive steps
-            if (!this.aggregatedSteps[requestId].length || 
-                this.aggregatedSteps[requestId][this.aggregatedSteps[requestId].length - 1] !== stepLine) {
+            // Avoid duplicate steps (check entire array, not just last item)
+            // Extract a unique key from the step for comparison (remove HTML tags for comparison)
+            const stepKey = stepLine.replace(/<[^>]+>/g, '').trim();
+            const isDuplicate = this.aggregatedSteps[requestId].some(existingStep => {
+                const existingKey = existingStep.replace(/<[^>]+>/g, '').trim();
+                return existingKey === stepKey;
+            });
+            
+            if (!isDuplicate) {
                 this.aggregatedSteps[requestId].push(stepLine);
             }
         }

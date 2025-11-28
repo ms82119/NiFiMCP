@@ -322,12 +322,14 @@ class ChatStorage:
             with sqlite3.connect(self.db_path) as conn:
                 # Delete all messages
                 conn.execute("DELETE FROM messages")
-                deleted_count = conn.total_changes
-                self.logger.info(f"Cleared {deleted_count} messages from chat history")
+                deleted_messages = conn.total_changes
+                self.logger.info(f"Cleared {deleted_messages} messages from chat history")
                 
                 # Also clear workflows table
+                # Note: total_changes is cumulative, so we need to track the count before the second DELETE
                 conn.execute("DELETE FROM workflows")
-                deleted_workflows = conn.total_changes
+                # Calculate workflows deleted by subtracting messages count from total changes
+                deleted_workflows = conn.total_changes - deleted_messages
                 self.logger.info(f"Cleared {deleted_workflows} workflows from history")
                 
         except Exception as e:
