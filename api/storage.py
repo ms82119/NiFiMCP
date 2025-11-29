@@ -7,7 +7,7 @@ This module handles storing and retrieving chat messages using SQLite.
 import json
 import sqlite3
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from loguru import logger
 
 
@@ -307,12 +307,25 @@ class ChatStorage:
     def cleanup_old_messages(self, days: int = 30):
         """Clean up messages older than specified days."""
         try:
+            # Validate days parameter to prevent negative values or injection attempts
+            if not isinstance(days, int) or days < 0:
+                self.logger.warning(f"Invalid days parameter: {days}, using default 30")
+                days = 30
+            
+            # Calculate cutoff timestamp in Python to avoid SQL injection
+            # Use parameterized query with the calculated timestamp
+            cutoff_date = datetime.now() - timedelta(days=days)
+            cutoff_timestamp = cutoff_date.strftime('%Y-%m-%d %H:%M:%S')
+            
             with sqlite3.connect(self.db_path) as conn:
+                # Use parameterized query to prevent SQL injection
                 conn.execute(
-                    "DELETE FROM messages WHERE timestamp < datetime('now', '-{} days')".format(days)
+                    "DELETE FROM messages WHERE timestamp < ?",
+                    (cutoff_timestamp,)
                 )
                 deleted_count = conn.total_changes
-                self.logger.info(f"Cleaned up {deleted_count} old messages")
+                conn.commit()
+                self.logger.info(f"Cleaned up {deleted_count} old messages (older than {days} days)")
         except Exception as e:
             self.logger.error(f"Failed to cleanup old messages: {e}")
     
@@ -320,17 +333,19 @@ class ChatStorage:
         """Clear all chat history from the database."""
         try:
             with sqlite3.connect(self.db_path) as conn:
-                # Delete all messages
-                conn.execute("DELETE FROM messages")
-                deleted_messages = conn.total_changes
+                # Delete all messages using cursor.rowcount for accurate count
+                cursor = conn.execute("DELETE FROM messages")
+                deleted_messages = cursor.rowcount
                 self.logger.info(f"Cleared {deleted_messages} messages from chat history")
                 
-                # Also clear workflows table
-                # Note: total_changes is cumulative, so we need to track the count before the second DELETE
-                conn.execute("DELETE FROM workflows")
-                # Calculate workflows deleted by subtracting messages count from total changes
-                deleted_workflows = conn.total_changes - deleted_messages
+                # Also clear workflows table using cursor.rowcount
+                cursor = conn.execute("DELETE FROM workflows")
+                deleted_workflows = cursor.rowcount
                 self.logger.info(f"Cleared {deleted_workflows} workflows from history")
+                
+                # Explicitly commit to ensure deletions are persisted
+                # This matches the pattern used in cleanup_old_messages for consistency
+                conn.commit()
                 
         except Exception as e:
             self.logger.error(f"Failed to clear chat history: {e}")

@@ -9,6 +9,7 @@ import sys
 import os
 import uuid
 import asyncio
+import time
 from typing import Dict, Any, List, Optional
 
 # Import PocketFlow async classes from the installed package
@@ -67,14 +68,23 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     def get_chat_manager(self) -> ChatManager:
         """Get or create the ChatManager instance."""
         if self._chat_manager is None:
+            config_dict = None  # Initialize to None
+            
             # Try to get config from execution state first (passed from main thread)
             if hasattr(self, '_config_dict') and self._config_dict:
                 config_dict = self._config_dict
                 self.bound_logger.info("Using config passed from main thread")
-            elif hasattr(self, 'execution_state') and self.execution_state and self.execution_state.get('_config_dict'):
-                config_dict = self.execution_state['_config_dict']
-                self.bound_logger.info("Using config from shared state")
-            else:
+            elif hasattr(self, 'execution_state') and self.execution_state:
+                # Defensive check: ensure execution_state is a dict before calling .get()
+                if isinstance(self.execution_state, dict) and self.execution_state.get('_config_dict'):
+                    config_dict = self.execution_state['_config_dict']
+                    self.bound_logger.info("Using config from shared state")
+                else:
+                    # execution_state exists but is not a dict or doesn't have _config_dict
+                    self.bound_logger.debug(f"execution_state is not a dict or missing _config_dict: {type(self.execution_state)}")
+                    config_dict = None
+            
+            if not config_dict:
                 # Fallback: Import config in background thread (may cause warnings)
                 try:
                     import sys
@@ -123,6 +133,10 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     def set_execution_state(self, execution_state: Dict[str, Any]):
         """Set execution state to access config from shared state."""
+        # Defensive check: ensure execution_state is a dict
+        if not isinstance(execution_state, dict):
+            self.bound_logger.error(f"set_execution_state called with non-dict! Type: {type(execution_state)}, Value: {str(execution_state)[:200]}")
+            raise ValueError(f"execution_state must be a dict, got {type(execution_state).__name__}")
         self.execution_state = execution_state
         self.bound_logger.info("Execution state set in workflow node")
     
@@ -134,8 +148,49 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     async def prep_async(self, shared: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare the node execution context."""
+        # Log node prep with shared state snapshot
+        if isinstance(shared, dict):
+            snapshot = self._create_shared_state_snapshot(shared)
+            self.workflow_logger.bind(
+                interface="workflow",
+                data={
+                    "node_name": self.name,
+                    "action": "prep",
+                    "shared_state_snapshot": snapshot
+                }
+            ).info(f"Node prep: {self.name}")
+        
         # Default prep - subclasses should override
         return shared
+    
+    def _create_shared_state_snapshot(self, shared: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a snapshot of shared state for logging."""
+        if not isinstance(shared, dict):
+            return {"error": "shared is not a dict"}
+        
+        snapshot = {
+            "keys": list(shared.keys()),
+            "sizes": {}
+        }
+        
+        # Track sizes of important keys
+        important_keys = ["pg_tree", "pg_summaries", "doc_sections", "final_document", 
+                         "processors", "connections", "process_groups"]
+        for key in important_keys:
+            value = shared.get(key)
+            if isinstance(value, (list, dict, str)):
+                snapshot["sizes"][key] = len(value)
+            elif value is not None:
+                snapshot["sizes"][key] = 1  # Non-empty but not sizeable
+        
+        # Include a few key values (truncated)
+        snapshot["sample_values"] = {}
+        for key in ["current_phase", "workflow_name", "process_group_id", "user_request_id"]:
+            if key in shared:
+                val = shared[key]
+                snapshot["sample_values"][key] = str(val)[:100] if val else None
+        
+        return snapshot
     
     async def exec_async(self, prep_res: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the node logic."""
@@ -144,12 +199,37 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     async def post_async(self, shared: Dict[str, Any], prep_res: Dict[str, Any], exec_res: Dict[str, Any]) -> str:
         """Post-process the execution results."""
+        # Log node post with shared state snapshot showing changes
+        if isinstance(shared, dict):
+            snapshot = self._create_shared_state_snapshot(shared)
+            exec_summary = {}
+            if isinstance(exec_res, dict):
+                exec_summary = {
+                    "status": exec_res.get("status", "unknown"),
+                    "keys": list(exec_res.keys())[:10]  # Limit to first 10 keys
+                }
+            
+            self.workflow_logger.bind(
+                interface="workflow",
+                data={
+                    "node_name": self.name,
+                    "action": "post",
+                    "shared_state_snapshot": snapshot,
+                    "exec_result_summary": exec_summary
+                }
+            ).info(f"Node post: {self.name}")
+        
         # Default post - return default action
         return "default"
     
     async def call_llm_async(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], 
                            execution_state: Dict[str, Any], action_id: str) -> Dict[str, Any]:
         """Call LLM asynchronously with event emission."""
+        # Defensive check: ensure execution_state is a dict
+        if not isinstance(execution_state, dict):
+            self.bound_logger.error(f"execution_state is not a dict in call_llm_async! Type: {type(execution_state)}")
+            raise ValueError(f"execution_state must be a dict, got {type(execution_state).__name__}")
+        
         workflow_id = execution_state.get("workflow_id", "unknown")
         step_id = execution_state.get("step_id", self.name)
         user_request_id = execution_state.get("user_request_id")
@@ -480,4 +560,160 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             
         except Exception as e:
             self.bound_logger.error(f"Error preparing tools: {e}")
-            return [] 
+            return []
+    
+    async def call_nifi_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        prep_res: Dict[str, Any]
+    ) -> Any:
+        """
+        Helper method to call NiFi tools via MCP.
+        
+        Args:
+            tool_name: Name of the tool to call
+            arguments: Tool arguments
+            prep_res: Prep result containing execution context
+        
+        Returns:
+            Tool execution result
+        """
+        workflow_id = prep_res.get("workflow_id", "unknown")
+        step_id = prep_res.get("step_id", self.name)
+        user_request_id = prep_res.get("user_request_id")
+        nifi_server_id = prep_res.get("nifi_server_id")
+        
+        # Generate action ID for this tool call
+        import uuid
+        action_id = f"wf-{workflow_id}-{step_id}-tool-{uuid.uuid4()}"
+        
+        # Emit tool start event
+        await emit_tool_start(workflow_id, step_id, {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "action_id": action_id
+        }, user_request_id)
+        
+        try:
+            # Execute tool via MCP
+            loop = asyncio.get_event_loop()
+            
+            def call_sync_tool():
+                return execute_mcp_tool(
+                    tool_name=tool_name,
+                    params=arguments,
+                    selected_nifi_server_id=nifi_server_id,
+                    user_request_id=user_request_id,
+                    action_id=action_id
+                )
+            
+            result = await loop.run_in_executor(None, call_sync_tool)
+            
+            # Calculate result length for UI display
+            result_str = str(result) if result is not None else ""
+            result_length = len(result_str)
+            
+            # Emit tool complete event with result length for UI
+            await emit_tool_complete(workflow_id, step_id, {
+                "tool_name": tool_name,
+                "action_id": action_id,
+                "result_length": result_length,
+                "tool_result": result_str[:200] if result_length > 0 else "",  # Preview for UI
+                "status": "success"
+            }, user_request_id)
+            
+            return result
+            
+        except Exception as e:
+            # Emit tool error event
+            await self.event_emitter.emit(EventTypes.TOOL_ERROR, {
+                "tool_name": tool_name,
+                "action_id": action_id,
+                "error": str(e),
+                "status": "error"
+            }, workflow_id, step_id, user_request_id)
+            
+            self.bound_logger.error(f"Tool call failed: {e}", exc_info=True)
+            raise
+    
+    async def emit_doc_phase_event(
+        self,
+        event_type: str,
+        phase: str,
+        shared: Dict[str, Any],
+        metrics: Optional[Dict[str, Any]] = None,
+        progress_message: Optional[str] = None
+    ):
+        """
+        Helper method to emit documentation phase events.
+        
+        Args:
+            event_type: Event type (from EventTypes)
+            phase: Phase name (INIT, DISCOVERY, ANALYSIS, GENERATION)
+            shared: Shared state dict
+            metrics: Optional metrics dict
+            progress_message: Optional progress message
+        """
+        from ..core.event_system import (
+            emit_doc_phase_start,
+            emit_doc_phase_complete,
+            emit_doc_progress,
+        )
+        
+        workflow_id = shared.get("workflow_id", "unknown") if isinstance(shared, dict) else "unknown"
+        step_id = shared.get("step_id", self.name) if isinstance(shared, dict) else self.name
+        user_request_id = shared.get("user_request_id") if isinstance(shared, dict) else None
+
+        # Optional: small shared_state snapshot for observability
+        details = None
+        if isinstance(shared, dict):
+            snapshot_keys = ["pg_tree", "pg_summaries", "doc_sections", "final_document"]
+            sizes: Dict[str, int] = {}
+            for key in snapshot_keys:
+                value = shared.get(key)
+                if isinstance(value, (list, dict, str)):
+                    sizes[key] = len(value)
+            if sizes:
+                details = {"snapshot_sizes": sizes}
+        
+        if event_type == EventTypes.DOC_PHASE_START:
+            # Use provided progress_message or a sensible default
+            msg = progress_message or f"{phase} phase starting..."
+            await emit_doc_phase_start(
+                workflow_id,
+                step_id,
+                phase,
+                progress_message=msg,
+                details=details,
+                user_request_id=user_request_id,
+            )
+        elif event_type == EventTypes.DOC_PHASE_COMPLETE:
+            started_at = shared.get(f"{phase}_start_time", time.time())
+            await emit_doc_phase_complete(
+                workflow_id,
+                step_id,
+                phase,
+                started_at,
+                metrics or {},
+                progress_message=progress_message,
+                details=details,
+                user_request_id=user_request_id,
+            )
+        elif event_type == EventTypes.DOC_PROGRESS_UPDATE:
+            await emit_doc_progress(
+                workflow_id,
+                step_id,
+                phase,
+                progress_message or "",
+                None,
+                metrics,
+                user_request_id,
+            )
+        else:
+            # Generic event emission
+            await self.event_emitter.emit(event_type, {
+                "phase": phase,
+                "metrics": metrics or {},
+                "message": progress_message
+            }, workflow_id, step_id, user_request_id) 

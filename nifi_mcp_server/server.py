@@ -413,14 +413,16 @@ async def execute_tool(
         # ----------------------- #
 
         # --- Execute the tool via MCP --- #
-        bound_logger.info(f"Executing tool '{tool_name}'...")
+        # Note: Detailed MCP request/response logging is handled by mcp_debug.log
+        # We only log high-level success here to avoid duplication
+        bound_logger.debug(f"Executing tool '{tool_name}'...")
         
         # Call the tool using the correct method on the FastMCP instance
         # ContextVars provide client/logger implicitly via the context mechanism within call_tool
         tool_result_mcp_format = await mcp.call_tool(tool_name, tool_input)
                 
-        bound_logger.info(f"Tool '{tool_name}' execution successful.")
-        bound_logger.debug(f"Raw MCP Tool result: {tool_result_mcp_format}") 
+        # Only log at debug level - detailed results are in mcp_debug.log
+        bound_logger.debug(f"Tool '{tool_name}' execution successful.") 
         
         # --- Extract serializable result from MCP format --- 
         final_result_to_serialize = None

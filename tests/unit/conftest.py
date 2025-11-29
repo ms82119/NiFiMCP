@@ -1,9 +1,18 @@
 import pytest
 import httpx
 from typing import AsyncGenerator
+from unittest.mock import patch, MagicMock
 
 # Unit test configuration - no server connectivity required
 # This prevents integration test fixtures from causing warnings
+
+# Mock FastMCP to prevent import errors during unit tests
+@pytest.fixture(scope="session", autouse=True)
+def mock_fastmcp():
+    """Mock FastMCP to prevent import errors in unit tests."""
+    with patch('nifi_mcp_server.core.FastMCP') as mock_mcp:
+        mock_mcp.return_value = MagicMock()
+        yield
 
 # Override the fixtures from parent conftest.py to prevent warnings
 @pytest.fixture(scope="module")

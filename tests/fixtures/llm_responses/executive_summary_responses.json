@@ -1,0 +1,6 @@
+{
+  "executive_summary_default": "This NiFi data flow processes customer transaction files from SFTP servers located at /data/incoming, validates the transaction records against business rules, enriches them with customer data from the customer database, and delivers validated transactions to the Kafka topic 'validated-transactions' for downstream processing. The flow handles approximately 10,000 transactions per hour and includes error handling for invalid records.",
+  
+  "executive_summary_complex": "This comprehensive data pipeline orchestrates multi-source data ingestion from SFTP servers, HTTP APIs, and Kafka topics. It performs data validation, transformation, and enrichment before routing processed records to multiple destinations including databases, message queues, and file systems. The flow processes data from /data/incoming, validates against schemas, enriches with reference data, and outputs to both the transactions database and the analytics Kafka topic."
+}
+

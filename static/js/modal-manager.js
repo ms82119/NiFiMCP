@@ -45,6 +45,7 @@ class ModalManager {
         const modal = document.getElementById('workflow-modal');
         if (modal) {
             modal.style.display = 'flex';
+            console.log('ModalManager: Opening workflow modal');
             this.loadModalData();
         }
     }
@@ -64,13 +65,17 @@ class ModalManager {
     
     async loadWorkflowsModal() {
         try {
+            console.log('ModalManager: Loading workflows for modal');
             const response = await fetch('/api/settings/workflows');
             if (response.ok) {
                 const workflows = await response.json();
+                console.log('ModalManager: Received workflows:', workflows.map(w => w.name));
                 this.setupWorkflowSelect(workflows);
                 // Extract phases from both workflows and tools (tools should be loaded by now)
                 this.extractPhases(workflows);
                 this.setupPhaseFilters();
+            } else {
+                console.error('ModalManager: Failed to load workflows, status:', response.status);
             }
         } catch (error) {
             console.error('Error loading workflows for modal:', error);
@@ -80,23 +85,48 @@ class ModalManager {
     setupWorkflowSelect(workflows) {
         const select = document.getElementById('workflow-select-modal');
         if (select) {
+            // Get saved workflow from localStorage
+            const savedWorkflow = localStorage.getItem('nifi_chat_workflow') || 'unguided';
+            console.log('ModalManager: Loading workflows, saved workflow from localStorage:', savedWorkflow);
+            
             select.innerHTML = '';
             workflows.forEach(workflow => {
                 const option = document.createElement('option');
                 option.value = workflow.name;
                 option.textContent = workflow.display_name || workflow.name;
-                if (workflow.name === 'unguided') {
+                // Select the saved workflow, or default to 'unguided'
+                if (workflow.name === savedWorkflow) {
                     option.selected = true;
+                    console.log('ModalManager: Selected workflow option:', workflow.name);
                 }
                 select.appendChild(option);
             });
             
-            // Add change listener
-            select.addEventListener('change', (e) => {
+            // Update current workflow display to match selection
+            this.updateCurrentWorkflow(savedWorkflow);
+            
+            // Remove any existing change listeners by cloning (this removes all event listeners)
+            const oldSelect = select;
+            const newSelect = oldSelect.cloneNode(true);
+            oldSelect.parentNode.replaceChild(newSelect, oldSelect);
+            
+            // Get the fresh select element
+            const freshSelect = document.getElementById('workflow-select-modal');
+            if (!freshSelect) {
+                console.error('ModalManager: Could not find workflow-select-modal after cloning');
+                return;
+            }
+            
+            // Add change listener to the fresh select element
+            freshSelect.addEventListener('change', (e) => {
                 const selectedWorkflow = e.target.value;
+                console.log('ModalManager: Workflow selection changed to:', selectedWorkflow);
+                console.log('ModalManager: Saving to localStorage:', selectedWorkflow);
                 this.updateCurrentWorkflow(selectedWorkflow);
                 this.updateWorkflowDescription(selectedWorkflow, workflows, 'workflow-description-modal');
             });
+            
+            console.log('ModalManager: Event listener attached to workflow select');
             
             // Set initial description
             const currentWorkflow = select.value || 'unguided';
@@ -247,11 +277,16 @@ class ModalManager {
     }
     
     updateCurrentWorkflow(workflowName) {
+        console.log('ModalManager.updateCurrentWorkflow called with:', workflowName);
         const currentWorkflowSpan = document.getElementById('current-workflow');
         if (currentWorkflowSpan) {
             currentWorkflowSpan.textContent = workflowName;
+            console.log('ModalManager: Updated current-workflow span to:', workflowName);
+        } else {
+            console.warn('ModalManager: current-workflow span not found');
         }
         localStorage.setItem('nifi_chat_workflow', workflowName);
+        console.log('ModalManager: Saved to localStorage:', workflowName, 'Current value:', localStorage.getItem('nifi_chat_workflow'));
     }
     
     updateWorkflowDescription(workflowName, workflows, descriptionElementId) {

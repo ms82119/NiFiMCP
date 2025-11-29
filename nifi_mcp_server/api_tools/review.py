@@ -234,11 +234,12 @@ async def _list_components_recursively_with_timeout(
                 })
                 
         except (ConnectionError, ValueError, NiFiAuthenticationError) as e:
-            local_logger.error(f"Error fetching {object_type} for PG {pg_id} during recursion: {e}")
+            error_msg = str(e) or repr(e) or f"Unknown error fetching {object_type}"
+            local_logger.error(f"Error fetching {object_type} for PG {pg_id} during recursion: {error_msg}")
             all_results.append({
                 "process_group_id": pg_id,
                 "process_group_name": current_pg_name,
-                "error": f"Failed to retrieve {object_type}: {e}"
+                "error": f"Failed to retrieve {object_type}: {error_msg}"
             })
         except Exception as e:
             local_logger.error(f"Unexpected error fetching {object_type} for PG {pg_id} during recursion: {e}", exc_info=True)
@@ -1034,7 +1035,7 @@ def _extract_business_properties(component: Dict) -> Dict:
     return result
 
 
-def _extract_doc_optimized(details: Dict) -> Dict:
+def _extract_doc_optimized(details: Dict, include_properties: bool = False) -> Dict:
     """Extract fields needed for documentation."""
     component = details.get("component", {})
     config = component.get("config", {})
@@ -1054,7 +1055,7 @@ def _extract_doc_optimized(details: Dict) -> Dict:
             "autoTerminate": rel.get("autoTerminate", False)
         })
     
-    return {
+    result = {
         "id": details.get("id"),
         "name": component.get("name"),
         "type": component.get("type"),
@@ -1064,6 +1065,14 @@ def _extract_doc_optimized(details: Dict) -> Dict:
         "relationships": relationships,
         "business_properties": _extract_business_properties(component)
     }
+    
+    # Include properties if requested (needed for IO endpoint extraction)
+    if include_properties:
+        # Include component/config structure so properties can be accessed
+        result["component"] = component
+        result["config"] = config
+    
+    return result
 
 
 def _format_output(
@@ -1087,7 +1096,7 @@ def _format_output(
         return _extract_summary(details)
     
     elif output_format == "doc_optimized":
-        return _extract_doc_optimized(details)
+        return _extract_doc_optimized(details, include_properties=include_properties)
     
     return details
 
@@ -1557,7 +1566,10 @@ async def get_process_group_status(
 
         # Handle potential errors from gather
         if isinstance(processors_resp, Exception): local_logger.error(f"Error listing processors: {processors_resp}"); processors_resp = []
-        if isinstance(connections_resp, Exception): local_logger.error(f"Error listing connections: {connections_resp}"); connections_resp = []
+        if isinstance(connections_resp, Exception): 
+            error_msg = str(connections_resp) or repr(connections_resp) or "Unknown error"
+            local_logger.error(f"Error listing connections: {error_msg}")
+            connections_resp = []
         if isinstance(input_ports_resp, Exception): local_logger.error(f"Error listing input ports: {input_ports_resp}"); input_ports_resp = []
         if isinstance(output_ports_resp, Exception): local_logger.error(f"Error listing output ports: {output_ports_resp}"); output_ports_resp = []
         

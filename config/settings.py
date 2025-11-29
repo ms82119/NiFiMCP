@@ -45,32 +45,32 @@ DEFAULT_APP_CONFIG = {
         'enabled_workflows': [
             'unguided',
             'flow_documentation'
-        ]
-    },
-    'documentation_workflow': {
-        'discovery': {
-            'timeout_seconds': 120,       # Max time for discovery phase
-            'max_depth': 10,              # Max PG nesting depth
-            'batch_size': 50,             # Components per API call
-            'max_retries': 3              # Retries on API failure
-        },
-        'analysis': {
-            'large_pg_threshold': 25,     # Trigger virtual grouping above this
-            'max_processors_per_llm_call': 30,  # Batch size for LLM
-            'max_tokens_per_analysis': 8000,     # Token budget per call
-            'min_virtual_groups': 3,      # Minimum virtual groups
-            'max_virtual_groups': 7,      # Maximum virtual groups
-            'include_unclassified': True  # Report unknown types
-        },
-        'generation': {
-            'max_mermaid_nodes': 50,      # Simplify large diagrams
-            'summary_max_words': 500,     # Executive summary limit
-            'include_all_io': True        # Always list IO processors
-        },
-        'output': {
-            'format': 'markdown',         # Output format
-            'include_raw_data': False,    # Include JSON appendix
-            'validate_mermaid': True      # Validate diagram syntax
+        ],
+        'documentation_workflow': {
+            'discovery': {
+                'timeout_seconds': 120,       # Max time for discovery phase
+                'max_depth': 10,              # Max PG nesting depth
+                'batch_size': 50,             # Components per API call
+                'max_retries': 3              # Retries on API failure
+            },
+            'analysis': {
+                'large_pg_threshold': 25,     # Trigger virtual grouping above this
+                'max_processors_per_llm_call': 30,  # Batch size for LLM
+                'max_tokens_per_analysis': 8000,     # Token budget per call
+                'min_virtual_groups': 3,      # Minimum virtual groups
+                'max_virtual_groups': 7,      # Maximum virtual groups
+                'include_unclassified': True  # Report unknown types
+            },
+            'generation': {
+                'max_mermaid_nodes': 50,      # Simplify large diagrams
+                'summary_max_words': 500,     # Executive summary limit
+                'include_all_io': True        # Always list IO processors
+            },
+            'output': {
+                'format': 'markdown',         # Output format
+                'include_raw_data': False,    # Include JSON appendix
+                'validate_mermaid': True      # Validate diagram syntax
+            }
         }
     }
 }
@@ -276,9 +276,18 @@ print(f"  Enabled Workflows: {get_enabled_workflows()}")
 # --- Documentation Workflow Configuration Accessors ---
 
 def get_documentation_workflow_config() -> dict:
-    """Returns the documentation workflow configuration."""
+    """Returns the documentation workflow configuration.
+    
+    Looks in workflows.documentation_workflow first (correct location),
+    then falls back to root-level documentation_workflow for backward compatibility.
+    """
+    workflows_config = _APP_CONFIG.get('workflows', {})
+    if 'documentation_workflow' in workflows_config:
+        return workflows_config['documentation_workflow']
+    
+    # Fallback to root level for backward compatibility
     return _APP_CONFIG.get('documentation_workflow', 
-                           DEFAULT_APP_CONFIG.get('documentation_workflow', {}))
+                           DEFAULT_APP_CONFIG.get('workflows', {}).get('documentation_workflow', {}))
 
 def get_doc_discovery_config() -> dict:
     """Returns discovery phase configuration."""

@@ -112,7 +112,7 @@ def context_patcher(record):
 def interface_logger_middleware(record):
     """Middleware to pre-process the log record for interface logging."""
     # --- Call context_patcher first --- #
-    context_patcher(record)
+    record = context_patcher(record)  # Capture return value to get phase and other context fields
     # ---------------------------------- #
     
     # Only process records with 'interface' in extra
@@ -123,15 +123,20 @@ def interface_logger_middleware(record):
             
             # Extract phase from data if present (for workflow logs)
             if record["extra"].get("interface") == "workflow":
-                phase = data.get("phase", record["extra"].get("phase", "-"))
+                # Check both data dict and direct extra fields (event system uses both)
+                phase = data.get("phase") or record["extra"].get("phase", "-")
                 record["extra"]["phase"] = phase
                 
                 # Extract event type if present
-                event_type = data.get("event_type", "-")
+                event_type = data.get("event_type") or record["extra"].get("event_type", "-")
                 record["extra"]["event_type"] = event_type
                 
                 # Extract progress message if present
-                progress_msg = data.get("message", data.get("progress_message", ""))
+                progress_msg = (
+                    data.get("progress_message") or 
+                    data.get("message") or 
+                    record["extra"].get("progress_message", "")
+                )
                 record["extra"]["progress_message"] = progress_msg
             
             # Serialize the data to JSON using our SafeJsonEncoder

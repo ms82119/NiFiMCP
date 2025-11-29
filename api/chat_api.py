@@ -7,6 +7,7 @@ integrating with the existing workflow executor and LLM components.
 
 import uuid
 import asyncio
+from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, BackgroundTasks
@@ -61,18 +62,24 @@ async def submit_chat(message: ChatMessage, background_tasks: BackgroundTasks):
         # Generate unique request ID
         request_id = str(uuid.uuid4())
         
+        # Determine workflow name (default to unguided)
+        # Debug: Log what we received
+        logger.info(f"Received chat message - workflow_name from request: {message.workflow_name}, process_group_id: {message.process_group_id}")
+        workflow_name = message.workflow_name or "unguided"
+        logger.info(f"Using workflow_name: {workflow_name}")
+        
         # Broadcast workflow start notification
         await manager.broadcast_json({
             "type": "workflow_start",
             "request_id": request_id,
-            "workflow_name": "unguided",
-            "timestamp": str(uuid.uuid4())  # Placeholder for now
+            "workflow_name": workflow_name,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
         })
         
         # Save workflow start to database
         storage.save_workflow(
             request_id=request_id,
-            workflow_name="unguided",
+            workflow_name=workflow_name,
             status="started"
         )
         
@@ -87,7 +94,9 @@ async def submit_chat(message: ChatMessage, background_tasks: BackgroundTasks):
             nifi_server_id=message.selected_nifi_server_id,
             auto_prune_history=message.auto_prune_history,
             max_tokens_limit=message.max_tokens_limit,
-            max_loop_iterations=message.max_loop_iterations
+            max_loop_iterations=message.max_loop_iterations,
+            workflow_name=workflow_name,
+            process_group_id=message.process_group_id
         )
         
         logger.info(f"Background task added successfully for request {request_id}")
@@ -206,117 +215,165 @@ async def execute_workflow(
     nifi_server_id: Optional[str] = None,
     auto_prune_history: bool = True,
     max_tokens_limit: int = 32000,
-    max_loop_iterations: int = 10
+    max_loop_iterations: int = 10,
+    workflow_name: str = "unguided",
+    process_group_id: Optional[str] = None
 ):
     """Execute workflow using existing PocketFlow workflow system."""
     try:
         logger.info(f"=== BACKGROUND TASK STARTED for request {request_id} ===")
         logger.info(f"Starting workflow execution for request {request_id}")
-        logger.info(f"Input parameters: user_input='{user_input[:50]}...', objective='{objective}', provider='{provider}', model='{model_name}', nifi_server='{nifi_server_id}'")
-        logger.info(f"DEBUG: provider='{provider}', model_name='{model_name}'")
+        logger.info(f"Workflow: {workflow_name}, Input: '{user_input[:50]}...', provider='{provider}', model='{model_name}', nifi_server='{nifi_server_id}'")
         
         # Broadcast workflow start
         await manager.broadcast_json({
             "type": "workflow_status",
             "request_id": request_id,
             "status": "started",
-            "message": "Workflow execution started...",
-            "timestamp": str(uuid.uuid4())
+            "message": f"Workflow execution started: {workflow_name}",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
         })
         
-        # Get the unguided workflow from registry
-        logger.info(f"Getting workflow from registry...")
-        workflow_def = workflow_registry.get_workflow("unguided")
+        # Get the workflow from registry
+        logger.info(f"Getting workflow '{workflow_name}' from registry...")
+        workflow_def = workflow_registry.get_workflow(workflow_name)
         if not workflow_def:
-            raise Exception("Unguided workflow not found in registry")
+            raise Exception(f"Workflow '{workflow_name}' not found in registry")
         
         logger.info(f"Using workflow: {workflow_def.name}")
         logger.info(f"Workflow definition: {workflow_def.to_dict()}")
         
-        # Load system prompt from file
-        system_prompt_path = Path(__file__).parent.parent / "nifi_chat_ui" / "system_prompt.md"
-        try:
-            with open(system_prompt_path, 'r', encoding='utf-8') as f:
-                base_system_prompt = f.read()
-        except FileNotFoundError:
-            logger.warning(f"System prompt file not found at {system_prompt_path}, using default")
-            base_system_prompt = "You are a helpful NiFi assistant. Help the user with their request."
-        
-        # Add objective to system prompt if provided
-        if objective:
-            system_prompt = f"{base_system_prompt}\n\nObjective: {objective}"
-        else:
-            system_prompt = base_system_prompt
-        
-        # Load LLM conversation history from database
-        logger.info("Loading LLM conversation history from database...")
-        llm_history = storage.get_llm_conversation_history(limit=50)  # Get recent LLM conversation messages
-        
-        # Prepare messages for LLM context (format)
-        messages_for_context = []
-        for msg in llm_history:
-            metadata = msg.get('metadata') or {}
+        # Prepare shared state based on workflow type
+        if workflow_name == "flow_documentation":
+            # Documentation workflow requires process_group_id
+            if not process_group_id:
+                # Try to extract from user_input if not provided
+                # For now, raise error - user must provide it
+                raise ValueError("flow_documentation workflow requires process_group_id")
             
-            if msg['role'] in ['user', 'assistant', 'tool']:
-                # Include assistant messages even if content is empty (they might have tool_calls)
-                # Include user and tool messages only if they have content
-                if msg['role'] == 'assistant' or msg.get('content'):
-                    # Format message for LLM context
-                    formatted_msg = {
-                        'role': msg['role'],
-                        'content': msg.get('content', '')  # Use empty string for assistant messages without content
-                    }
-                    # Add tool_calls for assistant messages if available
-                    if msg['role'] == 'assistant' and metadata.get('tool_calls'):
-                        formatted_msg['tool_calls'] = metadata['tool_calls']
-                    # Add tool_call_id for tool messages if available (put in message, not metadata)
-                    if msg['role'] == 'tool' and metadata.get('tool_call_id'):
-                        formatted_msg['tool_call_id'] = metadata['tool_call_id']
-                    messages_for_context.append(formatted_msg)
-                    logger.debug(f"Included LLM message: role={msg['role']}, content_length={len(msg.get('content', ''))}, has_tool_calls={bool(metadata.get('tool_calls'))}")
-        
-        logger.info(f"Loaded {len(messages_for_context)} LLM conversation messages from database (total LLM messages: {len(llm_history)})")
-        
-        # Prepare shared state for workflow execution
-        shared_state = {
-            "user_request_id": request_id,
-            "user_prompt": user_input,
-            "objective": objective,
-            "provider": provider,
-            "model_name": model_name,
-            "selected_nifi_server_id": nifi_server_id,
-            "system_prompt": system_prompt,
-            "max_loop_iterations": max_loop_iterations,
-            "max_tokens_limit": max_tokens_limit,
-            "auto_prune_history": auto_prune_history,
-            # Add conversation history for workflow execution
-            "messages": messages_for_context
-        }
+            shared_state = {
+                "user_request_id": request_id,
+                "process_group_id": process_group_id,
+                "provider": provider,
+                "model_name": model_name,
+                "selected_nifi_server_id": nifi_server_id,
+                "nifi_server_id": nifi_server_id,  # Alias for compatibility
+                "workflow_id": request_id,
+                "workflow_name": workflow_name
+            }
+            
+            # Load configuration for documentation workflow
+            from config.settings import get_documentation_workflow_config
+            doc_config = get_documentation_workflow_config()
+            shared_state["config"] = {
+                "discovery": doc_config.get("discovery", {}),
+                "analysis": doc_config.get("analysis", {}),
+                "generation": doc_config.get("generation", {}),
+                "output": doc_config.get("output", {})
+            }
+            
+        else:
+            # Unguided workflow - use existing logic
+            # Load system prompt from file
+            system_prompt_path = Path(__file__).parent.parent / "nifi_chat_ui" / "system_prompt.md"
+            try:
+                with open(system_prompt_path, 'r', encoding='utf-8') as f:
+                    base_system_prompt = f.read()
+            except FileNotFoundError:
+                logger.warning(f"System prompt file not found at {system_prompt_path}, using default")
+                base_system_prompt = "You are a helpful NiFi assistant. Help the user with their request."
+            
+            # Add objective to system prompt if provided
+            if objective:
+                system_prompt = f"{base_system_prompt}\n\nObjective: {objective}"
+            else:
+                system_prompt = base_system_prompt
+            
+            # Load LLM conversation history from database
+            logger.info("Loading LLM conversation history from database...")
+            llm_history = storage.get_llm_conversation_history(limit=50)  # Get recent LLM conversation messages
+            
+            # Prepare messages for LLM context (format)
+            messages_for_context = []
+            for msg in llm_history:
+                metadata = msg.get('metadata') or {}
+                
+                if msg['role'] in ['user', 'assistant', 'tool']:
+                    # Include assistant messages even if content is empty (they might have tool_calls)
+                    # Include user and tool messages only if they have content
+                    if msg['role'] == 'assistant' or msg.get('content'):
+                        # Format message for LLM context
+                        formatted_msg = {
+                            'role': msg['role'],
+                            'content': msg.get('content', '')  # Use empty string for assistant messages without content
+                        }
+                        # Add tool_calls for assistant messages if available
+                        if msg['role'] == 'assistant' and metadata.get('tool_calls'):
+                            formatted_msg['tool_calls'] = metadata['tool_calls']
+                        # Add tool_call_id for tool messages if available (put in message, not metadata)
+                        if msg['role'] == 'tool' and metadata.get('tool_call_id'):
+                            formatted_msg['tool_call_id'] = metadata['tool_call_id']
+                        messages_for_context.append(formatted_msg)
+                        logger.debug(f"Included LLM message: role={msg['role']}, content_length={len(msg.get('content', ''))}, has_tool_calls={bool(metadata.get('tool_calls'))}")
+            
+            logger.info(f"Loaded {len(messages_for_context)} LLM conversation messages from database (total LLM messages: {len(llm_history)})")
+            
+            # Prepare shared state for workflow execution
+            shared_state = {
+                "user_request_id": request_id,
+                "user_prompt": user_input,
+                "objective": objective,
+                "provider": provider,
+                "model_name": model_name,
+                "selected_nifi_server_id": nifi_server_id,
+                "system_prompt": system_prompt,
+                "max_loop_iterations": max_loop_iterations,
+                "max_tokens_limit": max_tokens_limit,
+                "auto_prune_history": auto_prune_history,
+                # Add conversation history for workflow execution
+                "messages": messages_for_context
+            }
         
         # Execute workflow using the existing PocketFlow system
-        logger.info(f"Executing workflow with shared state: {list(shared_state.keys())}")
-        logger.info(f"DEBUG: shared_state provider='{shared_state.get('provider')}', model_name='{shared_state.get('model_name')}'")
-        logger.info(f"Conversation history: {len(messages_for_context)} messages")
+        logger.info(f"Executing workflow '{workflow_name}' with shared state: {list(shared_state.keys())}")
         
         # Create async executor for the workflow
-        workflow_executor = workflow_registry.create_async_executor("unguided")
+        workflow_executor = workflow_registry.create_async_executor(workflow_name)
         if not workflow_executor:
-            raise Exception("Failed to create async executor for unguided workflow")
+            raise Exception(f"Failed to create async executor for workflow '{workflow_name}'")
         
         # Execute the workflow
         result = await workflow_executor.execute_async(
             initial_context=shared_state
         )
         
+        # Determine workflow status from result
+        workflow_status = "completed"
+        if isinstance(result, dict):
+            result_status = result.get("status", "success")
+            if result_status == "error":
+                workflow_status = "error"
+            elif result_status == "failed":
+                workflow_status = "failed"
+            else:
+                workflow_status = "completed"
+        else:
+            # If result is not a dict, treat as completed (shouldn't happen with our fixes)
+            logger.warning(f"Workflow returned non-dict result: {type(result)}")
+            workflow_status = "completed"
+        
         # Update workflow status
         storage.save_workflow(
             request_id=request_id,
-            workflow_name="unguided",
-            status="completed",
+            workflow_name=workflow_name,
+            status=workflow_status,
             result=result
         )
         
-        logger.info(f"Completed workflow execution for request {request_id}")
+        if workflow_status == "error" or workflow_status == "failed":
+            logger.warning(f"Workflow execution {workflow_status} for request {request_id}")
+        else:
+            logger.info(f"Completed workflow execution for request {request_id}")
         
     except Exception as e:
         logger.error(f"Error executing workflow for request {request_id}: {e}", exc_info=True)
@@ -324,7 +381,7 @@ async def execute_workflow(
         # Update workflow status to failed
         storage.save_workflow(
             request_id=request_id,
-            workflow_name="unguided",
+            workflow_name=workflow_name,
             status="failed",
             result={"error": str(e)}
         )
@@ -334,5 +391,5 @@ async def execute_workflow(
             "type": "workflow_complete",
             "request_id": request_id,
             "result": {"error": str(e)},
-            "timestamp": str(uuid.uuid4())
+            "timestamp": datetime.utcnow().isoformat() + "Z"
         })

@@ -1,0 +1,8 @@
+{
+  "pg_summary_default": "This process group handles file ingestion from SFTP servers, validates incoming records, and routes them based on data quality rules.",
+  
+  "pg_summary_io_heavy": "This process group reads transaction data from Kafka topics, enriches records with customer information from a database, and publishes results to downstream topics.",
+  
+  "pg_summary_with_children": "This parent process group orchestrates data ingestion, transformation, and delivery across multiple sub-components. It coordinates file processing from SFTP, data validation, and output to multiple destinations including databases and message queues."
+}
+

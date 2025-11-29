@@ -1,0 +1,6 @@
+{
+  "virtual_groups_default": "[{\"name\": \"Input Processing\", \"purpose\": \"Handle incoming data from external sources\", \"processor_ids\": [\"abc12345\", \"def67890\"]}, {\"name\": \"Validation\", \"purpose\": \"Validate data quality and schema compliance\", \"processor_ids\": [\"ghi11111\", \"jkl22222\"]}, {\"name\": \"Transformation\", \"purpose\": \"Transform and enrich data records\", \"processor_ids\": [\"mno33333\", \"pqr44444\"]}, {\"name\": \"Output Delivery\", \"purpose\": \"Write processed data to destinations\", \"processor_ids\": [\"stu55555\", \"vwx66666\"]}]",
+  
+  "virtual_groups_simple": "[{\"name\": \"Data Ingestion\", \"purpose\": \"Fetch and parse incoming data\", \"processor_ids\": [\"proc001\", \"proc002\"]}, {\"name\": \"Processing\", \"purpose\": \"Transform and route data\", \"processor_ids\": [\"proc003\", \"proc004\"]}, {\"name\": \"Output\", \"purpose\": \"Deliver processed data\", \"processor_ids\": [\"proc005\"]}]"
+}
+

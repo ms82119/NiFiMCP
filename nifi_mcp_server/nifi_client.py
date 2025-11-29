@@ -662,8 +662,9 @@ class NiFiClient:
             logger.error(f"Error listing connections: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to list connections: {e.response.status_code}, {e.response.text}") from e
         except httpx.RequestError as e:
-            logger.error(f"Error listing connections: {e}")
-            raise ConnectionError(f"Error listing connections: {e}") from e
+            error_msg = str(e) or repr(e) or "Unknown request error"
+            logger.error(f"Error listing connections: {error_msg}")
+            raise ConnectionError(f"Error listing connections: {error_msg}") from e
 
     async def delete_connection(self, connection_id: str, version_number: Optional[int] = None) -> bool:
         """Deletes a connection given its ID and optionally a revision version. 
@@ -1178,13 +1179,20 @@ class NiFiClient:
             local_logger.error(f"An unexpected error occurred getting process group details for {process_group_id}: {e}", exc_info=True)
             raise ConnectionError(f"An unexpected error occurred getting process group details: {e}") from e
 
-    async def get_process_group_flow(self, process_group_id: str) -> dict:
-        """Fetches the flow details for a specific process group, often including counts."""
+    async def get_process_group_flow(self, process_group_id: str, ui_only: bool = False) -> dict:
+        """Fetches the flow details for a specific process group, often including counts.
+        
+        Args:
+            process_group_id: The ID of the process group
+            ui_only: If True, adds ?uiOnly=true parameter (useful when individual endpoints fail)
+        """
         if not self._token:
             raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
 
         client = await self._get_client()
         endpoint = f"/flow/process-groups/{process_group_id}"
+        if ui_only:
+            endpoint += "?uiOnly=true"
         try:
             logger.info(f"Fetching flow details for process group {process_group_id} from {self.base_url}{endpoint}")
             response = await client.get(endpoint)

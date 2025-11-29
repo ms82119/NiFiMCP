@@ -135,12 +135,8 @@ class NiFiChatApp {
             });
         }
         
-        const workflowSelect = document.getElementById('workflow-select');
-        if (workflowSelect) {
-            workflowSelect.addEventListener('change', (e) => {
-                this.updateSettings('workflow', e.target.value);
-            });
-        }
+        // Workflow selection is handled by modal manager via localStorage
+        // No direct event listener needed here
         
         // Clear chat button (in settings) removed; footer button remains
 
@@ -285,7 +281,10 @@ class NiFiChatApp {
             // Get selected settings
             const modelSelect = document.getElementById('model-select-header');
             const serverSelect = document.getElementById('nifi-server-select-header');
-            const workflowSelect = document.getElementById('workflow-select');
+            
+            // Get workflow selection from localStorage (set by modal manager)
+            const workflowName = localStorage.getItem('nifi_chat_workflow') || 'unguided';
+            console.log('Selected workflow from localStorage:', workflowName);
             
             // Get smart purging settings (No limit => autoPrune false and omit limit)
             const tokensSelectEl = document.getElementById('max-tokens-limit');
@@ -309,23 +308,51 @@ class NiFiChatApp {
                 systemPrompt += `\n\nObjective: ${objective}`;
             }
             
+            // Extract process_group_id from message if it's a documentation request
+            // Look for patterns like "PG <id>" or "process group <id>" or just an ID
+            let processGroupId = null;
+            if (workflowName === 'flow_documentation') {
+                // Try to extract PG ID from message
+                const pgIdPattern = /(?:PG|process group|process_group_id)[\s:]+([a-f0-9-]{36})/i;
+                const match = message.match(pgIdPattern);
+                if (match) {
+                    processGroupId = match[1];
+                } else {
+                    // Try to find a UUID pattern in the message
+                    const uuidPattern = /([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i;
+                    const uuidMatch = message.match(uuidPattern);
+                    if (uuidMatch) {
+                        processGroupId = uuidMatch[1];
+                    }
+                }
+            }
+            
+            // Prepare request body
+            const requestBody = {
+                content: message,
+                objective: objective,
+                provider: provider,
+                model_name: model_name,
+                selected_nifi_server_id: serverSelect.value || null,
+                // Include smart purging settings
+                auto_prune_history: autoPruneHistory,
+                max_tokens_limit: maxTokensLimit,
+                max_loop_iterations: maxActions,
+                // Include workflow selection
+                workflow_name: workflowName,
+                process_group_id: processGroupId
+            };
+            
+            console.log('Sending request to API with workflow_name:', workflowName, 'process_group_id:', processGroupId);
+            console.log('Full request body:', JSON.stringify(requestBody, null, 2));
+            
             // Send to backend
             const response = await fetch('/api/chat/', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({
-                    content: message,
-                    objective: objective,
-                    provider: provider,
-                    model_name: model_name,
-                    selected_nifi_server_id: serverSelect.value || null,
-                    // Include smart purging settings
-                    auto_prune_history: autoPruneHistory,
-                    max_tokens_limit: maxTokensLimit,
-                    max_loop_iterations: maxActions
-                })
+                body: JSON.stringify(requestBody)
             });
             
             if (!response.ok) {
@@ -608,8 +635,10 @@ class NiFiChatApp {
             this.aggregatedSteps[requestId] = [];
         }
         if (!this.aggregatedStatus[requestId]) {
+            // Get workflow name from localStorage or default to 'unguided'
+            const savedWorkflow = localStorage.getItem('nifi_chat_workflow') || 'unguided';
             this.aggregatedStatus[requestId] = {
-                workflow_name: 'unguided',
+                workflow_name: savedWorkflow,
                 current_status: 'Starting...',
                 tokens_in: 0,
                 tokens_out: 0,

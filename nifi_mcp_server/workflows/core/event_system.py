@@ -72,17 +72,54 @@ class EventEmitter:
             else:
                 json_data = "{}"
         except Exception as e:
-            logger.error(f"Event data serialization failed for event_type={event_type}, data keys={list(data.keys()) if data else 'None'}: {e}")
-            json_data = f'{{"error": "Failed to serialize data: {e}", "event_type": "{event_type}", "data_keys": {list(data.keys()) if data else []}}}'
+            logger.error(
+                f"Event data serialization failed for event_type={event_type}, "
+                f"data keys={list(data.keys()) if data else 'None'}: {e}"
+            )
+            json_data = (
+                f'{{"error": "Failed to serialize data: {e}", '
+                f'"event_type": "{event_type}", '
+                f'"data_keys": {list(data.keys()) if data else []}}}'
+            )
+
+        # Extract phase / progress fields for workflow.log format
+        # NOTE: Many documentation events include these keys in `data`
+        phase = None
+        progress_message = None
+        if isinstance(data, dict):
+            phase = data.get("phase")
+            # Prefer an explicit progress_message field if present, otherwise fall back to "message"
+            progress_message = data.get("progress_message") or data.get("message")
+
+        # Ensure we always have values for the workflow.log format
+        event_type_str = str(event_type) if event_type else "-"
+        phase_str = str(phase) if phase else "-"
+        progress_str = str(progress_message) if progress_message else ""
+
+        # CRITICAL: The interface_logger_middleware expects fields in extra["data"]
+        # So we need to put them there, AND also bind them directly to extra as fallback
+        # The middleware will extract from data first, then fall back to extra
+        log_data = dict(data) if isinstance(data, dict) else {}
+        log_data["event_type"] = event_type_str
+        log_data["phase"] = phase_str
+        log_data["progress_message"] = progress_str
+
+        # Log to workflow.log with all required fields for the workflow format
+        # Put fields in both data (for middleware) and directly in extra (as fallback)
+        workflow_logger = logger.bind(
+            user_request_id=user_request_id or "-",
+            workflow_id=workflow_id or "-",
+            step_id=step_id or "-",
+            interface="workflow",        # Route to workflow.log sink
+            data=log_data,               # Middleware extracts phase/event_type/progress_message from here
+            # Also bind directly to extra as fallback (middleware checks both)
+            event_type=event_type_str,
+            phase=phase_str,
+            progress_message=progress_str
+        )
         
-        logger.bind(
-            user_request_id=user_request_id,
-            workflow_id=workflow_id,
-            step_id=step_id,
-            interface="workflow",  # Add interface field for workflow logging
-            direction="event",     # Ensure 'direction' exists for log formatter
-            json_data=json_data  # Add serialized data for workflow format
-        ).info(f"Workflow event emitted: {event_type}")
+        # Use info level to ensure it's captured by workflow.log (which uses DEBUG level by default)
+        workflow_logger.info(f"Workflow event: {event_type_str}")
     
     def on(self, callback: Callable[[WorkflowEvent], None]):
         """Register an event callback."""
@@ -183,6 +220,20 @@ async def emit_workflow_start(workflow_id: str, step_id: str, data: Dict[str, An
     await emitter.emit(EventTypes.WORKFLOW_START, data, workflow_id, step_id, user_request_id)
 
 
+async def emit_workflow_complete(workflow_id: str, step_id: str, data: Dict[str, Any], 
+                                user_request_id: Optional[str] = None):
+    """Emit a workflow complete event."""
+    emitter = get_event_emitter()
+    await emitter.emit(EventTypes.WORKFLOW_COMPLETE, data, workflow_id, step_id, user_request_id)
+
+
+async def emit_workflow_error(workflow_id: str, step_id: str, data: Dict[str, Any], 
+                              user_request_id: Optional[str] = None):
+    """Emit a workflow error event."""
+    emitter = get_event_emitter()
+    await emitter.emit(EventTypes.WORKFLOW_ERROR, data, workflow_id, step_id, user_request_id)
+
+
 async def emit_llm_start(workflow_id: str, step_id: str, data: Dict[str, Any], 
                        user_request_id: Optional[str] = None):
     """Emit an LLM start event."""
@@ -221,17 +272,37 @@ async def emit_message_added(workflow_id: str, step_id: str, data: Dict[str, Any
 # === Documentation Workflow Convenience Functions ===
 
 async def emit_doc_phase_start(
-    workflow_id: str, 
-    step_id: str, 
+    workflow_id: str,
+    step_id: str,
     phase: str,
-    user_request_id: Optional[str] = None
+    progress_message: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    user_request_id: Optional[str] = None,
 ):
-    """Emit a documentation phase start event."""
+    """
+    Emit a documentation phase start event.
+
+    Args:
+        workflow_id: Workflow identifier
+        step_id: Current step / node name
+        phase: Phase name (e.g. INIT, DISCOVERY, ANALYSIS, GENERATION)
+        progress_message: Human-readable message for workflow.log
+        details: Optional extra details blob (e.g. shared_state snapshot)
+        user_request_id: Optional user request ID for correlation
+    """
     emitter = get_event_emitter()
-    await emitter.emit(EventTypes.DOC_PHASE_START, {
-        "phase": phase,
-        "started_at": time.time()
-    }, workflow_id, step_id, user_request_id)
+    await emitter.emit(
+        EventTypes.DOC_PHASE_START,
+        {
+            "phase": phase,
+            "started_at": time.time(),
+            "progress_message": progress_message,
+            "details": details or {},
+        },
+        workflow_id,
+        step_id,
+        user_request_id,
+    )
 
 
 async def emit_doc_phase_complete(
@@ -240,16 +311,38 @@ async def emit_doc_phase_complete(
     phase: str,
     started_at: float,
     metrics: Dict[str, Any],
-    user_request_id: Optional[str] = None
+    progress_message: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    user_request_id: Optional[str] = None,
 ):
-    """Emit a documentation phase complete event with duration."""
+    """
+    Emit a documentation phase complete event with duration and metrics.
+
+    Args:
+        workflow_id: Workflow identifier
+        step_id: Current step / node name
+        phase: Phase name
+        started_at: Phase start timestamp
+        metrics: Metrics dict (counts, durations, etc.)
+        progress_message: Human-readable summary for workflow.log
+        details: Optional extra details blob (e.g. shared_state snapshot)
+        user_request_id: Optional user request ID for correlation
+    """
     emitter = get_event_emitter()
-    await emitter.emit(EventTypes.DOC_PHASE_COMPLETE, {
-        "phase": phase,
-        "started_at": started_at,
-        "duration_ms": int((time.time() - started_at) * 1000),
-        "metrics": metrics
-    }, workflow_id, step_id, user_request_id)
+    await emitter.emit(
+        EventTypes.DOC_PHASE_COMPLETE,
+        {
+            "phase": phase,
+            "started_at": started_at,
+            "duration_ms": int((time.time() - started_at) * 1000),
+            "metrics": metrics,
+            "progress_message": progress_message,
+            "details": details or {},
+        },
+        workflow_id,
+        step_id,
+        user_request_id,
+    )
 
 
 async def emit_doc_progress(
@@ -259,16 +352,25 @@ async def emit_doc_progress(
     message: str,
     progress_pct: Optional[int] = None,
     details: Optional[Dict] = None,
-    user_request_id: Optional[str] = None
+    user_request_id: Optional[str] = None,
 ):
     """Emit a human-readable progress update."""
     emitter = get_event_emitter()
-    await emitter.emit(EventTypes.DOC_PROGRESS_UPDATE, {
-        "phase": phase,
-        "message": message,
-        "progress_pct": progress_pct,
-        "details": details
-    }, workflow_id, step_id, user_request_id)
+    await emitter.emit(
+        EventTypes.DOC_PROGRESS_UPDATE,
+        {
+            "phase": phase,
+            # Keep "message" for backward compatibility with UI mapping
+            "message": message,
+            # Also expose as progress_message for workflow.log formatting
+            "progress_message": message,
+            "progress_pct": progress_pct,
+            "details": details or {},
+        },
+        workflow_id,
+        step_id,
+        user_request_id,
+    )
 
 
  

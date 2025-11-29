@@ -36,6 +36,9 @@ packages = ["config", "nifi_chat_ui", "nifi_mcp_client", "nifi_mcp_server"]
 # See tests/README.md for test organization guidelines
 markers = [
     "unit: marks tests as unit tests (no server connectivity required)",
+    "integration: marks tests as integration tests (require NiFi server)",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "workflow: marks tests as workflow-related",
 ]
 
 [dependency-groups]

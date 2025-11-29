@@ -21,6 +21,10 @@ class ChatMessage(BaseModel):
     auto_prune_history: Optional[bool] = Field(True, description="Whether to automatically prune conversation history")
     max_tokens_limit: Optional[int] = Field(32000, description="Maximum tokens limit for conversation context")
     max_loop_iterations: Optional[int] = Field(10, description="Maximum number of workflow iterations")
+    # Workflow selection
+    workflow_name: Optional[str] = Field("unguided", description="Workflow to use: 'unguided' or 'flow_documentation'")
+    # Documentation workflow specific
+    process_group_id: Optional[str] = Field(None, description="Process group ID for flow_documentation workflow")
 
 
 class ChatResponse(BaseModel):

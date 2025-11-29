@@ -144,6 +144,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 "request_tokens_out": 0,
                 "execution_complete": False,
                 "workflow_id": "unguided",
+                "workflow_name": prep_res.get("workflow_name", "unguided"),  # Include workflow_name from prep_res
                 "step_id": "async_initialize_execution",
                 "auto_prune_history": prep_res.get("auto_prune_history", True),  # Add auto-prune setting
                 "max_tokens_limit": prep_res.get("max_tokens_limit", 32000),  # Add max tokens limit setting
@@ -165,6 +166,7 @@ class AsyncInitializeExecutionNode(AsyncNiFiWorkflowNode):
                 execution_state["workflow_id"], 
                 execution_state["step_id"], 
                 {
+                    "workflow_name": execution_state.get("workflow_name", "unguided"),  # Include workflow_name for event_bridge
                     "provider": execution_state["provider"],
                     "model": execution_state["model_name"],
                     "initial_message_count": len(execution_state["messages"]),
