@@ -140,6 +140,61 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         self.execution_state = execution_state
         self.bound_logger.info("Execution state set in workflow node")
     
+    def set_shared_state(self, shared: Dict[str, Any]):
+        """Store reference to shared state for token cost tracking."""
+        if not isinstance(shared, dict):
+            self.bound_logger.warning(f"set_shared_state called with non-dict! Type: {type(shared)}")
+            return
+        self.shared_state = shared
+    
+    def _calculate_token_cost(self, provider: str, model_name: str, tokens_in: int, tokens_out: int) -> float:
+        """Calculate token cost in USD based on provider and model.
+        
+        Pricing as of 2024 (approximate):
+        - OpenAI: gpt-4o-mini: $0.15/$0.60 per 1M tokens (in/out)
+        - OpenAI: gpt-4o: $2.50/$10.00 per 1M tokens (in/out)
+        - Anthropic: claude-3-5-sonnet: $3.00/$15.00 per 1M tokens (in/out)
+        - Gemini: gemini-1.5-pro: $1.25/$5.00 per 1M tokens (in/out)
+        - Perplexity: pplx-70b-online: $0.70/$0.70 per 1M tokens (in/out)
+        """
+        # Pricing per 1M tokens (input, output)
+        pricing = {
+            "openai": {
+                "gpt-4o-mini": (0.15, 0.60),
+                "gpt-4o": (2.50, 10.00),
+                "gpt-4-turbo": (10.00, 30.00),
+                "gpt-3.5-turbo": (0.50, 1.50),
+            },
+            "anthropic": {
+                "claude-3-5-sonnet": (3.00, 15.00),
+                "claude-3-opus": (15.00, 75.00),
+                "claude-3-sonnet": (3.00, 15.00),
+                "claude-3-haiku": (0.25, 1.25),
+            },
+            "gemini": {
+                "gemini-1.5-pro": (1.25, 5.00),
+                "gemini-1.5-flash": (0.075, 0.30),
+                "gemini-pro": (0.50, 1.50),
+            },
+            "perplexity": {
+                "pplx-70b-online": (0.70, 0.70),
+                "pplx-7b-online": (0.20, 0.20),
+            }
+        }
+        
+        provider_key = provider.lower()
+        model_key = model_name.lower()
+        
+        if provider_key in pricing and model_key in pricing[provider_key]:
+            price_in, price_out = pricing[provider_key][model_key]
+            cost = (tokens_in / 1_000_000 * price_in) + (tokens_out / 1_000_000 * price_out)
+            return cost
+        
+        # Default fallback pricing (average)
+        default_price_in, default_price_out = 1.00, 3.00
+        cost = (tokens_in / 1_000_000 * default_price_in) + (tokens_out / 1_000_000 * default_price_out)
+        return cost
+    
     def get_mcp_client(self) -> MCPClient:
         """Get or create the MCPClient instance."""
         if self._mcp_client is None:
@@ -161,7 +216,11 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             ).info(f"Node prep: {self.name}")
         
         # Default prep - subclasses should override
-        return shared
+        # But ensure step_id is always included for event emission
+        prep_result = shared.copy() if isinstance(shared, dict) else {}
+        if "step_id" not in prep_result:
+            prep_result["step_id"] = self.name
+        return prep_result
     
     def _create_shared_state_snapshot(self, shared: Dict[str, Any]) -> Dict[str, Any]:
         """Create a snapshot of shared state for logging."""
@@ -234,6 +293,9 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         step_id = execution_state.get("step_id", self.name)
         user_request_id = execution_state.get("user_request_id")
         
+        # Extract current phase from execution_state (from shared state)
+        current_phase = execution_state.get("current_phase", "-")
+        
         # Emit LLM start event with enhanced information
         await emit_llm_start(workflow_id, step_id, {
             "action_id": action_id,
@@ -244,7 +306,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             "model_name": execution_state.get("model_name", "unknown"),  # Explicit model name for UI
             "messages_in_request": len([msg for msg in messages if msg.get("role") in ["user", "assistant", "tool"]]) + 1,  # Count non-system messages + 1 for system message
             "tools_available": len(tools) if tools else 0,  # Count available tools
-            "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
+            "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
+            "phase": current_phase  # Add current phase for workflow.log
         }, user_request_id)
         
         try:
@@ -293,19 +356,72 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 self.bound_logger.error(f"LLM returned error: {response_data['error']}")
                 return response_data
             
+            # Extract current phase from execution_state
+            current_phase = execution_state.get("current_phase", "-")
+            
+            # Track token costs in shared metrics (if available)
+            tokens_in = response_data.get("token_count_in", 0)
+            tokens_out = response_data.get("token_count_out", 0)
+            provider = execution_state.get("provider", "unknown")
+            model_name = execution_state.get("model_name", "unknown")
+            
+            # Accumulate token costs per phase
+            # Try to get shared state from node instance (set during prep_async/exec_async)
+            if hasattr(self, 'shared_state') and self.shared_state:
+                shared = self.shared_state
+                if isinstance(shared, dict):
+                    metrics = shared.setdefault("metrics", {})
+                    
+                    # Initialize token tracking if not present
+                    if "token_costs" not in metrics:
+                        metrics["token_costs"] = {
+                            "discovery": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+                            "analysis": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+                            "generation": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+                            "total": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+                        }
+                    
+                    # Get phase-specific token tracking (default to current_phase or "analysis")
+                    # Normalize phase key to lowercase to match token_costs dict keys
+                    phase_key = current_phase.lower() if current_phase != "-" else "analysis"
+                    if phase_key not in metrics["token_costs"]:
+                        phase_key = "analysis"  # Fallback
+                    
+                    phase_costs = metrics["token_costs"].get(phase_key, {})
+                    phase_costs["tokens_in"] = phase_costs.get("tokens_in", 0) + tokens_in
+                    phase_costs["tokens_out"] = phase_costs.get("tokens_out", 0) + tokens_out
+                    
+                    # Calculate cost (provider-specific pricing)
+                    cost = self._calculate_token_cost(provider, model_name, tokens_in, tokens_out)
+                    phase_costs["cost_usd"] = phase_costs.get("cost_usd", 0.0) + cost
+                    metrics["token_costs"][phase_key] = phase_costs
+                    
+                    # Update totals
+                    total_costs = metrics["token_costs"]["total"]
+                    total_costs["tokens_in"] = total_costs.get("tokens_in", 0) + tokens_in
+                    total_costs["tokens_out"] = total_costs.get("tokens_out", 0) + tokens_out
+                    total_costs["cost_usd"] = total_costs.get("cost_usd", 0.0) + cost
+                    
+                    self.bound_logger.debug(
+                        f"Token costs updated: {phase_key} +{tokens_in}in/{tokens_out}out "
+                        f"(${cost:.6f}), total: {total_costs['tokens_in']}in/{total_costs['tokens_out']}out "
+                        f"(${total_costs['cost_usd']:.6f})"
+                    )
+            
             # Emit LLM complete event
             tool_calls_data = response_data.get("tool_calls") or []
             await emit_llm_complete(workflow_id, step_id, {
                 "action_id": action_id,
                 "response_content": response_data.get("content", ""),
                 "tool_calls": len(tool_calls_data),
-                "tokens_in": response_data.get("token_count_in", 0),
-                "tokens_out": response_data.get("token_count_out", 0),
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
                 "status": "success",
                 "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
-                "provider": execution_state.get("provider", "unknown"),
-                "model": execution_state.get("model_name", "unknown"),
-                "model_name": execution_state.get("model_name", "unknown")  # Add explicit model_name field
+                "provider": provider,
+                "model": model_name,
+                "model_name": model_name,  # Add explicit model_name field
+                "phase": current_phase  # Add current phase for workflow.log
             }, user_request_id)
             
             return response_data
@@ -351,15 +467,21 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 # Generate tool-specific action ID
                 tool_action_id = f"wf-{workflow_id}-{step_id}-tool-{uuid.uuid4()}"
                 
-                # Emit tool start event with LLM action_id for correlation
+                # Extract current phase from execution_state
+                current_phase = execution_state.get("current_phase", "-")
+                
+                # Emit tool start event with action_id for correlation
+                # Use action_id field (not just tool_call_id) so EventBridge can find it
                 await emit_tool_start(workflow_id, step_id, {
                     "tool_name": function_name,
-                    "tool_call_id": tool_call_id,
+                    "action_id": llm_action_id or tool_call_id,  # Use action_id field for EventBridge
+                    "tool_call_id": tool_call_id,  # Keep for backward compatibility
                     "tool_index": i + 1,
                     "total_tools": len(tool_calls),
                     "arguments": args_dict,
-                    "llm_action_id": llm_action_id,  # Add LLM action_id for correlation
-                    "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
+                    "llm_action_id": llm_action_id,  # Keep for correlation
+                    "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
+                    "phase": current_phase  # Add current phase for workflow.log
                 }, user_request_id)
                 
                 # Define the sync function to call in executor
@@ -385,16 +507,22 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 }
                 tool_results.append(result_message)
                 
-                # Emit tool complete event with LLM action_id for correlation
+                # Extract current phase from execution_state
+                current_phase = execution_state.get("current_phase", "-")
+                
+                # Emit tool complete event with action_id for correlation
+                # Use action_id field (not just tool_call_id) so EventBridge can find it
                 await emit_tool_complete(workflow_id, step_id, {
                     "tool_name": function_name,
-                    "tool_call_id": tool_call_id,
+                    "action_id": llm_action_id or tool_call_id,  # Use action_id field for EventBridge
+                    "tool_call_id": tool_call_id,  # Keep for backward compatibility
                     "tool_index": i + 1,
                     "total_tools": len(tool_calls),
                     "result_length": len(str(tool_result)),
                     "status": "success",
-                    "llm_action_id": llm_action_id,  # Add LLM action_id for correlation
-                    "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
+                    "llm_action_id": llm_action_id,  # Keep for correlation
+                    "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
+                    "phase": current_phase  # Add current phase for workflow.log
                 }, user_request_id)
                 
             except Exception as e:
@@ -588,11 +716,15 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         import uuid
         action_id = f"wf-{workflow_id}-{step_id}-tool-{uuid.uuid4()}"
         
+        # Extract current phase from prep_res (which should have current_phase from shared state)
+        current_phase = prep_res.get("current_phase", "-")
+        
         # Emit tool start event
         await emit_tool_start(workflow_id, step_id, {
             "tool_name": tool_name,
             "arguments": arguments,
-            "action_id": action_id
+            "action_id": action_id,
+            "phase": current_phase  # Add current phase for workflow.log
         }, user_request_id)
         
         try:
@@ -614,13 +746,17 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             result_str = str(result) if result is not None else ""
             result_length = len(result_str)
             
+            # Extract current phase from prep_res
+            current_phase = prep_res.get("current_phase", "-")
+            
             # Emit tool complete event with result length for UI
             await emit_tool_complete(workflow_id, step_id, {
                 "tool_name": tool_name,
                 "action_id": action_id,
                 "result_length": result_length,
                 "tool_result": result_str[:200] if result_length > 0 else "",  # Preview for UI
-                "status": "success"
+                "status": "success",
+                "phase": current_phase  # Add current phase for workflow.log
             }, user_request_id)
             
             return result

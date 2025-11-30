@@ -184,10 +184,23 @@ class EventBridge:
         elif event.event_type == EventTypes.LLM_START:
             provider = event_data.get("provider", "Unknown")
             model = event_data.get("model", "Unknown")
+            model_name = event_data.get("model_name", model)  # Prefer model_name if available
             loop_count = event_data.get("loop_count", 0)
-            message = f"LLM Call Started - {provider} {model}"
+            phase = event_data.get("phase", "-")
+            tool_count = event_data.get("tool_count", 0)
+            action_id = event_data.get("action_id") or "unknown"  # Extract action_id for display, default to "unknown"
+            
+            # Build informative message
+            message = f"🤖 LLM Call: {provider} {model_name}"
+            if phase != "-":
+                message = f"🤖 LLM Call ({phase}): {provider} {model_name}"
+            if tool_count > 0:
+                message += f" — {tool_count} tool(s)"
             if loop_count > 0:
                 message += f" (Iteration {loop_count})"
+            if action_id and action_id != "unknown":
+                message += f" (Act: {action_id})"
+            
             return {
                 "type": "workflow_status",
                 "request_id": user_request_id,
@@ -207,16 +220,37 @@ class EventBridge:
             # Add detailed logging for debugging
             self.bound_logger.debug(f"LLM_COMPLETE event: content_length={len(response_content) if response_content else 0}, is_status_report={is_status_report}")
             
+            # Extract phase and build informative message
+            phase = event_data.get("phase", "-")
+            provider = event_data.get("provider", "Unknown")
+            model_name = event_data.get("model_name", event_data.get("model", "Unknown"))
+            
+            # Extract action_id - should always be present for LLM_COMPLETE events
+            action_id = event_data.get("action_id") or "unknown"
+            
             # LLM_COMPLETE events are now only for intermediate responses
             # Final responses are handled by WORKFLOW_COMPLETE events
             if response_content and not is_status_report:
                 # This is an intermediate LLM response - send as status update
+                # Handle tool_calls - it might be a list or an integer count
+                if isinstance(tool_calls, list):
+                    tool_calls_count = len(tool_calls)
+                elif isinstance(tool_calls, int):
+                    tool_calls_count = tool_calls
+                else:
+                    tool_calls_count = 0
+                
+                message = f"✅ LLM Response ({phase}): {tokens_in:,} in, {tokens_out:,} out"
+                if tool_calls_count > 0:
+                    message += f" — {tool_calls_count} tool call(s)"
+                if action_id and action_id != "unknown":
+                    message += f" (Act: {action_id})"
                 self.bound_logger.debug(f"LLM response received, sending as status update: {len(response_content)} chars")
                 return {
                     "type": "workflow_status",
                     "request_id": user_request_id,
                     "status": "processing",
-                    "message": f"LLM response received: {len(response_content)} chars",
+                    "message": message,
                     "data": event_data,
                     "timestamp": str(event.id)
                 }
@@ -253,6 +287,8 @@ class EventBridge:
                 }
             else:
                 # This is an intermediate LLM step - send as status update
+                # Extract action_id for this path too
+                action_id = event_data.get("action_id") or "unknown"
                 self.bound_logger.debug(f"Emitting intermediate LLM step as workflow_status: {tokens_in} in, {tokens_out} out")
                 tool_summary = ""
                 if isinstance(tool_calls, list) and tool_calls:
@@ -261,11 +297,15 @@ class EventBridge:
                 elif isinstance(tool_calls, int) and tool_calls > 0:
                     tool_summary = f" — tools: {tool_calls} call(s)"
                 
+                message = f"✅ LLM Response ({phase}): {tokens_in:,} in, {tokens_out:,} out{tool_summary}"
+                if action_id and action_id != "unknown":
+                    message += f" (Act: {action_id})"
+                
                 return {
                     "type": "workflow_status",
                     "request_id": user_request_id,
                     "status": "processing",
-                    "message": f"LLM step: {tokens_in:,} in, {tokens_out:,} out{tool_summary}",
+                    "message": message,
                     "data": event_data,  # Pass all the enhanced data to the UI
                     "timestamp": str(event.id)
                 }
@@ -277,6 +317,9 @@ class EventBridge:
             tool_args = event_data.get("arguments") or event_data.get("tool_args") or {}
             loop_count = event_data.get("loop_count", 0)
             
+            # Extract action_id - check multiple possible field names
+            action_id = event_data.get("action_id") or event_data.get("tool_call_id") or event_data.get("llm_action_id")
+            
             args_preview = str(tool_args)
             if len(args_preview) > 120:
                 args_preview = args_preview[:117] + "..."
@@ -285,12 +328,15 @@ class EventBridge:
             if loop_count > 0:
                 message += f" (Iteration {loop_count})"
             message += (f" — args: `{args_preview}`" if tool_args else "")
+            if action_id:
+                message += f" (Act: {action_id})"
             
             return {
                 "type": "workflow_status",
                 "request_id": user_request_id,
                 "status": "executing_tools",
                 "message": message,
+                "data": event_data,  # Include event_data so UI can access action_id
                 "timestamp": str(event.id)
             }
             
@@ -300,10 +346,11 @@ class EventBridge:
             if result_len is None:
                 result_len = len(str(event_data.get("tool_result", "")))
             loop_count = event_data.get("loop_count", 0)
+            tool_index = event_data.get("tool_index", 1)
+            total_tools = event_data.get("total_tools", 1)
             
-            # Use LLM's tool_call_id as the primary Action ID for correlation
-            tool_call_id = event_data.get("tool_call_id")
-            action_id_display = tool_call_id if tool_call_id else "unknown"
+            # Extract action_id - check multiple possible field names (action_id first, then tool_call_id, then llm_action_id)
+            action_id_display = event_data.get("action_id") or event_data.get("tool_call_id") or event_data.get("llm_action_id") or "unknown"
             
             # Show result preview if available
             tool_result = event_data.get("tool_result")
@@ -315,7 +362,13 @@ class EventBridge:
                 else:
                     result_preview = f" — result: {result_str}"
             
-            message = f"Tool Completed: `{tool_name}` — {result_len:,} chars{result_preview} (Act: {action_id_display})"
+            # Build message with tool index if multiple tools
+            message = f"Tool Completed: `{tool_name}`"
+            if total_tools > 1:
+                message += f" ({tool_index}/{total_tools})"
+            message += f" — {result_len:,} chars{result_preview}"
+            if action_id_display and action_id_display != "unknown":
+                message += f" (Act: {action_id_display})"
             if loop_count > 0:
                 message += f" (Iteration {loop_count})"
             
@@ -332,9 +385,8 @@ class EventBridge:
             error_msg = event_data.get("error", "Unknown error")
             loop_count = event_data.get("loop_count", 0)
             
-            # Use LLM's tool_call_id as the primary Action ID for correlation
-            tool_call_id = event_data.get("tool_call_id")
-            action_id_display = tool_call_id if tool_call_id else "unknown"
+            # Extract action_id - check multiple possible field names (action_id first, then tool_call_id, then llm_action_id)
+            action_id_display = event_data.get("action_id") or event_data.get("tool_call_id") or event_data.get("llm_action_id") or "unknown"
             
             message = f"❌ Tool Failed: `{tool_name}` — {error_msg} (Act: {action_id_display})"
             if loop_count > 0:

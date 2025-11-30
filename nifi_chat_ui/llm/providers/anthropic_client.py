@@ -55,7 +55,7 @@ class AnthropicClient(LLMProvider):
             "messages": anthropic_messages,
             "tools": tools
         }
-        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id).debug("Calling Anthropic LLM")
+        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id, action_id=action_id).debug("Calling Anthropic LLM")
         
         try:
             response = self.client.messages.create(
@@ -104,7 +104,7 @@ class AnthropicClient(LLMProvider):
                 "error": None,
                 "full_response": content
             }
-            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id).debug("llm-response")
+            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id, action_id=action_id).debug("llm-response")
             
             return LLMResponse(
                 content=content or None,
@@ -120,7 +120,7 @@ class AnthropicClient(LLMProvider):
                 "token_count_in": 0,
                 "token_count_out": 0
             }
-            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id).debug("Received error from Anthropic LLM")
+            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id, action_id=action_id).debug("Received error from Anthropic LLM")
             raise
     
     def format_tools(self, tools: List[Dict[str, Any]]) -> Any:

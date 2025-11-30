@@ -991,46 +991,272 @@ def _extract_summary(details: Dict) -> Dict:
     }
 
 
-def _extract_business_properties(component: Dict) -> Dict:
-    """Extract business-relevant properties based on processor type."""
-    proc_type = component.get("type", "").split(".")[-1]
-    config = component.get("config", {})
-    properties = config.get("properties", {})
+def _is_meaningful_property(prop_name: str, prop_value: Any, config: Dict = None) -> bool:
+    """Determine if a property is worth including based on value patterns."""
+    if not prop_value or prop_value == "":
+        return False
     
+    # Get extraction config if available
+    extraction_config = {}
+    if config:
+        try:
+            from config.settings import get_doc_property_extraction_config
+            extraction_config = get_doc_property_extraction_config()
+        except Exception:
+            pass
+    
+    # Skip default values if configured
+    if not extraction_config.get("include_defaults", False):
+        defaults = ["0 sec", "1", "false", "true", "UTF-8", "ALL", "DISABLED", "RANDOM"]
+        if str(prop_value).strip() in defaults:
+            return False
+    
+    # Skip very long values (likely binary or encoded data)
+    max_length = extraction_config.get("max_value_length", 2000)
+    if isinstance(prop_value, str) and len(prop_value) > max_length:
+        return False
+    
+    # Skip properties that are clearly internal/config
+    internal_keywords = ["version", "revision", "bundle", "validation", "scheduling strategy"]
+    if any(kw in prop_name.lower() for kw in internal_keywords):
+        return False
+    
+    return True
+
+
+def _extract_business_properties_heuristic(properties: Dict, config: Dict = None) -> Dict:
+    """Extract properties using heuristics - works for any processor type.
+    
+    This is the primary extraction method that uses pattern matching to identify
+    business-relevant properties without hardcoding processor types.
+    """
     result = {}
+    extraction_config = config or {}
+    max_props = extraction_config.get("max_properties_per_processor", 10)
+    truncate = extraction_config.get("truncate_large_values", True)
+    max_length = extraction_config.get("max_value_length", 500)
     
+    for prop_name, prop_value in properties.items():
+        if not _is_meaningful_property(prop_name, prop_value, extraction_config):
+            continue
+        
+        # Skip common non-business properties
+        if prop_name.lower() in ["routing strategy", "scheduling strategy", "run duration"]:
+            continue
+        
+        # Pattern 1: Expression Language (${...})
+        # Indicates dynamic values, attribute references, business logic
+        if isinstance(prop_value, str) and "${" in prop_value:
+            result[prop_name] = prop_value
+            continue
+            
+        # Pattern 2: JSONPath ($[...] or $."...")
+        # Indicates field extraction from JSON
+        if isinstance(prop_value, str) and prop_value.startswith("$"):
+            result[prop_name] = prop_value
+            continue
+            
+        # Pattern 3: URLs (http://, https://, file://, etc.)
+        # Indicates external system interactions
+        if isinstance(prop_value, str) and any(
+            prop_value.startswith(prefix) 
+            for prefix in ["http://", "https://", "file://", "ftp://", "sftp://", "jdbc:", "kafka://"]
+        ):
+            result[prop_name] = prop_value
+            continue
+            
+        # Pattern 4: File paths (absolute or relative)
+        # Indicates file system interactions
+        if isinstance(prop_value, str) and (
+            prop_value.startswith("/") or 
+            "\\" in prop_value or
+            (prop_value.count("/") > 2 and not prop_value.startswith("http"))
+        ):
+            result[prop_name] = prop_value
+            continue
+            
+        # Pattern 5: SQL-like queries (SELECT, INSERT, UPDATE, etc.)
+        # Indicates database interactions
+        if isinstance(prop_value, str) and any(
+            keyword in prop_value.upper() 
+            for keyword in ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP"]
+        ):
+            result[prop_name] = prop_value
+            continue
+            
+        # Pattern 6: Non-empty, non-default values for known business properties
+        # Property names that suggest business logic
+        if any(keyword in prop_name.lower() for keyword in [
+            "query", "sql", "script", "spec", "transform", "rule", 
+            "condition", "filter", "expression", "path", "url", "endpoint",
+            "topic", "queue", "table", "database", "schema", "directory",
+            "file", "pattern", "regex", "template", "format"
+        ]):
+            # Truncate if configured
+            if truncate and isinstance(prop_value, str) and len(prop_value) > max_length:
+                result[prop_name] = prop_value[:max_length] + " *TRUNCATED*"
+            else:
+                result[prop_name] = prop_value
+            continue
+        
+        # Limit number of properties extracted
+        if len(result) >= max_props:
+            # Add metadata indicating property limit was reached
+            remaining_props = len(properties) - len([k for k in properties.keys() if k in result])
+            if remaining_props > 0:
+                result["_metadata"] = {
+                    "property_limit_reached": True,
+                    "max_properties": max_props,
+                    "properties_extracted": len(result),
+                    "properties_remaining": remaining_props,
+                    "note": f"Only first {max_props} business properties extracted. {remaining_props} additional properties were skipped."
+                }
+            break
+    
+    return result
+
+
+def _extract_business_properties_template(proc_type: str, properties: Dict, config: Dict = None) -> Dict:
+    """Extract properties using processor-specific templates (fallback).
+    
+    This handles special cases where heuristics might miss important details.
+    """
+    result = {}
+    extraction_config = config or {}
+    truncate = extraction_config.get("truncate_large_values", True)
+    max_length = extraction_config.get("max_value_length", 500)
+    
+    # RouteOnAttribute: All properties except "Routing Strategy"
     if proc_type == "RouteOnAttribute":
         for prop, value in properties.items():
             if prop not in ["Routing Strategy"] and value:
                 result[prop] = value
                 
+    # Script processors: Truncate long scripts
     elif proc_type in ["ExecuteScript", "ExecuteGroovyScript"]:
         script = properties.get("Script Body", "")
         if script:
-            result["script_preview"] = script[:500] + ("..." if len(script) > 500 else "")
-            result["script_length"] = len(script)
+            if truncate and len(script) > max_length:
+                result["script_preview"] = script[:max_length] + " *TRUNCATED*"
+                result["script_length"] = len(script)
+                result["_script_truncated"] = True
+            else:
+                result["script_preview"] = script
+                result["script_length"] = len(script)
             
+    # JoltTransformJSON: Include spec (may be long, but important)
     elif proc_type == "JoltTransformJSON":
         spec = properties.get("Jolt Specification", "")
         if spec:
-            result["jolt_spec"] = spec
+            if truncate and len(spec) > max_length:
+                result["jolt_spec"] = spec[:max_length] + " *TRUNCATED*"
+                result["_jolt_spec_truncated"] = True
+            else:
+                result["jolt_spec"] = spec
             
+    # QueryRecord: SQL queries
     elif proc_type == "QueryRecord":
         for prop, value in properties.items():
             if value and ("query" in prop.lower() or "sql" in prop.lower()):
                 result[prop] = value
                 
+    # InvokeHTTP: URL and method (critical for IO endpoints)
     elif proc_type == "InvokeHTTP":
-        result["url"] = properties.get("Remote URL", "")
-        result["method"] = properties.get("HTTP Method", "GET")
+        url = properties.get("Remote URL", "")
+        method = properties.get("HTTP Method", "GET")
+        if url:
+            result["url"] = url
+        if method:
+            result["method"] = method
+        # Also extract Expression Language properties (e.g., Authorization header)
+        for prop_name, prop_value in properties.items():
+            if prop_value and "${" in str(prop_value):
+                result[prop_name] = prop_value
         
+    # File processors: Directory and filter
     elif proc_type in ["GetFile", "PutFile"]:
-        result["directory"] = properties.get("Directory", "")
-        result["file_filter"] = properties.get("File Filter", "")
+        directory = properties.get("Directory", "")
+        file_filter = properties.get("File Filter", "")
+        if directory:
+            result["directory"] = directory
+        if file_filter:
+            result["file_filter"] = file_filter
         
+    # Kafka processors: Topic and bootstrap servers
     elif proc_type in ["ConsumeKafka", "PublishKafka", "ConsumeKafka_2_6", "PublishKafka_2_6"]:
-        result["topic"] = properties.get("topic", properties.get("Topic Name(s)", ""))
-        result["bootstrap_servers"] = properties.get("bootstrap.servers", "")
+        topic = properties.get("topic", properties.get("Topic Name(s)", ""))
+        bootstrap = properties.get("bootstrap.servers", "")
+        if topic:
+            result["topic"] = topic
+        if bootstrap:
+            result["bootstrap_servers"] = bootstrap
+    
+    return result
+
+
+def _extract_business_properties(component: Dict, config: Dict = None) -> Dict:
+    """Extract business-relevant properties using multi-tier strategy.
+    
+    Strategy:
+    1. Try heuristic extraction first (works for any processor type)
+    2. If heuristics find nothing, try processor-specific templates
+    3. If still nothing and mode is comprehensive, return all non-empty properties
+    
+    Args:
+        component: Processor component dict with type and config
+        config: Optional extraction configuration dict
+        
+    Returns:
+        Dict of business-relevant properties
+    """
+    # DEFENSIVE: Ensure component is a dict
+    if not isinstance(component, dict):
+        return {}
+    
+    proc_type = component.get("type", "")
+    if proc_type:
+        proc_type = proc_type.split(".")[-1]
+    component_config = component.get("config", {})
+    # DEFENSIVE: Ensure component_config is a dict
+    if not isinstance(component_config, dict):
+        component_config = {}
+    properties = component_config.get("properties", {})
+    # DEFENSIVE: Ensure properties is a dict (critical - prevents KeyError)
+    if not isinstance(properties, dict):
+        # Log warning but return empty dict to prevent crashes
+        import logging
+        logging.warning(f"Properties is not a dict in _extract_business_properties: {type(properties)}")
+        properties = {}
+    
+    # Get extraction mode from config
+    extraction_config = config or {}
+    if not extraction_config:
+        try:
+            from config.settings import get_doc_property_extraction_config
+            extraction_config = get_doc_property_extraction_config()
+        except Exception:
+            extraction_config = {"mode": "balanced"}
+    
+    mode = extraction_config.get("mode", "balanced")
+    
+    # Tier 1: Heuristic extraction (primary - works for any processor type)
+    heuristic_result = _extract_business_properties_heuristic(properties, extraction_config)
+    
+    # Tier 2: Processor-specific templates (fallback for special cases)
+    template_result = {}
+    if mode in ["balanced", "comprehensive"]:
+        template_result = _extract_business_properties_template(proc_type, properties, extraction_config)
+    
+    # Merge results (template takes precedence for overlapping properties)
+    result = {**heuristic_result, **template_result}
+    
+    # Tier 3: Full property fallback (only in comprehensive mode)
+    if not result and mode == "comprehensive":
+        # Return all non-empty, meaningful properties
+        result = {
+            k: v for k, v in properties.items() 
+            if _is_meaningful_property(k, v, extraction_config)
+        }
     
     return result
 
@@ -1055,6 +1281,14 @@ def _extract_doc_optimized(details: Dict, include_properties: bool = False) -> D
             "autoTerminate": rel.get("autoTerminate", False)
         })
     
+    # Get extraction config for business properties
+    extraction_config = None
+    try:
+        from config.settings import get_doc_property_extraction_config
+        extraction_config = get_doc_property_extraction_config()
+    except Exception:
+        pass
+    
     result = {
         "id": details.get("id"),
         "name": component.get("name"),
@@ -1063,7 +1297,7 @@ def _extract_doc_optimized(details: Dict, include_properties: bool = False) -> D
         "comments": component.get("comments", ""),
         "expressions": expressions,
         "relationships": relationships,
-        "business_properties": _extract_business_properties(component)
+        "business_properties": _extract_business_properties(component, extraction_config)
     }
     
     # Include properties if requested (needed for IO endpoint extraction)

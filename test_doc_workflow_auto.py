@@ -54,7 +54,7 @@ sys.path.insert(0, str(project_root))
 # Configuration
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000")
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000")
-TIMEOUT_SECONDS = 300  # 5 minutes max for workflow
+TIMEOUT_SECONDS = 600  # 10 minutes max for workflow
 POLL_INTERVAL = 2  # Check status every 2 seconds
 TOKEN_STORE_PATH = project_root / "nifi_tokens.json"
 
@@ -412,6 +412,9 @@ async def validate_output(request_id: str) -> Dict[str, Any]:
         "has_io_table": False,
         "has_error_handling": False,
         "pg_summaries_count": 0,
+        "doc_sections": None,
+        "final_document_in_shared": False,
+        "final_document_size": 0,
         "errors": []
     }
     
@@ -457,10 +460,30 @@ async def validate_output(request_id: str) -> Dict[str, Any]:
                 else:
                     workflow_data = result_str
                 
-                # Check for pg_summaries in result
+                # Check for pg_summaries and doc_sections in result
                 shared_state = workflow_data.get("shared_state", {})
                 if "pg_summaries" in shared_state:
                     validation_results["pg_summaries_count"] = len(shared_state.get("pg_summaries", {}))
+                
+                # Verify doc_sections are populated
+                doc_sections = shared_state.get("doc_sections", {})
+                if doc_sections:
+                    validation_results["doc_sections"] = {
+                        "count": len(doc_sections),
+                        "sections": list(doc_sections.keys()),
+                        "all_populated": all(
+                            isinstance(v, str) and len(v) > 0 
+                            for v in doc_sections.values()
+                        )
+                    }
+                
+                # Verify final_document is populated
+                final_doc = shared_state.get("final_document", "")
+                if final_doc:
+                    validation_results["final_document_in_shared"] = True
+                    validation_results["final_document_size"] = len(final_doc)
+                else:
+                    validation_results["final_document_in_shared"] = False
             except (json.JSONDecodeError, TypeError):
                 pass
         
@@ -518,7 +541,7 @@ async def debug_shared_state(request_id: str) -> None:
     print(f"   - doc_sections keys: {list(doc_sections.keys()) if isinstance(doc_sections, dict) else 'N/A'}")
     print(f"   - final_document length: {len(final_document) if isinstance(final_document, str) else 'N/A'}")
     
-    # Show sample PG summaries
+    # Show sample PG summaries with more detail
     if isinstance(pg_summaries, dict) and pg_summaries:
         sample_keys = list(pg_summaries.keys())[:3]
         print("\n   🧩 Sample pg_summaries entries:")
@@ -526,32 +549,84 @@ async def debug_shared_state(request_id: str) -> None:
             summary = pg_summaries.get(key, {})
             print(f"     - PG {key}:")
             if isinstance(summary, dict):
-                print(f"         name: {summary.get('name')}")
-                print(f"         virtual: {summary.get('virtual')}")
-                print(f"         has_summary_text: {bool(summary.get('summary'))}")
-                print(f"         io_endpoints: {len(summary.get('io_endpoints', []))}")
-                print(f"         error_handling: {len(summary.get('error_handling', []))}")
+                print(f"         name: {summary.get('name', 'N/A')}")
+                print(f"         virtual: {summary.get('virtual', False)}")
+                summary_text = summary.get('summary', '')
+                has_summary = bool(summary_text)
+                summary_preview = summary_text[:100] if summary_text else "N/A"
+                print(f"         has_summary_text: {has_summary} ({len(summary_text)} chars)")
+                if has_summary:
+                    print(f"         summary_preview: {summary_preview}...")
+                io_endpoints = summary.get('io_endpoints', [])
+                print(f"         io_endpoints: {len(io_endpoints)}")
+                if io_endpoints:
+                    # Show first IO endpoint as sample
+                    first_io = io_endpoints[0]
+                    print(f"           Sample IO: {first_io.get('processor', '?')} ({first_io.get('direction', '?')})")
+                error_handling = summary.get('error_handling', [])
+                print(f"         error_handling: {len(error_handling)}")
+                if error_handling:
+                    # Show first error handling entry as sample
+                    first_err = error_handling[0]
+                    print(f"           Sample error: {first_err.get('processor', '?')} -> {first_err.get('relationship', '?')}")
             else:
                 print(f"         (non-dict summary of type {type(summary)})")
     else:
         print("\n   ⚠️ No pg_summaries available.")
     
-    # Show doc_sections overview
+    # Show doc_sections overview with previews
+    expected_sections = ["summary", "diagram", "hierarchy_doc", "io_table", "error_handling_table"]
     if isinstance(doc_sections, dict) and doc_sections:
         print("\n   📑 doc_sections overview:")
-        for name, section in doc_sections.items():
-            if isinstance(section, str):
+        for name in expected_sections:
+            section = doc_sections.get(name)
+            if section is None:
+                print(f"     - {name}: ❌ MISSING")
+            elif isinstance(section, str):
                 length = len(section)
+                preview = section[:150].replace('\n', ' ') if section else ""
+                status = "✅" if length > 0 else "⚠️ EMPTY"
+                print(f"     - {name}: {status} type=str, length={length}")
+                if preview:
+                    print(f"       Preview: {preview}...")
             elif isinstance(section, dict):
                 length = len(json.dumps(section))
+                print(f"     - {name}: ✅ type=dict, length={length}")
             else:
-                length = 0
-            print(f"     - {name}: type={type(section).__name__}, length={length}")
+                print(f"     - {name}: ⚠️ type={type(section).__name__}, length=0")
+        
+        # Check for unexpected sections
+        unexpected = set(doc_sections.keys()) - set(expected_sections)
+        if unexpected:
+            print(f"\n     ⚠️ Unexpected sections found: {unexpected}")
     else:
         print("\n   ⚠️ No doc_sections available.")
     
     # Print a small preview of the final document, if present
     if isinstance(final_document, str) and final_document:
+        print("\n   📄 Final document analysis:")
+        print(f"   - Length: {len(final_document):,} characters")
+        
+        # Check for required sections in final document
+        required_markers = [
+            ("# NiFi Flow Documentation", "Title"),
+            ("## Executive Summary", "Executive Summary"),
+            ("## Flow Architecture", "Flow Architecture"),
+            ("```mermaid", "Mermaid Diagram"),
+            ("## External Interactions", "External Interactions"),
+            ("## Error Handling", "Error Handling")
+        ]
+        
+        found_markers = []
+        for marker, name in required_markers:
+            if marker in final_document:
+                found_markers.append(name)
+        
+        print(f"   - Sections found: {len(found_markers)}/{len(required_markers)}")
+        for name in required_markers:
+            status = "✅" if name[1] in found_markers else "❌"
+            print(f"     {status} {name[1]}")
+        
         preview = final_document[:800]
         print("\n   📄 Final document preview (first 800 chars):")
         print("   " + "-" * 58)
@@ -586,6 +661,22 @@ def print_validation_results(results: Dict[str, Any]):
     print(f"\n📈 Metrics:")
     print(f"   Document Size: {results['document_size']:,} bytes")
     print(f"   PG Summaries: {results['pg_summaries_count']}")
+    
+    # Show doc_sections info if available
+    if results.get("doc_sections"):
+        doc_info = results["doc_sections"]
+        print(f"   Doc Sections: {doc_info.get('count', 0)} sections")
+        print(f"   Sections: {', '.join(doc_info.get('sections', []))}")
+        if doc_info.get("all_populated"):
+            print(f"   ✅ All sections populated")
+        else:
+            print(f"   ⚠️ Some sections may be empty")
+    
+    # Show final_document info from shared_state
+    if results.get("final_document_in_shared"):
+        print(f"   Final Document (shared_state): ✅ {results.get('final_document_size', 0):,} bytes")
+    else:
+        print(f"   Final Document (shared_state): ❌ Not found in shared_state")
     
     if results["errors"]:
         print(f"\n⚠️  Errors Found ({len(results['errors'])}):")

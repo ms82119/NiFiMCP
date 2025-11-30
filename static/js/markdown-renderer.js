@@ -89,15 +89,18 @@ class MarkdownRenderer {
                 // Special handling for Mermaid diagrams
                 if (lang === 'mermaid') {
                     const diagramId = 'mermaid-' + Math.random().toString(36).substr(2, 9);
+                    // Store the code in a safe way - use base64 encoding to avoid HTML attribute quote issues
+                    const encodedCode = btoa(unescape(encodeURIComponent(code)));
+                    // For onclick handlers, we need to escape properly for JavaScript template literals
+                    const jsEscapedCode = code.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
                     return `<div class="markdown-mermaid-block">
                         <div class="mermaid-header">
                             <span class="mermaid-title">📊 Flow Diagram</span>
                             <div class="mermaid-controls">
-                                <button class="mermaid-btn" onclick="window.app.markdownRenderer.renderMermaid('${diagramId}', \`${code.replace(/`/g, '\\`')}\`)">Re-render</button>
-                                <button class="mermaid-btn" onclick="window.app.markdownRenderer.exportMermaid('${diagramId}', \`${code.replace(/`/g, '\\`')}\`)">Export SVG</button>
+                                <button class="mermaid-btn" onclick="window.app.markdownRenderer.exportMermaid('${diagramId}', \`${jsEscapedCode}\`)">Export SVG</button>
                             </div>
                         </div>
-                        <div id="${diagramId}" class="mermaid-container" data-mermaid-code="${this.escapeHtml(code)}">
+                        <div id="${diagramId}" class="mermaid-container" data-mermaid-code-base64="${encodedCode}">
                             <div class="mermaid-loading">🔄 Rendering diagram...</div>
                         </div>
                     </div>`;
@@ -127,9 +130,40 @@ class MarkdownRenderer {
     }
     
     unescapeHtml(text) {
-        const div = document.createElement('div');
-        div.innerHTML = text;
-        return div.textContent || div.innerText || '';
+        // Handle multiple levels of HTML entity encoding
+        let result = text;
+
+        // First pass: handle basic HTML entities
+        const basicEntities = {
+            '&amp;': '&',
+            '&lt;': '<',
+            '&gt;': '>',
+            '&quot;': '"',
+            '&#39;': "'",
+            '&apos;': "'"
+        };
+
+        // Multiple passes to handle nested encoding (up to 3 levels)
+        for (let pass = 0; pass < 3; pass++) {
+            let changed = false;
+            for (const [entity, replacement] of Object.entries(basicEntities)) {
+                if (result.includes(entity)) {
+                    result = result.replace(new RegExp(entity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), replacement);
+                    changed = true;
+                }
+            }
+            // If no changes in this pass, we're done
+            if (!changed) break;
+        }
+
+        // Fallback to DOM method for any remaining entities
+        if (result.includes('&')) {
+            const div = document.createElement('div');
+            div.innerHTML = result;
+            result = div.textContent || div.innerText || '';
+        }
+
+        return result;
     }
     
     render(content) {
@@ -216,7 +250,19 @@ class MarkdownRenderer {
                     const loadingDiv = container.querySelector('.mermaid-loading');
                     
                     if (loadingDiv) {
-                        // Get the Mermaid code from the data attribute and unescape it
+                        // Try base64-encoded version first (new approach)
+                        const base64Code = container.getAttribute('data-mermaid-code-base64');
+                        if (base64Code) {
+                            try {
+                                const mermaidCode = decodeURIComponent(escape(atob(base64Code)));
+                                this.renderMermaid(container.id, mermaidCode);
+                                return;
+                            } catch (e) {
+                                console.warn('Failed to decode base64 Mermaid code, falling back to HTML attribute:', e);
+                            }
+                        }
+                        
+                        // Fallback to old HTML-escaped attribute (for backward compatibility)
                         const escapedMermaidCode = container.getAttribute('data-mermaid-code');
                         if (escapedMermaidCode) {
                             const mermaidCode = this.unescapeHtml(escapedMermaidCode);
@@ -232,12 +278,26 @@ class MarkdownRenderer {
         // Remove HTML tags and normalize whitespace
         let cleaned = code.replace(/<br\s*\/?>/gi, '\n');  // Replace <br> with newlines
         cleaned = cleaned.replace(/<[^>]*>/g, '');  // Remove any other HTML tags
-        
-        // Fix HTML entities that might be in the code
-        cleaned = cleaned.replace(/&lt;/g, '<');
-        cleaned = cleaned.replace(/&gt;/g, '>');
-        cleaned = cleaned.replace(/&amp;/g, '&');
-        
+
+        // Use the improved unescape function to handle multiple levels of encoding
+        cleaned = this.unescapeHtml(cleaned);
+
+        // Fix specific corruption patterns from HTML entity mangling
+        // Handle patterns like: subgraph name[" label=""]=""
+        cleaned = cleaned.replace(/subgraph\s+(\w+)\[\s*"([^"]*?)"\s*=\s*""\s*\]/g, 'subgraph $1["$2"]');
+
+        // Fix corrupted node labels like: A[[label=""]=""
+        cleaned = cleaned.replace(/\[\[([^\]]*?)"\s*=\s*""\s*\]\]/g, '[[$1]]');
+
+        // Fix corrupted connections like: A --&gt; B  (should be A --> B)
+        cleaned = cleaned.replace(/--&gt;/g, '-->');
+
+        // Remove trailing corruption artifacts: ="" patterns
+        cleaned = cleaned.replace(/=""(\s*(?:subgraph|end|direction|tb|[a-z]\[\[))/gi, '$1');
+
+        // Clean up any remaining corruption artifacts
+        cleaned = cleaned.replace(/\s*=""\s*/g, ' ');
+
         // More comprehensive approach to fix node labels
         // First, identify all node definitions and fix them systematically
         const lines = cleaned.split('\n');
@@ -246,7 +306,7 @@ class MarkdownRenderer {
             if (!line.trim() || line.includes('-->') || line.includes('->')) {
                 return line;
             }
-            
+
             // Handle node definitions like: NODE_ID(Node Label)
             // Use a more robust approach that manually handles parentheses
             const trimmedLine = line.trim();
@@ -255,12 +315,12 @@ class MarkdownRenderer {
                 const nodeId = nodeMatch[1];
                 const indent = line.match(/^(\s*)/)[1];
                 const trailing = line.match(/(\s*)$/)[1];
-                
+
                 // Find the matching closing parenthesis
                 const openParenIndex = trimmedLine.indexOf('(');
                 let parenCount = 0;
                 let closeParenIndex = -1;
-                
+
                 for (let i = openParenIndex; i < trimmedLine.length; i++) {
                     if (trimmedLine[i] === '(') {
                         parenCount++;
@@ -272,33 +332,33 @@ class MarkdownRenderer {
                         }
                     }
                 }
-                
+
                 if (closeParenIndex !== -1) {
                     const label = trimmedLine.substring(openParenIndex + 1, closeParenIndex);
-                    
+
                     // Clean the node ID (remove any problematic characters)
                     const cleanNodeId = nodeId.replace(/[^a-zA-Z0-9_]/g, '_');
-                    
+
                     // Clean the label and wrap in quotes
                     let cleanLabel = label.trim();
-                    
+
                     // Always wrap labels in quotes for safety - this is the most reliable approach
                     cleanLabel = `"${cleanLabel}"`;
-                    
+
                     return `${indent}${cleanNodeId}(${cleanLabel})${trailing}`;
                 }
             }
-            
+
             return line;
         });
-        
+
         cleaned = fixedLines.join('\n');
-        
+
         // Normalize whitespace but preserve structure
         cleaned = cleaned.replace(/\n\s*\n/g, '\n');  // Remove empty lines
         cleaned = cleaned.replace(/^\s+|\s+$/gm, '');  // Trim each line
         cleaned = cleaned.trim();
-        
+
         return cleaned;
     }
     
@@ -363,6 +423,19 @@ class MarkdownRenderer {
         for (const block of mermaidBlocks) {
             const container = block.querySelector('.mermaid-container');
             if (container && container.classList.contains('rendered')) {
+                // Try base64-encoded version first (new approach)
+                const base64Code = container.getAttribute('data-mermaid-code-base64');
+                if (base64Code) {
+                    try {
+                        const mermaidCode = decodeURIComponent(escape(atob(base64Code)));
+                        await this.renderMermaid(container.id, mermaidCode);
+                        continue;
+                    } catch (e) {
+                        console.warn('Failed to decode base64 Mermaid code, falling back to HTML attribute:', e);
+                    }
+                }
+                
+                // Fallback to old HTML-escaped attribute (for backward compatibility)
                 const mermaidCode = container.getAttribute('data-mermaid-code');
                 if (mermaidCode) {
                     const unescapedCode = this.unescapeHtml(mermaidCode);

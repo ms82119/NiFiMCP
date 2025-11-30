@@ -57,6 +57,8 @@ class InitializeDocNode(AsyncNiFiWorkflowNode):
             "provider": shared.get("provider", "openai"),
             "model_name": shared.get("model_name", "gpt-4"),
             "nifi_server_id": shared.get("selected_nifi_server_id"),
+            "workflow_id": shared.get("workflow_id", "flow_documentation"),
+            "step_id": self.name,  # Include step_id for event emission
             "config": get_documentation_workflow_config()
         }
     
@@ -188,6 +190,8 @@ class DiscoveryNode(AsyncNiFiWorkflowNode):
             raise ValueError(f"shared must be a dict in prep_async, got {type(shared).__name__}")
         
         await super().prep_async(shared)
+        # Store shared state reference for token cost tracking
+        self.set_shared_state(shared)
         
         config = shared.get("config", {})
         if not isinstance(config, dict):
@@ -202,7 +206,9 @@ class DiscoveryNode(AsyncNiFiWorkflowNode):
             "pg_tree": shared.get("pg_tree", {}),
             "nifi_server_id": shared.get("nifi_server_id"),
             "user_request_id": shared.get("user_request_id"),
-            "workflow_id": shared.get("workflow_id"),
+            "workflow_id": shared.get("workflow_id", "flow_documentation"),
+            "step_id": self.name,  # Include step_id for event emission
+            "current_phase": shared.get("current_phase", "DISCOVERY"),  # Include current phase for event emission
             
             # Configuration
             "timeout_seconds": config.get("timeout_seconds", 120),
@@ -842,6 +848,8 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             raise ValueError(f"shared must be a dict in prep_async, got {type(shared).__name__}")
         
         await super().prep_async(shared)
+        # Store shared state reference for token cost tracking
+        self.set_shared_state(shared)
         self._init_helpers()
         
         config = shared.get("config", {})
@@ -869,7 +877,9 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             "model_name": shared.get("model_name", "gpt-4"),
             "nifi_server_id": shared.get("nifi_server_id"),
             "user_request_id": shared.get("user_request_id"),
-            "workflow_id": shared.get("workflow_id"),
+            "workflow_id": shared.get("workflow_id", "flow_documentation"),
+            "step_id": self.name,  # Include step_id for event emission
+            "current_phase": shared.get("current_phase", "ANALYSIS"),  # Include current phase for event emission
             
             # Configuration
             "large_pg_threshold": config.get("large_pg_threshold", 25),
@@ -885,6 +895,18 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
         current_depth = prep_res["current_depth"]
         pg_tree = prep_res.get("pg_tree", {})
         
+        # Use workflow_logger which writes to workflow.log
+        self.workflow_logger.bind(
+            interface="workflow",
+            data={
+                "node_name": self.name,
+                "action": "exec",
+                "current_depth": current_depth,
+                "pg_tree_size": len(pg_tree) if isinstance(pg_tree, dict) else 0,
+                "pg_tree_type": type(pg_tree).__name__
+            }
+        ).info(f"HierarchicalAnalysisNode.exec_async starting: depth={current_depth}, tree_size={len(pg_tree) if isinstance(pg_tree, dict) else 0}")
+        
         # Defensive check: ensure pg_tree is a dict, not a string
         if not isinstance(pg_tree, dict):
             self.bound_logger.error(
@@ -897,14 +919,51 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
         
         threshold = prep_res["large_pg_threshold"]
         
+        # Debug: Log all PG depths
+        all_depths = [pg.get('depth') for pg in pg_tree.values() if isinstance(pg, dict)]
+        
         pgs_at_depth = [
             pg for pg in pg_tree.values() 
             if isinstance(pg, dict) and pg.get("depth") == current_depth
         ]
         
-        self.bound_logger.info(
-            f"Analyzing depth {current_depth}: {len(pgs_at_depth)} process groups"
-        )
+        # Use workflow_logger for visibility in workflow.log
+        self.workflow_logger.bind(
+            interface="workflow",
+            data={
+                "node_name": self.name,
+                "action": "exec",
+                "current_depth": current_depth,
+                "pgs_at_depth_count": len(pgs_at_depth),
+                "all_depths": sorted(set(all_depths)),
+                "pg_tree_size": len(pg_tree)
+            }
+        ).info(f"Analyzing depth {current_depth}: {len(pgs_at_depth)} process groups (all depths: {sorted(set(all_depths))})")
+        
+        if len(pgs_at_depth) == 0:
+            self.workflow_logger.bind(
+                interface="workflow",
+                data={
+                    "node_name": self.name,
+                    "action": "exec",
+                    "current_depth": current_depth,
+                    "all_depths": sorted(set(all_depths)),
+                    "pg_tree_size": len(pg_tree)
+                }
+            ).warning(f"No PGs found at depth {current_depth}. Available depths: {sorted(set(all_depths))}")
+            # Return early with empty summaries if no PGs at this depth
+            return {
+                "status": "success",
+                "new_summaries": {},
+                "new_virtual_groups": {},
+                "metrics": {
+                    "depth": current_depth,
+                    "pgs_at_depth": 0,
+                    "virtual_groups_created": 0,
+                    "llm_calls": 0,
+                    "level_duration_ms": 0
+                }
+            }
         
         new_summaries = {}
         new_virtual_groups = {}
@@ -915,97 +974,166 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             "llm_calls": 0
         }
         
-        for pg in pgs_at_depth:
-            pg_id = pg["id"]
-            pg_name = pg.get("name", pg_id[:8])
-            proc_count = pg.get("processor_count", 0)
-            
-            self.bound_logger.info(f"  Analyzing PG '{pg_name}' ({proc_count} processors)")
-            
-            # Get this PG's direct processors
-            direct_processors = self._get_pg_processors(pg_id, prep_res)
-            
-            # Get child PG summaries (already computed)
-            # DEFENSIVE: Validate each summary is a dict before including
-            child_summaries = []
-            for child_id in pg.get("children", []):
-                if child_id in prep_res["pg_summaries"]:
-                    child_summary = prep_res["pg_summaries"][child_id]
+        # Wrap the analysis loop in try/except to catch and handle exceptions gracefully
+        try:
+            for pg in pgs_at_depth:
+                pg_id = pg["id"]
+                pg_name = pg.get("name", pg_id[:8])
+                proc_count = pg.get("processor_count", 0)
+                
+                self.workflow_logger.bind(
+                    interface="workflow",
+                    data={
+                        "node_name": self.name,
+                        "action": "exec",
+                        "pg_id": pg_id,
+                        "pg_name": pg_name,
+                        "proc_count": proc_count
+                    }
+                ).info(f"  Analyzing PG '{pg_name}' ({proc_count} processors)")
+                
+                # Get this PG's direct processors
+                direct_processors = self._get_pg_processors(pg_id, prep_res)
+                self.workflow_logger.bind(
+                    interface="workflow",
+                    data={"node_name": self.name, "action": "exec", "pg_name": pg_name}
+                ).info(f"    Found {len(direct_processors)} direct processors for '{pg_name}'")
+                
+                # Get child PG summaries (already computed)
+                # DEFENSIVE: Validate each summary is a dict before including
+                child_summaries = []
+                for child_id in pg.get("children", []):
+                    if child_id in prep_res["pg_summaries"]:
+                        child_summary = prep_res["pg_summaries"][child_id]
+                        if isinstance(child_summary, dict):
+                            child_summaries.append(child_summary)
+                        else:
+                            self.bound_logger.warning(
+                                f"Child summary for {child_id} is not a dict: {type(child_summary)}. Skipping."
+                            )
+                
+                # Check if we need virtual grouping (large PG)
+                virtual_group_summaries = []
+                if proc_count > threshold:
+                    self.bound_logger.info(
+                        f"    Large PG detected ({proc_count} > {threshold}), "
+                        f"creating virtual groups..."
+                    )
+                    
+                    virtual_groups = await self._create_virtual_groups(
+                        pg_id, direct_processors, prep_res
+                    )
+                    
+                    if virtual_groups:
+                        new_virtual_groups[pg_id] = virtual_groups
+                        metrics["virtual_groups_created"] += len(virtual_groups)
+                        
+                        for vg in virtual_groups:
+                            vg_summary = await self._analyze_virtual_group(
+                                vg, direct_processors, prep_res, pg_id  # Pass parent PG ID
+                            )
+                            virtual_group_summaries.append(vg_summary)
+                            metrics["llm_calls"] += 1
+                
+                # Combine all child summaries (real + virtual)
+                all_child_summaries = child_summaries + virtual_group_summaries
+                
+                # Analyze this PG
+                self.workflow_logger.bind(
+                    interface="workflow",
+                    data={"node_name": self.name, "action": "exec", "pg_name": pg_name}
+                ).info(f"    Calling analysis method for '{pg_name}' (has_children={len(all_child_summaries) > 0})")
+                
+                try:
+                    if all_child_summaries:
+                        # Parent PG has children - include both children AND parent's own processors
+                        summary = await self._analyze_pg_with_summaries(
+                            pg, all_child_summaries, prep_res, direct_processors
+                        )
+                    else:
+                        # Leaf PG - only has its own processors
+                        summary = await self._analyze_pg_direct(
+                            pg, direct_processors, prep_res
+                        )
+                    self.workflow_logger.bind(
+                        interface="workflow",
+                        data={"node_name": self.name, "action": "exec", "pg_name": pg_name}
+                    ).info(f"    Analysis complete for '{pg_name}', summary keys: {list(summary.keys()) if isinstance(summary, dict) else 'NOT_A_DICT'}")
+                except Exception as pg_error:
+                    self.workflow_logger.bind(
+                        interface="workflow",
+                        data={"node_name": self.name, "action": "exec", "pg_name": pg_name}
+                    ).error(f"    ERROR analyzing PG '{pg_name}': {pg_error}", exc_info=True)
+                    raise  # Re-raise to be caught by outer try/except
+                
+                # Extract error handling information (lightweight analysis)
+                # Include error handling from parent's own processors (if any)
+                # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
+                pg_connections = []
+                for c in prep_res["flow_graph"].get("connections", []):
+                    parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
+                    if parent_id == pg_id:
+                        pg_connections.append(c)
+                parent_error_handling = []
+                if direct_processors:
+                    parent_error_handling = await self._extract_error_handling(
+                        direct_processors, pg_connections, prep_res
+                    )
+                # summary["error_handling"] already contains errors from children (if any)
+                # Add parent's error handling
+                if isinstance(summary.get("error_handling"), list):
+                    summary["error_handling"].extend(parent_error_handling)
+                else:
+                    summary["error_handling"] = parent_error_handling
+                
+                # Aggregate error handling from children (if not already in summary)
+                for child_summary in all_child_summaries:
+                    # DEFENSIVE: Ensure child_summary is a dict before calling .get()
                     if isinstance(child_summary, dict):
-                        child_summaries.append(child_summary)
+                        child_errors = child_summary.get("error_handling", [])
+                        if isinstance(child_errors, list):
+                            summary["error_handling"].extend(child_errors)
                     else:
                         self.bound_logger.warning(
-                            f"Child summary for {child_id} is not a dict: {type(child_summary)}. Skipping."
+                            f"child_summary is not a dict: {type(child_summary)}. Skipping error aggregation."
                         )
-            
-            # Check if we need virtual grouping (large PG)
-            virtual_group_summaries = []
-            if proc_count > threshold:
-                self.bound_logger.info(
-                    f"    Large PG detected ({proc_count} > {threshold}), "
-                    f"creating virtual groups..."
-                )
                 
-                virtual_groups = await self._create_virtual_groups(
-                    pg_id, direct_processors, prep_res
-                )
+                metrics["llm_calls"] += 1
+                new_summaries[pg_id] = summary
                 
-                if virtual_groups:
-                    new_virtual_groups[pg_id] = virtual_groups
-                    metrics["virtual_groups_created"] += len(virtual_groups)
-                    
-                    for vg in virtual_groups:
-                        vg_summary = await self._analyze_virtual_group(
-                            vg, direct_processors, prep_res, pg_id  # Pass parent PG ID
-                        )
-                        virtual_group_summaries.append(vg_summary)
-                        metrics["llm_calls"] += 1
-            
-            # Combine all child summaries (real + virtual)
-            all_child_summaries = child_summaries + virtual_group_summaries
-            
-            # Analyze this PG
-            if all_child_summaries:
-                summary = await self._analyze_pg_with_summaries(
-                    pg, all_child_summaries, prep_res
+                await self.emit_doc_phase_event(
+                    EventTypes.DOC_ANALYSIS_BATCH,
+                    "ANALYSIS",
+                    prep_res,
+                    metrics={"pg_name": pg_name, "depth": current_depth},
+                    progress_message=f"Analyzed '{pg_name}' at depth {current_depth}"
                 )
-            else:
-                summary = await self._analyze_pg_direct(
-                    pg, direct_processors, prep_res
-                )
-            
-            # Extract error handling information (lightweight analysis)
-            pg_connections = [
-                c for c in prep_res["flow_graph"].get("connections", [])
-                if c.get("component", {}).get("parentGroupId") == pg_id
-            ]
-            error_handling = await self._extract_error_handling(
-                direct_processors, pg_connections, prep_res
+        except Exception as e:
+            # Log the full exception with traceback for debugging
+            import traceback
+            tb_str = traceback.format_exc()
+            self.workflow_logger.bind(
+                interface="workflow",
+                data={
+                    "node_name": self.name,
+                    "action": "exec",
+                    "current_depth": current_depth,
+                    "error": str(e),
+                    "traceback": tb_str
+                }
+            ).error(f"ERROR during analysis at depth {current_depth}: {e}")
+            self.bound_logger.error(
+                f"Error during analysis at depth {current_depth}: {e}",
+                exc_info=True
             )
-            summary["error_handling"] = error_handling
-            
-            # Aggregate error handling from children
-            for child_summary in all_child_summaries:
-                # DEFENSIVE: Ensure child_summary is a dict before calling .get()
-                if isinstance(child_summary, dict):
-                    child_errors = child_summary.get("error_handling", [])
-                    if isinstance(child_errors, list):
-                        summary["error_handling"].extend(child_errors)
-                else:
-                    self.bound_logger.warning(
-                        f"child_summary is not a dict: {type(child_summary)}. Skipping error aggregation."
-                    )
-            
-            metrics["llm_calls"] += 1
-            new_summaries[pg_id] = summary
-            
-            await self.emit_doc_phase_event(
-                EventTypes.DOC_ANALYSIS_BATCH,
-                "ANALYSIS",
-                prep_res,
-                metrics={"pg_name": pg_name, "depth": current_depth},
-                progress_message=f"Analyzed '{pg_name}' at depth {current_depth}"
-            )
+            return {
+                "status": "error",
+                "error": f"Analysis failed at depth {current_depth}: {str(e)}",
+                "error_type": "analysis_exception",
+                "partial_summaries": new_summaries,  # Return what we have so far
+                "metrics": metrics,
+                "traceback": tb_str
+            }
         
         elapsed_ms = int((time.time() - prep_res["level_start_time"]) * 1000)
         metrics["level_duration_ms"] = elapsed_ms
@@ -1039,10 +1167,12 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
         """Use LLM to identify logical groupings in a large flat PG."""
         from ..prompts.documentation import VIRTUAL_SUBFLOW_PROMPT
         
-        connections = [
-            c for c in prep_res["flow_graph"].get("connections", [])
-            if c.get("component", {}).get("parentGroupId") == pg_id
-        ]
+        # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
+        connections = []
+        for c in prep_res["flow_graph"].get("connections", []):
+            parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
+            if parent_id == pg_id:
+                connections.append(c)
         
         proc_summary = [
             {
@@ -1070,7 +1200,7 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             messages=[{"role": "user", "content": prompt}],
             tools=None,
             execution_state=prep_res,
-            action_id=f"virtual-groups-{pg_id[:8]}"
+            action_id=f"virtual-groups-{pg_id}"
         )
         
         if response.get("content"):
@@ -1122,8 +1252,64 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             if p.get("id") in group_proc_ids
         ]
         
-        categorized = self._categorize_processors(group_processors)
-        io_endpoints = await self._extract_io_endpoints_detailed(group_processors, prep_res)
+        # Fetch processor details first (needed for states in categorization)
+        proc_ids = [p.get("id") for p in group_processors if p.get("id")]
+        cached_proc_details = {}
+        if proc_ids:
+            try:
+                result = await self.call_nifi_tool(
+                    "get_nifi_object_details",
+                    {
+                        "object_type": "processor",
+                        "object_ids": proc_ids,
+                        "output_format": "doc_optimized",
+                        "include_properties": True
+                    },
+                    prep_res
+                )
+                if isinstance(result, str):
+                    result = json.loads(result)
+                if not isinstance(result, list):
+                    result = [result] if isinstance(result, dict) else []
+                for item in result:
+                    if isinstance(item, dict) and item.get("status") == "success":
+                        proc_id = item.get("id")
+                        proc_data = item.get("data", {})
+                        # DEFENSIVE: Ensure data is a dict before storing
+                        if isinstance(proc_data, dict):
+                            cached_proc_details[proc_id] = proc_data
+                        else:
+                            self.bound_logger.warning(f"Processor data for {proc_id} is not a dict: {type(proc_data)}")
+                            cached_proc_details[proc_id] = {}
+            except Exception as e:
+                self.bound_logger.warning(f"Failed to fetch processor details for virtual group: {e}")
+                cached_proc_details = {}
+        
+        # Categorize with states (using cached details)
+        categorized = self._categorize_processors(group_processors, include_states=True, cached_proc_details=cached_proc_details)
+        
+        io_endpoints = await self._extract_io_endpoints_detailed(group_processors, prep_res, cached_proc_details)
+        
+        # Extract business properties (routing rules, JSONPath expressions, etc.)
+        business_logic = []
+        for proc_id, proc_data in cached_proc_details.items():
+            # DEFENSIVE: Ensure proc_data is a dict
+            if not isinstance(proc_data, dict):
+                self.bound_logger.warning(f"proc_data for {proc_id} is not a dict: {type(proc_data)}")
+                continue
+            proc_name = proc_data.get("name", "Unknown")
+            proc_type = proc_data.get("type", "")
+            if proc_type:
+                proc_type = proc_type.split(".")[-1]
+            business_props = proc_data.get("business_properties", {})
+            
+            # DEFENSIVE: Ensure business_props is a dict
+            if business_props and isinstance(business_props, dict):
+                business_logic.append({
+                    "processor": proc_name,
+                    "type": proc_type,
+                    "properties": business_props
+                })
         
         prompt = PG_SUMMARY_PROMPT.format(
             pg_name=virtual_group.get("name", "Virtual Group"),
@@ -1131,6 +1317,7 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             processor_count=len(group_processors),
             categories_json=json.dumps(categorized, indent=2),
             io_endpoints_json=json.dumps(io_endpoints, indent=2, default=str),
+            business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]",
             child_summaries_json="[]"
         )
         
@@ -1138,22 +1325,30 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             messages=[{"role": "user", "content": prompt}],
             tools=None,
             execution_state=prep_res,
-            action_id=f"vg-summary-{virtual_group.get('name', 'vg')[:10]}"
+            action_id=f"vg-summary-{virtual_group.get('name', 'vg')}"
         )
         
         # Extract error handling for virtual group (connections within parent PG)
         # Note: Virtual groups are within a parent PG, so we need connections from that PG
-        vg_connections = [
-            c for c in prep_res["flow_graph"].get("connections", [])
-            if c.get("component", {}).get("parentGroupId") == parent_pg_id
-        ]
+        # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
+        vg_connections = []
+        for c in prep_res["flow_graph"].get("connections", []):
+            parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
+            if parent_id == parent_pg_id:
+                vg_connections.append(c)
+        
         # Filter to only connections involving processors in this virtual group
         vg_proc_ids = set(virtual_group.get("processor_ids", []))
-        vg_connections_filtered = [
-            c for c in vg_connections
-            if c.get("component", {}).get("source", {}).get("id") in vg_proc_ids
-            or c.get("component", {}).get("destination", {}).get("id") in vg_proc_ids
-        ]
+        vg_connections_filtered = []
+        for c in vg_connections:
+            # Handle both nested and flat connection structures
+            comp = c.get("component", {})
+            source = comp.get("source", {})
+            dest = comp.get("destination", {})
+            source_id = source.get("id") if source else c.get("sourceId")
+            dest_id = dest.get("id") if dest else c.get("destinationId")
+            if source_id in vg_proc_ids or dest_id in vg_proc_ids:
+                vg_connections_filtered.append(c)
         error_handling = await self._extract_error_handling(
             group_processors, vg_connections_filtered, prep_res
         )
@@ -1173,35 +1368,124 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
         self,
         pg: Dict,
         child_summaries: List[Dict],
-        prep_res: Dict[str, Any]
+        prep_res: Dict[str, Any],
+        direct_processors: List[Dict] = None
     ) -> Dict:
-        """Analyze a PG using child summaries (not raw processors)."""
-        from ..prompts.documentation import PG_WITH_CHILDREN_PROMPT
+        """Analyze a PG using child summaries AND parent's own processors (if present)."""
+        from ..prompts.documentation import PG_WITH_CHILDREN_PROMPT, PG_WITH_CHILDREN_AND_PROCESSORS_PROMPT
         
         children_digest = [
             {
                 "name": cs.get("name"),
-                "purpose": cs.get("purpose", cs.get("summary", "")[:200]),
+                "purpose": cs.get("purpose", cs.get("summary", "")),  # Full summary - no truncation
                 "io": cs.get("io_endpoints", []),
+                "error_handling": cs.get("error_handling", []),  # Include error handling context
                 "virtual": cs.get("virtual", False)
             }
             for cs in child_summaries
         ]
         
-        prompt = PG_WITH_CHILDREN_PROMPT.format(
-            pg_name=pg.get("name", pg.get("id", "")[:8]),
-            child_count=len(child_summaries),
-            children_digest=json.dumps(children_digest, indent=2)
-        )
+        # Check if parent PG has its own processors
+        has_parent_processors = direct_processors and len(direct_processors) > 0
         
+        if has_parent_processors:
+            # Parent has both children AND its own processors - use enhanced prompt
+            # Fetch processor details first (needed for states in categorization)
+            proc_ids = [p.get("id") for p in direct_processors if p.get("id")]
+            cached_proc_details = {}
+            if proc_ids:
+                try:
+                    result = await self.call_nifi_tool(
+                        "get_nifi_object_details",
+                        {
+                            "object_type": "processor",
+                            "object_ids": proc_ids,
+                            "output_format": "doc_optimized",
+                            "include_properties": True
+                        },
+                        prep_res
+                    )
+                    if isinstance(result, str):
+                        result = json.loads(result)
+                    if not isinstance(result, list):
+                        result = [result] if isinstance(result, dict) else []
+                    for item in result:
+                        if isinstance(item, dict) and item.get("status") == "success":
+                            cached_proc_details[item.get("id")] = item.get("data", {})
+                except Exception as e:
+                    self.bound_logger.warning(f"Failed to fetch parent processor details: {e}")
+                    cached_proc_details = {}
+            
+            # Extract IO endpoints from parent's processors
+            parent_io_endpoints = await self._extract_io_endpoints_detailed(
+                direct_processors, prep_res, cached_proc_details
+            )
+            
+            # Categorize parent's processors with states
+            categorized = self._categorize_processors(direct_processors, include_states=True, cached_proc_details=cached_proc_details)
+            
+            # Extract business properties from parent's processors
+            business_logic = []
+            for proc_id, proc_data in cached_proc_details.items():
+                proc_name = proc_data.get("name", "Unknown")
+                proc_type = proc_data.get("type", "").split(".")[-1]
+                business_props = proc_data.get("business_properties", {})
+                
+                if business_props:
+                    business_logic.append({
+                        "processor": proc_name,
+                        "type": proc_type,
+                        "properties": business_props
+                    })
+            
+            # Format connections for parent's own processors
+            # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
+            pg_connections = []
+            for c in prep_res["flow_graph"].get("connections", []):
+                # Check both possible structures
+                parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
+                if parent_id == pg.get("id"):
+                    pg_connections.append(c)
+            connection_summary = self._format_connections_for_prompt(pg_connections, cached_proc_details)
+            
+            prompt = PG_WITH_CHILDREN_AND_PROCESSORS_PROMPT.format(
+                pg_name=pg.get("name", pg.get("id", "")[:8]),
+                child_count=len(child_summaries),
+                children_digest=json.dumps(children_digest, indent=2),
+                processor_count=len(direct_processors),
+                categories_json=json.dumps(categorized, indent=2),
+                connections_json=json.dumps(connection_summary, indent=2, default=str),
+                io_endpoints_json=json.dumps(parent_io_endpoints, indent=2, default=str),
+                business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]"
+            )
+            
+            # Aggregate IO endpoints from both parent and children
+            all_io = list(parent_io_endpoints)
+            parent_categories = categorized
+        else:
+            # Parent only has children, no own processors - use original prompt
+            prompt = PG_WITH_CHILDREN_PROMPT.format(
+                pg_name=pg.get("name", pg.get("id", "")[:8]),
+                child_count=len(child_summaries),
+                children_digest=json.dumps(children_digest, indent=2)
+            )
+            
+            all_io = []
+            parent_categories = {}
+        
+        # Use full name for action_id (no truncation) - helps with event correlation
+        pg_name = pg.get('name', pg.get('id', ''))
+        action_id = f"pg-summary-{pg_name}" if pg_name else f"pg-summary-{pg.get('id', 'unknown')[:8]}"
         response = await self.call_llm_async(
             messages=[{"role": "user", "content": prompt}],
             tools=None,
             execution_state=prep_res,
-            action_id=f"pg-summary-{pg.get('name', pg.get('id', ''))[:10]}"
+            action_id=action_id
         )
         
-        all_io = []
+        # Aggregate IO endpoints from children (if not already done for parent)
+        if not has_parent_processors:
+            all_io = []
         all_errors = []
         for cs in child_summaries:
             # DEFENSIVE: Ensure cs is a dict before calling .get()
@@ -1230,6 +1514,8 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             "summary": response.get("content", "") if isinstance(response, dict) else "",
             "child_count": len(child_summaries),
             "children": children_names,
+            "processor_count": len(direct_processors) if direct_processors else 0,
+            "categories": parent_categories,
             "io_endpoints": all_io,
             "error_handling": all_errors
         }
@@ -1242,8 +1528,6 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
     ) -> Dict:
         """Analyze a small leaf PG directly."""
         from ..prompts.documentation import PG_SUMMARY_PROMPT
-        
-        categorized = self._categorize_processors(processors)
         
         # Fetch processor details once with doc_optimized format (includes relationships and properties)
         # This data will be reused by both IO extraction and error handling
@@ -1267,13 +1551,53 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
                     result = [result] if isinstance(result, dict) else []
                 for item in result:
                     if isinstance(item, dict) and item.get("status") == "success":
-                        cached_proc_details[item.get("id")] = item.get("data", {})
+                        proc_id = item.get("id")
+                        proc_data = item.get("data", {})
+                        # DEFENSIVE: Ensure data is a dict before storing
+                        if isinstance(proc_data, dict):
+                            cached_proc_details[proc_id] = proc_data
+                        else:
+                            self.bound_logger.warning(f"Processor data for {proc_id} is not a dict: {type(proc_data)}")
+                            cached_proc_details[proc_id] = {}
             except Exception as e:
                 self.bound_logger.warning(f"Failed to fetch processor details for analysis: {e}")
                 cached_proc_details = {}
         
+        # Categorize processors with states (using cached details for accurate states)
+        categorized = self._categorize_processors(processors, include_states=True, cached_proc_details=cached_proc_details)
+        
         # Use cached details for IO extraction
         io_endpoints = await self._extract_io_endpoints_detailed(processors, prep_res, cached_proc_details)
+        
+        # Extract business properties (routing rules, JSONPath expressions, etc.) from cached details
+        business_logic = []
+        for proc_id, proc_data in cached_proc_details.items():
+            # DEFENSIVE: Ensure proc_data is a dict
+            if not isinstance(proc_data, dict):
+                self.bound_logger.warning(f"proc_data for {proc_id} is not a dict: {type(proc_data)}")
+                continue
+            proc_name = proc_data.get("name", "Unknown")
+            proc_type = proc_data.get("type", "")
+            if proc_type:
+                proc_type = proc_type.split(".")[-1]
+            business_props = proc_data.get("business_properties", {})
+            
+            # DEFENSIVE: Ensure business_props is a dict
+            if business_props and isinstance(business_props, dict):
+                business_logic.append({
+                    "processor": proc_name,
+                    "type": proc_type,
+                    "properties": business_props
+                })
+        
+        # Format connections for this PG
+        # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
+        pg_connections = []
+        for c in prep_res["flow_graph"].get("connections", []):
+            parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
+            if parent_id == pg.get("id"):
+                pg_connections.append(c)
+        connection_summary = self._format_connections_for_prompt(pg_connections, cached_proc_details)
         
         prompt = PG_SUMMARY_PROMPT.format(
             pg_name=pg.get("name", pg.get("id", "")[:8]),
@@ -1281,21 +1605,23 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             processor_count=len(processors),
             categories_json=json.dumps(categorized, indent=2),
             io_endpoints_json=json.dumps(io_endpoints, indent=2, default=str),
+            business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]",
+            connections_json=json.dumps(connection_summary, indent=2, default=str),
             child_summaries_json="[]"
         )
         
+        # Use full name for action_id (no truncation) - helps with event correlation
+        pg_name = pg.get('name', pg.get('id', ''))
+        action_id = f"pg-direct-{pg_name}" if pg_name else f"pg-direct-{pg.get('id', 'unknown')[:8]}"
         response = await self.call_llm_async(
             messages=[{"role": "user", "content": prompt}],
             tools=None,
             execution_state=prep_res,
-            action_id=f"pg-direct-{pg.get('name', pg.get('id', ''))[:10]}"
+            action_id=action_id
         )
         
         # Extract error handling for leaf PG (reuse cached details)
-        pg_connections = [
-            c for c in prep_res["flow_graph"].get("connections", [])
-            if c.get("component", {}).get("parentGroupId") == pg.get("id")
-        ]
+        # Note: pg_connections already fetched above for prompt
         error_handling = await self._extract_error_handling(
             processors, pg_connections, prep_res, cached_proc_details
         )
@@ -1313,21 +1639,98 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
     
     def _categorize_processors(
         self, 
-        processors: List[Dict]
-    ) -> Dict[str, List[str]]:
-        """Categorize processors and return category -> names mapping."""
+        processors: List[Dict],
+        include_states: bool = True,
+        cached_proc_details: Optional[Dict[str, Dict]] = None
+    ) -> Dict[str, List[Dict]]:
+        """Categorize processors and return category -> processor info mapping.
+        
+        Args:
+            processors: List of processor dicts
+            include_states: Whether to include processor states in the output
+            cached_proc_details: Optional cached processor details to get state from
+            
+        Returns:
+            Dict mapping category -> list of processor info dicts with name and optionally state
+        """
         categorized = {}
         
         for proc in processors:
+            proc_id = proc.get("id")
             proc_type = proc.get("component", {}).get("type", proc.get("type", ""))
             proc_name = proc.get("component", {}).get("name", proc.get("name", "?"))
+            
+            # Get state from cached details if available, otherwise from proc dict
+            proc_state = "UNKNOWN"
+            if cached_proc_details and proc_id:
+                proc_state = cached_proc_details.get(proc_id, {}).get("state", 
+                    proc.get("component", {}).get("state", proc.get("state", "UNKNOWN")))
+            else:
+                proc_state = proc.get("component", {}).get("state", proc.get("state", "UNKNOWN"))
+            
             category = self.categorizer.categorize(proc_type).value
             
             if category not in categorized:
                 categorized[category] = []
-            categorized[category].append(proc_name)
+            
+            proc_info = {"name": proc_name}
+            if include_states:
+                proc_info["state"] = proc_state
+            
+            categorized[category].append(proc_info)
         
         return categorized
+    
+    def _format_connections_for_prompt(
+        self,
+        connections: List[Dict],
+        cached_proc_details: Optional[Dict[str, Dict]] = None
+    ) -> List[Dict]:
+        """Format connections for LLM prompt.
+        
+        Returns a simplified list of connections showing data flow between processors.
+        
+        Handles two connection formats:
+        1. Nested: conn["component"]["source"] and conn["component"]["destination"]
+        2. Flat: conn["sourceId"], conn["sourceName"], etc. at top level
+        """
+        formatted = []
+        
+        for conn in connections:
+            # Try nested structure first (component.source/destination)
+            comp = conn.get("component", {})
+            source = comp.get("source", {})
+            dest = comp.get("destination", {})
+            
+            # If nested structure exists, use it
+            if source or dest:
+                source_id = source.get("id")
+                dest_id = dest.get("id")
+                source_name = source.get("name", "?")
+                dest_name = dest.get("name", "?")
+                relationships = comp.get("selectedRelationships", [])
+            else:
+                # Use flat structure (top-level fields)
+                source_id = conn.get("sourceId")
+                dest_id = conn.get("destinationId")
+                source_name = conn.get("sourceName", "?")
+                dest_name = conn.get("destinationName", "?")
+                relationships = conn.get("selectedRelationships", []) or []
+            
+            # Get processor names from cached details if available
+            if cached_proc_details:
+                if source_id in cached_proc_details:
+                    source_name = cached_proc_details[source_id].get("name", source_name)
+                if dest_id in cached_proc_details:
+                    dest_name = cached_proc_details[dest_id].get("name", dest_name)
+            
+            formatted.append({
+                "from": source_name,
+                "to": dest_name,
+                "relationships": relationships if relationships else ["success"]
+            })
+        
+        return formatted
     
     async def _extract_io_endpoints_detailed(
         self,
@@ -1445,10 +1848,30 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
         for io_proc in io_processors:
                 proc_id = io_proc["id"]
                 details = proc_details_map.get(proc_id, {})
+                # DEFENSIVE: Ensure details is a dict
+                if not isinstance(details, dict):
+                    self.bound_logger.warning(f"Details for {proc_id} is not a dict: {type(details)}")
+                    continue
                 component = details.get("component", details)
+                # DEFENSIVE: Ensure component is a dict
+                if not isinstance(component, dict):
+                    self.bound_logger.warning(f"Component for {proc_id} is not a dict: {type(component)}")
+                    component = {}
                 config = component.get("config", {})
+                # DEFENSIVE: Ensure config is a dict
+                if not isinstance(config, dict):
+                    self.bound_logger.warning(f"Config for {proc_id} is not a dict: {type(config)}")
+                    config = {}
                 properties = config.get("properties", {})
+                # DEFENSIVE: Ensure properties is a dict (critical - this is where the error likely occurs)
+                if not isinstance(properties, dict):
+                    self.bound_logger.error(f"Properties for {proc_id} is not a dict: {type(properties)}, value: {properties}")
+                    properties = {}
                 business_props = details.get("business_properties", {})
+                # DEFENSIVE: Ensure business_props is a dict
+                if not isinstance(business_props, dict):
+                    self.bound_logger.warning(f"Business properties for {proc_id} is not a dict: {type(business_props)}")
+                    business_props = {}
                 
                 # Format processor reference with name, type, ID
                 # Ensure we have the right structure for format_processor_reference
@@ -1707,14 +2130,24 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
         error_handling = []
         
         # Build connection map: source_id -> {relationship -> dest_id}
+        # Handle both nested (component.source/destination) and flat (top-level sourceId/destinationId) structures
         connection_map = {}
         for conn in connections:
+            # Try nested structure first
             comp = conn.get("component", {})
             source = comp.get("source", {})
             dest = comp.get("destination", {})
-            source_id = source.get("id")
-            dest_id = dest.get("id")
-            relationships = comp.get("selectedRelationships", [])
+            
+            # If nested structure exists, use it
+            if source or dest:
+                source_id = source.get("id")
+                dest_id = dest.get("id")
+                relationships = comp.get("selectedRelationships", [])
+            else:
+                # Use flat structure (top-level fields)
+                source_id = conn.get("sourceId")
+                dest_id = conn.get("destinationId")
+                relationships = conn.get("selectedRelationships", []) or []
             
             if source_id:
                 if source_id not in connection_map:
@@ -1867,11 +2300,25 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
                     if not destination:
                         # Might be a port or other component - check connections
                         for conn in connections:
+                            # Handle both nested and flat connection structures
                             comp = conn.get("component", {})
                             dest_comp = comp.get("destination", {})
-                            if dest_comp.get("id") == dest_id:
-                                destination_type = dest_comp.get("type", "")
-                                destination = dest_comp.get("name", "Unknown")
+                            
+                            # Check nested structure first
+                            if dest_comp:
+                                conn_dest_id = dest_comp.get("id")
+                            else:
+                                # Use flat structure
+                                conn_dest_id = conn.get("destinationId")
+                            
+                            if conn_dest_id == dest_id:
+                                # Get destination name and type
+                                if dest_comp:
+                                    destination_type = dest_comp.get("type", "")
+                                    destination = dest_comp.get("name", "Unknown")
+                                else:
+                                    destination_type = conn.get("destinationType", "UNKNOWN")
+                                    destination = conn.get("destinationName", "Unknown")
                                 break
                         
                         if not destination:
@@ -1923,14 +2370,26 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
         
         summary = []
         for conn in connections[:50]:
+            # Handle both nested and flat connection structures
             comp = conn.get("component", {})
-            source_id = comp.get("source", {}).get("id", "")
-            dest_id = comp.get("destination", {}).get("id", "")
+            source = comp.get("source", {})
+            dest = comp.get("destination", {})
+            
+            # If nested structure exists, use it
+            if source or dest:
+                source_id = source.get("id", "")
+                dest_id = dest.get("id", "")
+                relationships = comp.get("selectedRelationships", [])
+            else:
+                # Use flat structure (top-level fields)
+                source_id = conn.get("sourceId", "")
+                dest_id = conn.get("destinationId", "")
+                relationships = conn.get("selectedRelationships", []) or []
             
             summary.append({
-                "from": proc_id_to_name.get(source_id, source_id[:8]),
-                "to": proc_id_to_name.get(dest_id, dest_id[:8]),
-                "relationship": comp.get("selectedRelationships", ["?"])[0]
+                "from": proc_id_to_name.get(source_id, source_id[:8] if source_id else "?"),
+                "to": proc_id_to_name.get(dest_id, dest_id[:8] if dest_id else "?"),
+                "relationship": relationships[0] if relationships else "?"
             })
         
         return summary
@@ -1972,6 +2431,36 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
                 self.bound_logger.warning(
                     f"Summary for PG {pg_id} is not a dict: {type(summary)}. Skipping storage."
                 )
+        
+        # Save analysis shared state snapshot for debugging (similar to discovery phase)
+        try:
+            from pathlib import Path
+            request_id = prep_res.get("user_request_id", "unknown")
+            debug_dir = Path("logs/debug")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            
+            snapshot_file = debug_dir / f"analysis_shared_state_{request_id}.json"
+            
+            # Create a serializable copy (remove non-serializable objects)
+            snapshot = {}
+            for key, value in shared.items():
+                try:
+                    json.dumps(value)  # Test if serializable
+                    snapshot[key] = value
+                except (TypeError, ValueError):
+                    # Store type and size info for non-serializable objects
+                    snapshot[key] = {
+                        "_type": type(value).__name__,
+                        "_size": len(value) if hasattr(value, "__len__") else "unknown",
+                        "_note": "Non-serializable object - see workflow.log for details"
+                    }
+            
+            with open(snapshot_file, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2, default=str)
+            
+            self.bound_logger.info(f"Saved analysis shared state snapshot to {snapshot_file}")
+        except Exception as e:
+            self.bound_logger.warning(f"Failed to save analysis shared state snapshot: {e}")
         
         # Diagnostic logging to debug pg_summaries data flow
         self.bound_logger.info(
@@ -2068,6 +2557,8 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
             raise ValueError(f"shared must be a dict in prep_async, got {type(shared).__name__}")
         
         await super().prep_async(shared)
+        # Store shared state reference for token cost tracking
+        self.set_shared_state(shared)
         
         config = shared.get("config", {})
         if not isinstance(config, dict):
@@ -2087,6 +2578,24 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
         self.bound_logger.info(
             f"DocumentationNode prep: root_pg_id = {root_pg_id}"
         )
+        
+        # Log sample summary data to verify quality
+        if pg_summaries:
+            sample_pg_id = list(pg_summaries.keys())[0]
+            sample_summary = pg_summaries.get(sample_pg_id, {})
+            if isinstance(sample_summary, dict):
+                self.bound_logger.info(
+                    f"DocumentationNode prep: Sample PG summary - "
+                    f"name={sample_summary.get('name')}, "
+                    f"has_summary={bool(sample_summary.get('summary'))}, "
+                    f"io_endpoints={len(sample_summary.get('io_endpoints', []))}, "
+                    f"error_handling={len(sample_summary.get('error_handling', []))}"
+                )
+            else:
+                self.bound_logger.warning(
+                    f"DocumentationNode prep: Sample PG summary is not a dict! Type: {type(sample_summary)}"
+                )
+        
         self.bound_logger.info(
             f"DocumentationNode prep: root_pg_id in pg_summaries = {root_pg_id in pg_summaries}"
         )
@@ -2111,7 +2620,9 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
             "provider": shared.get("provider", "openai"),
             "model_name": shared.get("model_name", "gpt-4"),
             "user_request_id": shared.get("user_request_id"),
-            "workflow_id": shared.get("workflow_id"),
+            "workflow_id": shared.get("workflow_id", "flow_documentation"),
+            "step_id": self.name,  # Include step_id for event emission
+            "current_phase": shared.get("current_phase", "GENERATION"),  # Include current phase for event emission
             
             "max_mermaid_nodes": config.get("max_mermaid_nodes", 50),
             "summary_max_words": config.get("summary_max_words", 500),
@@ -2175,33 +2686,45 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
         
         # 1. Executive Summary
         root_summary = pg_summaries.get(root_pg_id, {})
+        self.bound_logger.info(f"Generating executive summary for root PG {root_pg_id}...")
         sections["summary"] = await self._generate_executive_summary(
             root_summary, pg_summaries, prep_res
         )
+        self.bound_logger.info(f"Executive summary generated: {len(sections['summary'])} chars")
         await self._emit_section_event("summary", prep_res)
         
         # 2. Hierarchical Mermaid Diagram
+        self.bound_logger.info("Generating hierarchical Mermaid diagram...")
         sections["diagram"] = await self._generate_hierarchical_diagram(
             pg_tree, pg_summaries, prep_res
         )
+        self.bound_logger.info(f"Mermaid diagram generated: {len(sections['diagram'])} chars")
         await self._emit_section_event("diagram", prep_res)
         
         # 3. Hierarchical Documentation
+        self.bound_logger.info("Building hierarchical documentation...")
         sections["hierarchy_doc"] = self._build_hierarchical_doc(
             root_pg_id, pg_tree, pg_summaries, prep_res
         )
+        self.bound_logger.info(f"Hierarchical doc generated: {len(sections['hierarchy_doc'])} chars")
         await self._emit_section_event("hierarchy_doc", prep_res)
         
         # 4. Aggregated IO Endpoints
+        self.bound_logger.info("Building aggregated IO endpoints table...")
         sections["io_table"] = self._build_aggregated_io_table(pg_summaries)
+        self.bound_logger.info(f"IO table generated: {len(sections['io_table'])} chars")
         await self._emit_section_event("io_table", prep_res)
         
         # 5. Error Handling Analysis
+        self.bound_logger.info("Building error handling table...")
         sections["error_handling_table"] = self._build_error_handling_table(pg_summaries)
+        self.bound_logger.info(f"Error handling table generated: {len(sections['error_handling_table'])} chars")
         await self._emit_section_event("error_handling_table", prep_res)
         
         # 6. Assemble final document
+        self.bound_logger.info("Assembling final document from all sections...")
         final_document = self._assemble_hierarchical_document(sections, prep_res)
+        self.bound_logger.info(f"Final document assembled: {len(final_document)} chars, {len(sections)} sections")
         
         validation_issues = self._validate_output(final_document, pg_summaries)
         
@@ -2234,24 +2757,28 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
         """Generate executive summary from hierarchical summaries."""
         from ..prompts.documentation import HIERARCHICAL_SUMMARY_PROMPT
         
-        all_io = []
-        for summary in all_summaries.values():
-            all_io.extend(summary.get("io_endpoints", []))
-        
+        # Collect IO endpoints with PG context for deduplication
+        # Use processor:direction:pg_name as key to distinguish similar processors in different PGs
         seen = set()
         unique_io = []
-        for io in all_io:
-            key = f"{io.get('processor')}:{io.get('direction')}"
-            if key not in seen:
-                seen.add(key)
-                unique_io.append(io)
+        for pg_id, summary in all_summaries.items():
+            pg_name = summary.get("name", "unknown")
+            for io in summary.get("io_endpoints", []):
+                # Include PG name in key to preserve context and avoid losing important distinctions
+                key = f"{io.get('processor')}:{io.get('direction')}:{pg_name}"
+                if key not in seen:
+                    seen.add(key)
+                    # Add PG name to IO endpoint for context in the prompt
+                    io_with_context = {**io, "pg_name": pg_name}
+                    unique_io.append(io_with_context)
         
         hierarchy_overview = []
         for pg_id, summary in all_summaries.items():
             if not summary.get("virtual"):
+                # Include full summary (no truncation) - important for generation quality
                 hierarchy_overview.append({
                     "name": summary.get("name"),
-                    "purpose": summary.get("summary", "")[:150] + "..."
+                    "purpose": summary.get("summary", "")  # Full summary, not truncated
                 })
         
         prompt = HIERARCHICAL_SUMMARY_PROMPT.format(
@@ -2286,7 +2813,7 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
                 "id": pg_id[:8],
                 "name": pg.get("name", pg_id[:8]),
                 "parent": pg.get("parent", "")[:8] if pg.get("parent") else None,
-                "purpose": summary.get("summary", "")[:50],
+                "purpose": summary.get("summary", "")[:200],  # Increased from 50 to 200 chars for better context
                 "has_io": bool(summary.get("io_endpoints"))
             })
         
@@ -2296,7 +2823,7 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
                     "id": f"vg-{vg.get('name', 'group')[:6]}",
                     "name": vg.get("name"),
                     "parent": pg_id[:8],
-                    "purpose": vg.get("purpose", "")[:50],
+                    "purpose": vg.get("purpose", "")[:200],  # Increased from 50 to 200 chars for better context
                     "virtual": True
                 })
         
@@ -2314,14 +2841,115 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
         
         content = response.get("content", "")
         
+        # Extract Mermaid code from markdown code block
         mermaid_match = re.search(r'```mermaid\s*([\s\S]*?)```', content)
         if mermaid_match:
-            return mermaid_match.group(1).strip()
+            diagram_code = mermaid_match.group(1).strip()
+        elif content.strip().startswith("graph") or content.strip().startswith("flowchart"):
+            diagram_code = content.strip()
+        else:
+            self.bound_logger.warning("LLM did not generate valid Mermaid diagram, using fallback")
+            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
         
-        if content.strip().startswith("graph") or content.strip().startswith("flowchart"):
-            return content.strip()
+        # Clean and validate the diagram code
+        # Fix common issues: missing newlines after keywords
+        diagram_code = re.sub(r'(flowchart\s+TD)(subgraph)', r'\1\n    \2', diagram_code)
+        diagram_code = re.sub(r'(graph\s+TD)(subgraph)', r'\1\n    \2', diagram_code)
+        # Ensure subgraph declarations have proper spacing
+        diagram_code = re.sub(r'subgraph\s+(["\']?)([^"\']+)\1', r'subgraph \1\2\1', diagram_code)
+        # Fix missing newlines before subgraph
+        diagram_code = re.sub(r'}\s*(subgraph)', r'}\n    \1', diagram_code)
+        # Fix missing newlines after subgraph declarations
+        diagram_code = re.sub(r'(subgraph[^\n]+)\s*([A-Z])', r'\1\n        \2', diagram_code)
+
+        # Validate basic structure
+        if not (diagram_code.strip().startswith("graph") or diagram_code.strip().startswith("flowchart")):
+            self.bound_logger.warning("Mermaid diagram does not start with 'graph' or 'flowchart', using fallback")
+            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
+
+        # Detect and fix HTML entity corruption
+        # Handle corrupted patterns like: name="" value="" -> "name value"
+        # This happens when HTML entities get mangled during processing
+        original_code = diagram_code
+
+        # Fix corrupted subgraph declarations like: subgraph name[" label=""]=""
+        # Pattern: subgraph Name[" text=""]="" -> subgraph Name["text"]
+        diagram_code = re.sub(r'subgraph\s+(\w+)\[\s*"([^"]*?)"\s*=\s*""\s*\]', r'subgraph \1["\2"]', diagram_code)
         
-        return "graph TD\n    A[Flow] --> B[Documentation Failed]"
+        # Fix more severe corruption: subgraph Name[" text=""]="" direction="" -> subgraph Name["text"]
+        diagram_code = re.sub(r'subgraph\s+(\w+)\[\s*"\s*([^"]*?)\s*"\s*=\s*""\s*\]\s*=\s*""', r'subgraph \1["\2"]', diagram_code)
+        
+        # Fix patterns like: [" narrative="" swift="" screening"]=""
+        # This happens when quotes get double-encoded: " becomes &quot; becomes ""
+        diagram_code = re.sub(r'\[\s*"\s*([^"]*?)\s*""\s*([^"]*?)\s*"\s*\]\s*=\s*""', r'["\1 \2"]', diagram_code)
+        
+        # Fix corrupted node labels like: A[[label=""]]=""
+        diagram_code = re.sub(r'\[\[([^\]]*?)"\s*=\s*""\s*\]\]', r'[[\1]]', diagram_code)
+        
+        # Fix corrupted connections like: A --&gt; B  (should be A --> B)
+        diagram_code = re.sub(r'--&gt;', '-->', diagram_code)
+        
+        # More aggressive cleanup for heavily corrupted diagrams
+        # Remove trailing ="" patterns that are artifacts of corruption
+        diagram_code = re.sub(r'=""(\s*(?:subgraph|end|direction|tb|[a-z]\[\[))', r'\1', diagram_code)
+        
+        # Fix subgraph declarations that got mangled: subgraph Name["text"] -> subgraph Name["text"]
+        diagram_code = re.sub(r'subgraph\s+(\w+)\[\s*"([^"]*?)"\s*\]', r'subgraph \1["\2"]', diagram_code)
+        
+        # Clean up any remaining corruption artifacts: remove ="" patterns
+        diagram_code = re.sub(r'\s*=""\s*', ' ', diagram_code)
+        
+        # Fix patterns where quotes got split: " text="" -> "text"
+        diagram_code = re.sub(r'"\s+([^"]+?)\s*""', r'"\1"', diagram_code)
+        
+        # Fix patterns where subgraph names got corrupted: Narrative_SWIFT_Screening[" text=""]=""
+        # Extract the actual name and fix the label
+        diagram_code = re.sub(r'subgraph\s+(\w+)\[\s*"\s*([^"]*?)\s*"\s*=\s*""\s*\]\s*=\s*""', r'subgraph \1["\2"]', diagram_code)
+
+        # If the code changed significantly, log the cleanup
+        if original_code != diagram_code:
+            self.bound_logger.info(f"Applied corruption cleanup to Mermaid diagram. Original length: {len(original_code)}, Cleaned length: {len(diagram_code)}")
+
+        # Decode any remaining HTML entities FIRST (before validation)
+        if '&gt;' in diagram_code or '&lt;' in diagram_code or '&amp;' in diagram_code or '&quot;' in diagram_code:
+            import html
+            diagram_code = html.unescape(diagram_code)
+            self.bound_logger.info("Decoded HTML entities in Mermaid diagram")
+            # Re-apply cleaning after HTML entity decoding
+            diagram_code = re.sub(r'=""(\s*(?:subgraph|end|direction|tb|[a-z]\[\[))', r'\1', diagram_code)
+            diagram_code = re.sub(r'\s*=""\s*', ' ', diagram_code)
+
+        # Final validation - reject if still contains corruption patterns
+        # Look for patterns that suggest HTML entity corruption or malformed attributes:
+        # - Multiple quotes together: "" or '' (not valid in Mermaid)
+        # - Equals signs in subgraph/node labels (not valid syntax)
+        # - Patterns like: name="" or ="value" which suggest corruption
+        if re.search(r'["\']\s*["\']', diagram_code) or re.search(r'=\s*["\']', diagram_code):
+            self.bound_logger.warning("Mermaid diagram still contains malformed attributes after cleanup, using fallback")
+            self.bound_logger.debug(f"Corrupted diagram code (first 200 chars): {diagram_code[:200]}")
+            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
+
+        # Check for malformed node definitions (multiple = signs in node labels)
+        # Valid nodes: A[Label], A[[Label]], A{{Label}}, A[(Label)]
+        # Invalid: A[Label="value="] or similar corruption
+        if re.search(r'\[\[[^\]]*="[^"]*="[^\]]*\]\]', diagram_code):
+            self.bound_logger.warning("Mermaid diagram contains malformed node labels after cleanup, using fallback")
+            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
+
+        # Check for patterns like: subgraph " name=" which suggests corruption
+        if re.search(r'subgraph\s+["\'][^"\']*=\s*["\']', diagram_code):
+            self.bound_logger.warning("Mermaid diagram contains malformed subgraph labels after cleanup, using fallback")
+            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
+
+        # Additional check: if diagram contains patterns like [" text=""]="", reject it
+        if re.search(r'\[\s*["\'][^"\']*["\']\s*=\s*["\']\s*["\']\s*\]', diagram_code):
+            self.bound_logger.warning("Mermaid diagram contains severely corrupted label patterns, using fallback")
+            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
+
+        # Log the final cleaned diagram for debugging
+        self.bound_logger.debug(f"Final cleaned Mermaid diagram (first 300 chars): {diagram_code[:300]}")
+
+        return diagram_code
     
     def _build_hierarchical_doc(
         self,
@@ -2331,7 +2959,7 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
         prep_res: Dict[str, Any],
         depth: int = 0
     ) -> str:
-        """Build nested documentation sections from hierarchy."""
+        """Build nested documentation sections from hierarchy with enhanced details."""
         lines = []
         
         pg = pg_tree.get(root_pg_id, {})
@@ -2344,28 +2972,122 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
         lines.append(f"{header} {pg_name}")
         lines.append("")
         
+        # Summary text (from LLM analysis)
         if summary.get("summary"):
             lines.append(summary["summary"])
             lines.append("")
         
+        # Enhanced IO Endpoints section with detailed information
         io_endpoints = summary.get("io_endpoints", [])
         if io_endpoints:
-            lines.append(f"**Data Flow:**")
+            lines.append("### External Interactions")
+            lines.append("")
+            
             inputs = [e for e in io_endpoints if e.get("direction") == "INPUT"]
             outputs = [e for e in io_endpoints if e.get("direction") == "OUTPUT"]
+            
             if inputs:
-                lines.append(f"- Inputs: {', '.join(e.get('processor', '?') for e in inputs)}")
+                lines.append("**Input Sources:**")
+                for io in inputs:
+                    endpoint_details = io.get("endpoint_details", {})
+                    endpoint_type = endpoint_details.get("type", "unknown")
+                    
+                    if endpoint_type == "http_server":
+                        url = endpoint_details.get("url", "")
+                        methods = endpoint_details.get("allowed_methods", [])
+                        lines.append(f"- **{io.get('processor')}**: `{url}` (Methods: {', '.join(methods)})")
+                    elif endpoint_type == "file_system":
+                        directory = endpoint_details.get("directory", "")
+                        file_filter = endpoint_details.get("file_filter", "")
+                        filter_str = f" (Filter: `{file_filter}`)" if file_filter else ""
+                        lines.append(f"- **{io.get('processor')}**: Directory `{directory}`{filter_str}")
+                    elif endpoint_type == "kafka":
+                        topic = endpoint_details.get("topic", "")
+                        bootstrap = endpoint_details.get("bootstrap_servers", "")
+                        lines.append(f"- **{io.get('processor')}**: Topic `{topic}` (Broker: `{bootstrap}`)")
+                    elif endpoint_type == "database":
+                        table = endpoint_details.get("table", "")
+                        connection_url = endpoint_details.get("connection_url", "")
+                        lines.append(f"- **{io.get('processor')}**: Table `{table}` (Connection: `{connection_url}`)")
+                    else:
+                        lines.append(f"- **{io.get('processor')}**: {endpoint_type}")
+                lines.append("")
+            
             if outputs:
-                lines.append(f"- Outputs: {', '.join(e.get('processor', '?') for e in outputs)}")
+                lines.append("**Output Destinations:**")
+                for io in outputs:
+                    endpoint_details = io.get("endpoint_details", {})
+                    endpoint_type = endpoint_details.get("type", "unknown")
+                    
+                    if endpoint_type == "http":
+                        url = endpoint_details.get("url", "")
+                        method = endpoint_details.get("method", "GET")
+                        if url:
+                            lines.append(f"- **{io.get('processor')}**: `{method} {url}`")
+                        else:
+                            lines.append(f"- **{io.get('processor')}**: {method} (URL not configured)")
+                    elif endpoint_type == "http_response":
+                        status_code = endpoint_details.get("status_code", "")
+                        lines.append(f"- **{io.get('processor')}**: HTTP Response (Status: {status_code})")
+                    elif endpoint_type == "file_system":
+                        directory = endpoint_details.get("directory", "")
+                        file_filter = endpoint_details.get("file_filter", "")
+                        filter_str = f" (Filter: `{file_filter}`)" if file_filter else ""
+                        lines.append(f"- **{io.get('processor')}**: Directory `{directory}`{filter_str}")
+                    elif endpoint_type == "kafka":
+                        topic = endpoint_details.get("topic", "")
+                        bootstrap = endpoint_details.get("bootstrap_servers", "")
+                        lines.append(f"- **{io.get('processor')}**: Topic `{topic}` (Broker: `{bootstrap}`)")
+                    elif endpoint_type == "database":
+                        table = endpoint_details.get("table", "")
+                        connection_url = endpoint_details.get("connection_url", "")
+                        lines.append(f"- **{io.get('processor')}**: Table `{table}` (Connection: `{connection_url}`)")
+                    else:
+                        lines.append(f"- **{io.get('processor')}**: {endpoint_type}")
+                lines.append("")
+        
+        # Processor States section (if any are not RUNNING)
+        categories = summary.get("categories", {})
+        stopped_processors = []
+        for category, proc_list in categories.items():
+            for proc in proc_list:
+                if isinstance(proc, dict):
+                    state = proc.get("state", "UNKNOWN")
+                    if state not in ["RUNNING", "UNKNOWN"]:
+                        stopped_processors.append(f"{proc.get('name')} ({state})")
+        
+        if stopped_processors:
+            lines.append("### Processor Status")
+            lines.append("")
+            lines.append(f"**Note:** The following processors are not running: {', '.join(stopped_processors)}")
             lines.append("")
         
+        # Error Handling summary
+        error_handling = summary.get("error_handling", [])
+        if error_handling:
+            unhandled = [e for e in error_handling if not e.get("handled") and not e.get("auto_terminated")]
+            if unhandled:
+                lines.append("### Error Handling")
+                lines.append("")
+                lines.append(f"**Warning:** {len(unhandled)} error relationship(s) are not handled:")
+                for err in unhandled[:5]:  # Limit to first 5
+                    proc_ref = err.get("processor_reference", err.get("processor", "?"))
+                    rel = err.get("error_relationship", "?")
+                    lines.append(f"- `{proc_ref}`: `{rel}` relationship → NOT HANDLED")
+                if len(unhandled) > 5:
+                    lines.append(f"- ... and {len(unhandled) - 5} more unhandled errors")
+                lines.append("")
+        
+        # Virtual Groups (if any)
         virtual_groups = prep_res.get("virtual_groups", {}).get(root_pg_id, [])
         if virtual_groups:
-            lines.append(f"**Logical Components:**")
+            lines.append("### Logical Components")
+            lines.append("")
             for vg in virtual_groups:
                 lines.append(f"- **{vg.get('name')}**: {vg.get('purpose', '')}")
             lines.append("")
         
+        # Recursively process children
         children = pg.get("children", [])
         if children:
             for child_id in children:
@@ -2825,6 +3547,34 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
             f"Documentation complete: {exec_res['metrics']['document_size_bytes']} bytes, "
             f"{exec_res['metrics']['pgs_documented']} PGs documented"
         )
+        
+        # Save generation shared state snapshot for debugging (if enabled)
+        from config.settings import should_save_generation_shared_state
+        if should_save_generation_shared_state():
+            try:
+                from pathlib import Path
+                request_id = prep_res.get("user_request_id", "unknown")
+                debug_dir = Path("logs/debug")
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                
+                snapshot_file = debug_dir / f"generation_shared_state_{request_id}.json"
+                
+                # Create a serializable copy (remove non-serializable objects)
+                snapshot = {}
+                for key, value in shared.items():
+                    try:
+                        json.dumps(value)  # Test if serializable
+                        snapshot[key] = value
+                    except (TypeError, ValueError):
+                        # Skip non-serializable values (like function references)
+                        snapshot[key] = f"<non-serializable: {type(value).__name__}>"
+                
+                with open(snapshot_file, "w") as f:
+                    json.dump(snapshot, f, indent=2, default=str)
+                
+                self.bound_logger.info(f"Saved generation shared state snapshot to {snapshot_file}")
+            except Exception as e:
+                self.bound_logger.warning(f"Failed to save generation shared state snapshot: {e}")
         
         # Emit WORKFLOW_COMPLETE event so UI receives completion signal
         from ..core.event_system import emit_workflow_complete

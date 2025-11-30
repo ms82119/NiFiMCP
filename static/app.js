@@ -658,6 +658,14 @@ class NiFiChatApp {
             // Add single icons for different message types
             if (data.message.includes('LLM step:')) {
                 stepLine = `🤖 ${data.message}`;
+            } else if (data.message.includes('LLM Call')) {
+                // New LLM event format: "🤖 LLM Call (ANALYSIS): openai gpt-4o-mini"
+                // Already has emoji, just use as-is
+                stepLine = data.message;
+            } else if (data.message.includes('LLM Response')) {
+                // New LLM event format: "✅ LLM Response (ANALYSIS): 556 in, 77 out"
+                // Already has emoji, just use as-is
+                stepLine = data.message;
             } else if (data.message.includes('Executing:')) {
                 // Emphasize single-word tool name
                 stepLine = `🔧 ${data.message.replace(/Executing:\s*(\w+)/, (m, tool) => {
@@ -727,6 +735,8 @@ class NiFiChatApp {
         return message.includes('Executing:') || 
                message.includes('Tool Completed:') || 
                message.includes('LLM step:') ||
+               message.includes('LLM Call') ||  // Match new LLM event format: "🤖 LLM Call (ANALYSIS): ..."
+               message.includes('LLM Response') ||  // Match new LLM event format: "✅ LLM Response (ANALYSIS): ..."
                (message.includes('Workflow execution started') && message.includes('unguided')); // Only show the one with workflow name
     }
     
@@ -741,7 +751,7 @@ class NiFiChatApp {
         
         if (data.status === 'started') {
             status.current_status = 'Workflow started';
-        } else if (message.includes('LLM Call Started')) {
+        } else if (message.includes('LLM Call Started') || message.includes('LLM Call')) {
             status.current_status = 'LLM processing';
             // Extract model name and other info from LLM start event
             if (data.data) {
@@ -752,12 +762,17 @@ class NiFiChatApp {
             }
         } else if (message.includes('Executing:')) {
             status.current_status = 'Tool execution';
-        } else if (message.includes('LLM step:')) {
-            // Extract token counts from LLM step message - handle comma-separated numbers
+        } else if (message.includes('LLM step:') || message.includes('LLM Response')) {
+            // Extract token counts from LLM step/response message - handle comma-separated numbers
             const tokenMatch = message.match(/([\d,]+) in, ([\d,]+) out/);
             if (tokenMatch) {
                 status.tokens_in = parseInt(tokenMatch[1].replace(/,/g, ''));
                 status.tokens_out = parseInt(tokenMatch[2].replace(/,/g, ''));
+            }
+            // Also update model info from data if available
+            if (data.data) {
+                status.model_name = data.data.model_name || data.data.model || status.model_name || 'unknown';
+                status.provider = data.data.provider || status.provider || 'unknown';
             }
         }
         

@@ -78,7 +78,7 @@ Please keep this in mind when asking questions. I'll provide helpful guidance an
             "messages": perplexity_messages,
             "tools": None  # Perplexity doesn't support tools
         }
-        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id).debug("Calling Perplexity LLM")
+        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id, action_id=action_id).debug("Calling Perplexity LLM")
         
         try:
             response = self.client.chat.completions.create(
@@ -109,7 +109,7 @@ Please keep this in mind when asking questions. I'll provide helpful guidance an
                 "error": None,
                 "full_response": response_content
             }
-            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id).debug("llm-response")
+            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id, action_id=action_id).debug("llm-response")
             
             return LLMResponse(
                 content=response_content,
@@ -125,7 +125,7 @@ Please keep this in mind when asking questions. I'll provide helpful guidance an
                 "token_count_in": 0,
                 "token_count_out": 0
             }
-            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id).debug("Received error from Perplexity LLM")
+            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id, action_id=action_id).debug("Received error from Perplexity LLM")
             raise
     
     def format_tools(self, tools: List[Dict[str, Any]]) -> Any:

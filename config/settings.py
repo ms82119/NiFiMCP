@@ -59,7 +59,14 @@ DEFAULT_APP_CONFIG = {
                 'max_tokens_per_analysis': 8000,     # Token budget per call
                 'min_virtual_groups': 3,      # Minimum virtual groups
                 'max_virtual_groups': 7,      # Maximum virtual groups
-                'include_unclassified': True  # Report unknown types
+                'include_unclassified': True,  # Report unknown types
+                'property_extraction': {
+                    'mode': 'balanced',  # 'minimal', 'balanced', 'comprehensive'
+                    'max_properties_per_processor': 10,  # Limit to prevent token bloat
+                    'truncate_large_values': True,
+                    'max_value_length': 500,
+                    'include_defaults': False  # Skip properties with default values
+                }
             },
             'generation': {
                 'max_mermaid_nodes': 50,      # Simplify large diagrams
@@ -69,7 +76,8 @@ DEFAULT_APP_CONFIG = {
             'output': {
                 'format': 'markdown',         # Output format
                 'include_raw_data': False,    # Include JSON appendix
-                'validate_mermaid': True      # Validate diagram syntax
+                'validate_mermaid': True,     # Validate diagram syntax
+                'save_shared_state': True     # Save generation shared state snapshot
             }
         }
     }
@@ -304,6 +312,24 @@ def get_doc_generation_config() -> dict:
 def get_doc_output_config() -> dict:
     """Returns output configuration."""
     return get_documentation_workflow_config().get('output', {})
+
+def get_doc_property_extraction_config() -> dict:
+    """Returns property extraction configuration."""
+    return get_doc_analysis_config().get('property_extraction', {
+        'mode': 'balanced',
+        'max_properties_per_processor': 10,
+        'truncate_large_values': True,
+        'max_value_length': 500,
+        'include_defaults': False
+    })
+
+def get_doc_property_extraction_mode() -> str:
+    """Returns property extraction mode: 'minimal', 'balanced', or 'comprehensive'."""
+    return get_doc_property_extraction_config().get('mode', 'balanced')
+
+def should_save_generation_shared_state() -> bool:
+    """Returns whether to save generation shared state snapshot."""
+    return get_doc_output_config().get('save_shared_state', True)
 
 # Convenience accessors for common settings
 def get_doc_discovery_timeout() -> int:

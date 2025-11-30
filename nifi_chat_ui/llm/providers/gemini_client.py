@@ -83,7 +83,7 @@ class GeminiClient(LLMProvider):
             "messages": messages,
             "tools": tools
         }
-        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id).debug("Calling Gemini LLM")
+        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id, action_id=action_id).debug("Calling Gemini LLM")
         
         try:
             if self.adk_agent and ADK_AVAILABLE:
@@ -101,7 +101,7 @@ class GeminiClient(LLMProvider):
                 "error": response.error,
                 "full_response": response.content
             }
-            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id).debug("llm-response")
+            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id, action_id=action_id).debug("llm-response")
             
             return response
                 
@@ -113,7 +113,7 @@ class GeminiClient(LLMProvider):
                 "token_count_in": 0,
                 "token_count_out": 0
             }
-            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id).debug("Received error from Gemini LLM")
+            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id, action_id=action_id).debug("Received error from Gemini LLM")
             
             error_message = LLMErrorHandler.handle_error(e, "Gemini")
             return LLMResponse(
@@ -213,7 +213,7 @@ class GeminiClient(LLMProvider):
                 "messages": messages,
                 "tools": [{"name": getattr(t, 'name', 'unknown'), "description": getattr(t, 'description', 'N/A')} for t in function_declarations] if function_declarations else None
             }
-            bound_logger.bind(interface="llm", direction="request", data=llm_request_data).debug("Calling Gemini LLM")
+            bound_logger.bind(interface="llm", direction="request", data=llm_request_data, action_id=action_id).debug("Calling Gemini LLM")
             
             # Create generation config with appropriate settings
             generation_config = genai.types.GenerationConfig(
@@ -260,7 +260,7 @@ class GeminiClient(LLMProvider):
                 "error": parsed_response.error,
                 "full_response": parsed_response.content if parsed_response.content else None
             }
-            bound_logger.bind(interface="llm", direction="response", data=llm_response_data).debug("llm-response")
+            bound_logger.bind(interface="llm", direction="response", data=llm_response_data, action_id=action_id).debug("llm-response")
             
             return parsed_response
             
@@ -273,7 +273,7 @@ class GeminiClient(LLMProvider):
                 "token_count_in": token_count_in,
                 "token_count_out": 0
             }
-            bound_logger.bind(interface="llm", direction="response", data=llm_error_data).debug("Received error from Gemini LLM")
+            bound_logger.bind(interface="llm", direction="response", data=llm_error_data, action_id=action_id).debug("Received error from Gemini LLM")
             
             return LLMResponse(
                 content=None,
