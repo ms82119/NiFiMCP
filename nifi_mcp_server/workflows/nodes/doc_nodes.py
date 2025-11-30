@@ -24,6 +24,30 @@ from .component_formatter import (
     format_component_for_table,
     format_destination_reference
 )
+from .io_extraction import (
+    extract_io_endpoints_detailed,
+    extract_io_basic
+)
+from .error_handling import extract_error_handling
+from .analysis_helpers import (
+    analyze_pg_direct,
+    analyze_pg_with_summaries,
+    analyze_virtual_group,
+    create_virtual_groups,
+    categorize_processors,
+    format_connections_for_prompt,
+    build_connectivity_summary,
+    get_pg_processors
+)
+from .doc_generation_helpers import (
+    build_aggregated_io_table,
+    build_error_handling_table,
+    build_hierarchical_doc,
+    generate_executive_summary,
+    generate_hierarchical_diagram,
+    assemble_hierarchical_document,
+    validate_output
+)
 
 
 class InitializeDocNode(AsyncNiFiWorkflowNode):
@@ -59,7 +83,9 @@ class InitializeDocNode(AsyncNiFiWorkflowNode):
             "nifi_server_id": shared.get("selected_nifi_server_id"),
             "workflow_id": shared.get("workflow_id", "flow_documentation"),
             "step_id": self.name,  # Include step_id for event emission
-            "config": get_documentation_workflow_config()
+            "config": get_documentation_workflow_config(),
+            "_shared": shared,  # Pass shared state reference for skip checks
+            "_is_loading_state": shared.get("skip_discovery") or shared.get("skip_analysis")  # Flag for preserving loaded state
         }
     
     async def exec_async(self, prep_res: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,17 +100,25 @@ class InitializeDocNode(AsyncNiFiWorkflowNode):
             }
         
         config = prep_res.get("config", {})
+        is_loading_state = prep_res.get("_is_loading_state", False)
         
-        return {
-            "status": "success",
-            "initialized_state": {
-                # Input parameters
-                "process_group_id": prep_res["process_group_id"],
-                "user_request_id": prep_res["user_request_id"],
-                "provider": prep_res["provider"],
-                "model_name": prep_res["model_name"],
-                "nifi_server_id": prep_res["nifi_server_id"],
-                
+        # Build initialized state - preserve loaded values if loading from saved state
+        initialized_state = {
+            # Input parameters (always set these)
+            "process_group_id": prep_res["process_group_id"],
+            "user_request_id": prep_res["user_request_id"],
+            "provider": prep_res["provider"],
+            "model_name": prep_res["model_name"],
+            "nifi_server_id": prep_res["nifi_server_id"],
+            "config": config,
+            "workflow_id": "flow_documentation",
+            "current_phase": "INIT"
+        }
+        
+        # Only initialize empty structures if NOT loading from saved state
+        # When loading, these will be preserved from the loaded shared state
+        if not is_loading_state:
+            initialized_state.update({
                 # Discovery state
                 "flow_graph": {
                     "processors": {},      # ID -> processor details (includes parent_pg_id)
@@ -121,14 +155,20 @@ class InitializeDocNode(AsyncNiFiWorkflowNode):
                     "analysis": {"pgs_analyzed": 0, "virtual_groups_created": 0},
                     "generation": {}
                 },
-                
-                # Configuration
-                "config": config,
-                
-                # Workflow context
-                "workflow_id": "flow_documentation",
-                "current_phase": "INIT"
-            }
+            })
+        else:
+            # When loading from saved state, preserve existing structures
+            self.bound_logger.info("Preserving loaded state structures (skip_discovery or skip_analysis is set)")
+            # Only ensure workflow_start_time exists if not already present
+            shared = prep_res.get("_shared", {})
+            if "metrics" not in shared or "workflow_start_time" not in shared.get("metrics", {}):
+                initialized_state["metrics"] = {
+                    "workflow_start_time": time.time(),
+                }
+        
+        return {
+            "status": "success",
+            "initialized_state": initialized_state
         }
     
     async def post_async(
@@ -144,9 +184,23 @@ class InitializeDocNode(AsyncNiFiWorkflowNode):
             return "error"
         
         # Merge initialized state into shared
+        # When loading from saved state, only overwrite if the key doesn't exist in shared
+        # This preserves loaded state (flow_graph, pg_tree, pg_summaries, etc.)
         initialized = exec_res.get("initialized_state", {})
-        for key, value in initialized.items():
-            shared[key] = value
+        is_loading_state = shared.get("skip_discovery") or shared.get("skip_analysis")
+        
+        if is_loading_state:
+            # Preserve loaded state - only set keys that don't exist
+            for key, value in initialized.items():
+                if key not in shared:
+                    shared[key] = value
+                # Always update these critical fields
+                elif key in ["config", "workflow_id", "current_phase", "process_group_id", "user_request_id"]:
+                    shared[key] = value
+        else:
+            # Normal flow - overwrite with initialized state
+            for key, value in initialized.items():
+                shared[key] = value
         
         # Emit phase complete event
         await self.emit_doc_phase_event(
@@ -219,11 +273,26 @@ class DiscoveryNode(AsyncNiFiWorkflowNode):
             "chunk_start_time": time.time(),
             "discovery_start_time": shared.get("metrics", {}).get(
                 "discovery", {}
-            ).get("start_time", time.time())
+            ).get("start_time", time.time()),
+            
+            "_shared": shared  # Pass shared state reference for skip checks
         }
     
     async def exec_async(self, prep_res: Dict[str, Any]) -> Dict[str, Any]:
         """Execute discovery - fetch components and build hierarchy."""
+        
+        # Check if discovery should be skipped
+        shared = prep_res.get("_shared", {})
+        if shared.get("skip_discovery"):
+            self.bound_logger.info("Discovery phase skipped - using loaded shared state")
+            return {
+                "status": "skipped",
+                "message": "Discovery skipped - using loaded shared state",
+                "flow_graph": shared.get("flow_graph", {}),
+                "pg_tree": shared.get("pg_tree", {}),
+                "discovery_complete": True
+            }
+        
         pg_id = prep_res["process_group_id"]
         token = prep_res.get("continuation_token")
         
@@ -643,6 +712,32 @@ class DiscoveryNode(AsyncNiFiWorkflowNode):
             shared["error"] = error_msg
             return "error"
         
+        # If discovery was skipped, use the loaded data
+        if exec_res.get("status") == "skipped":
+            self.bound_logger.info("Discovery was skipped - preserving loaded shared state")
+            # The shared state should already have flow_graph and pg_tree from initial_shared_state
+            # Ensure discovery_complete is set and calculate depths from pg_tree
+            shared["discovery_complete"] = True
+            
+            # Calculate max_depth and current_depth from pg_tree (same as normal discovery completion)
+            pg_tree = shared.get("pg_tree", {})
+            if isinstance(pg_tree, dict) and pg_tree:
+                max_depth = max(
+                    (pg.get("depth", 0) for pg in pg_tree.values() if isinstance(pg, dict)), 
+                    default=0
+                )
+                shared["max_depth"] = max_depth
+                shared["current_depth"] = max_depth  # Start from deepest (leaves)
+                self.bound_logger.info(f"Calculated depths from loaded pg_tree: max_depth={max_depth}, current_depth={max_depth}")
+            else:
+                # Fallback if pg_tree is missing or invalid
+                self.bound_logger.warning("pg_tree missing or invalid in skipped discovery, using defaults")
+                shared["max_depth"] = 0
+                shared["current_depth"] = 0
+            
+            shared["current_phase"] = "ANALYSIS"
+            return "complete"  # -> HierarchicalAnalysisNode
+        
         # Validate that we have essential data before merging
         new_processors = exec_res.get("new_processors", {})
         new_connections = exec_res.get("new_connections", [])
@@ -887,12 +982,31 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             "min_virtual_groups": config.get("min_virtual_groups", 3),
             "max_virtual_groups": config.get("max_virtual_groups", 7),
             
-            "level_start_time": time.time()
+            "level_start_time": time.time(),
+            
+            "_shared": shared  # Pass shared state reference for skip checks
         }
     
     async def exec_async(self, prep_res: Dict[str, Any]) -> Dict[str, Any]:
         """Process all PGs at current depth level."""
-        current_depth = prep_res["current_depth"]
+        
+        # Check if analysis should be skipped
+        shared = prep_res.get("_shared", {})
+        if shared.get("skip_analysis"):
+            self.bound_logger.info("Analysis phase skipped - using loaded shared state")
+            return {
+                "status": "skipped",
+                "message": "Analysis skipped - using loaded shared state",
+                "new_summaries": shared.get("pg_summaries", {}),
+                "new_virtual_groups": shared.get("virtual_groups", {})
+            }
+        
+        current_depth = prep_res.get("current_depth")
+        if current_depth is None:
+            # Defensive: if current_depth is None, try to get from shared state or default to 0
+            current_depth = shared.get("current_depth", 0)
+            self.bound_logger.warning(f"current_depth was None in prep_res, using {current_depth} from shared state")
+        
         pg_tree = prep_res.get("pg_tree", {})
         
         # Use workflow_logger which writes to workflow.log
@@ -993,7 +1107,7 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
                 ).info(f"  Analyzing PG '{pg_name}' ({proc_count} processors)")
                 
                 # Get this PG's direct processors
-                direct_processors = self._get_pg_processors(pg_id, prep_res)
+                direct_processors = get_pg_processors(pg_id, prep_res)
                 self.workflow_logger.bind(
                     interface="workflow",
                     data={"node_name": self.name, "action": "exec", "pg_name": pg_name}
@@ -1020,8 +1134,16 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
                         f"creating virtual groups..."
                     )
                     
-                    virtual_groups = await self._create_virtual_groups(
-                        pg_id, direct_processors, prep_res
+                    # Get connections for this PG
+                    connections = []
+                    for c in prep_res["flow_graph"].get("connections", []):
+                        parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
+                        if parent_id == pg_id:
+                            connections.append(c)
+                    
+                    virtual_groups = await create_virtual_groups(
+                        pg_id, direct_processors, connections,
+                        self.call_llm_async, prep_res, self.categorizer, self.bound_logger
                     )
                     
                     if virtual_groups:
@@ -1029,8 +1151,11 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
                         metrics["virtual_groups_created"] += len(virtual_groups)
                         
                         for vg in virtual_groups:
-                            vg_summary = await self._analyze_virtual_group(
-                                vg, direct_processors, prep_res, pg_id  # Pass parent PG ID
+                            vg_summary = await analyze_virtual_group(
+                                vg, direct_processors,
+                                self.call_nifi_tool, self.call_llm_async, prep_res, pg_id,
+                                extract_io_endpoints_detailed, extract_error_handling,
+                                self.categorizer, self.bound_logger
                             )
                             virtual_group_summaries.append(vg_summary)
                             metrics["llm_calls"] += 1
@@ -1047,13 +1172,19 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
                 try:
                     if all_child_summaries:
                         # Parent PG has children - include both children AND parent's own processors
-                        summary = await self._analyze_pg_with_summaries(
-                            pg, all_child_summaries, prep_res, direct_processors
+                        summary = await analyze_pg_with_summaries(
+                            pg, all_child_summaries, direct_processors,
+                            self.call_nifi_tool, self.call_llm_async, prep_res,
+                            extract_io_endpoints_detailed, extract_error_handling,
+                            self.categorizer, self.bound_logger
                         )
                     else:
                         # Leaf PG - only has its own processors
-                        summary = await self._analyze_pg_direct(
-                            pg, direct_processors, prep_res
+                        summary = await analyze_pg_direct(
+                            pg, direct_processors,
+                            self.call_nifi_tool, self.call_llm_async, prep_res,
+                            extract_io_endpoints_detailed, extract_error_handling,
+                            self.categorizer, self.bound_logger
                         )
                     self.workflow_logger.bind(
                         interface="workflow",
@@ -1076,8 +1207,9 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
                         pg_connections.append(c)
                 parent_error_handling = []
                 if direct_processors:
-                    parent_error_handling = await self._extract_error_handling(
-                        direct_processors, pg_connections, prep_res
+                    parent_error_handling = await extract_error_handling(
+                        direct_processors, pg_connections,
+                        self.call_nifi_tool, prep_res, None, self.bound_logger
                     )
                 # summary["error_handling"] already contains errors from children (if any)
                 # Add parent's error handling
@@ -1145,1255 +1277,6 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
             "metrics": metrics
         }
     
-    def _get_pg_processors(
-        self, 
-        pg_id: str, 
-        prep_res: Dict[str, Any]
-    ) -> List[Dict]:
-        """Get processors that belong directly to this PG (not nested)."""
-        all_processors = prep_res["flow_graph"].get("processors", {})
-        
-        return [
-            proc for proc in all_processors.values()
-            if proc.get("_parent_pg_id") == pg_id
-        ]
-    
-    async def _create_virtual_groups(
-        self,
-        pg_id: str,
-        processors: List[Dict],
-        prep_res: Dict[str, Any]
-    ) -> List[Dict]:
-        """Use LLM to identify logical groupings in a large flat PG."""
-        from ..prompts.documentation import VIRTUAL_SUBFLOW_PROMPT
-        
-        # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
-        connections = []
-        for c in prep_res["flow_graph"].get("connections", []):
-            parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
-            if parent_id == pg_id:
-                connections.append(c)
-        
-        proc_summary = [
-            {
-                "id": p.get("id", "")[:8],
-                "name": p.get("component", {}).get("name", p.get("name", "?")),
-                "type": p.get("component", {}).get("type", p.get("type", "?")).split(".")[-1],
-                "category": self.categorizer.categorize(
-                    p.get("component", {}).get("type", p.get("type", ""))
-                ).value
-            }
-            for p in processors
-        ]
-        
-        conn_summary = self._build_connectivity_summary(processors, connections)
-        
-        prompt = VIRTUAL_SUBFLOW_PROMPT.format(
-            proc_count=len(processors),
-            processor_summary=json.dumps(proc_summary, indent=2),
-            connection_summary=json.dumps(conn_summary, indent=2),
-            min_groups=prep_res.get("min_virtual_groups", 3),
-            max_groups=prep_res.get("max_virtual_groups", 7)
-        )
-        
-        response = await self.call_llm_async(
-            messages=[{"role": "user", "content": prompt}],
-            tools=None,
-            execution_state=prep_res,
-            action_id=f"virtual-groups-{pg_id}"
-        )
-        
-        if response.get("content"):
-            return self._parse_virtual_groups(response["content"], processors)
-        
-        return []
-    
-    def _parse_virtual_groups(
-        self, 
-        content: str, 
-        processors: List[Dict]
-    ) -> List[Dict]:
-        """Parse LLM response for virtual group definitions."""
-        json_match = re.search(r'\[[\s\S]*\]', content)
-        if json_match:
-            try:
-                groups = json.loads(json_match.group())
-                
-                proc_id_map = {p.get("id", "")[:8]: p.get("id") for p in processors}
-                
-                for group in groups:
-                    full_ids = []
-                    for short_id in group.get("processor_ids", []):
-                        if short_id in proc_id_map:
-                            full_ids.append(proc_id_map[short_id])
-                    group["processor_ids"] = full_ids
-                    group["virtual"] = True
-                
-                return groups
-                
-            except json.JSONDecodeError:
-                pass
-        
-        return []
-    
-    async def _analyze_virtual_group(
-        self,
-        virtual_group: Dict,
-        all_processors: List[Dict],
-        prep_res: Dict[str, Any],
-        parent_pg_id: str
-    ) -> Dict:
-        """Generate summary for a virtual group."""
-        from ..prompts.documentation import PG_SUMMARY_PROMPT
-        
-        group_proc_ids = set(virtual_group.get("processor_ids", []))
-        group_processors = [
-            p for p in all_processors 
-            if p.get("id") in group_proc_ids
-        ]
-        
-        # Fetch processor details first (needed for states in categorization)
-        proc_ids = [p.get("id") for p in group_processors if p.get("id")]
-        cached_proc_details = {}
-        if proc_ids:
-            try:
-                result = await self.call_nifi_tool(
-                    "get_nifi_object_details",
-                    {
-                        "object_type": "processor",
-                        "object_ids": proc_ids,
-                        "output_format": "doc_optimized",
-                        "include_properties": True
-                    },
-                    prep_res
-                )
-                if isinstance(result, str):
-                    result = json.loads(result)
-                if not isinstance(result, list):
-                    result = [result] if isinstance(result, dict) else []
-                for item in result:
-                    if isinstance(item, dict) and item.get("status") == "success":
-                        proc_id = item.get("id")
-                        proc_data = item.get("data", {})
-                        # DEFENSIVE: Ensure data is a dict before storing
-                        if isinstance(proc_data, dict):
-                            cached_proc_details[proc_id] = proc_data
-                        else:
-                            self.bound_logger.warning(f"Processor data for {proc_id} is not a dict: {type(proc_data)}")
-                            cached_proc_details[proc_id] = {}
-            except Exception as e:
-                self.bound_logger.warning(f"Failed to fetch processor details for virtual group: {e}")
-                cached_proc_details = {}
-        
-        # Categorize with states (using cached details)
-        categorized = self._categorize_processors(group_processors, include_states=True, cached_proc_details=cached_proc_details)
-        
-        io_endpoints = await self._extract_io_endpoints_detailed(group_processors, prep_res, cached_proc_details)
-        
-        # Extract business properties (routing rules, JSONPath expressions, etc.)
-        business_logic = []
-        for proc_id, proc_data in cached_proc_details.items():
-            # DEFENSIVE: Ensure proc_data is a dict
-            if not isinstance(proc_data, dict):
-                self.bound_logger.warning(f"proc_data for {proc_id} is not a dict: {type(proc_data)}")
-                continue
-            proc_name = proc_data.get("name", "Unknown")
-            proc_type = proc_data.get("type", "")
-            if proc_type:
-                proc_type = proc_type.split(".")[-1]
-            business_props = proc_data.get("business_properties", {})
-            
-            # DEFENSIVE: Ensure business_props is a dict
-            if business_props and isinstance(business_props, dict):
-                business_logic.append({
-                    "processor": proc_name,
-                    "type": proc_type,
-                    "properties": business_props
-                })
-        
-        prompt = PG_SUMMARY_PROMPT.format(
-            pg_name=virtual_group.get("name", "Virtual Group"),
-            pg_purpose=virtual_group.get("purpose", ""),
-            processor_count=len(group_processors),
-            categories_json=json.dumps(categorized, indent=2),
-            io_endpoints_json=json.dumps(io_endpoints, indent=2, default=str),
-            business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]",
-            child_summaries_json="[]"
-        )
-        
-        response = await self.call_llm_async(
-            messages=[{"role": "user", "content": prompt}],
-            tools=None,
-            execution_state=prep_res,
-            action_id=f"vg-summary-{virtual_group.get('name', 'vg')}"
-        )
-        
-        # Extract error handling for virtual group (connections within parent PG)
-        # Note: Virtual groups are within a parent PG, so we need connections from that PG
-        # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
-        vg_connections = []
-        for c in prep_res["flow_graph"].get("connections", []):
-            parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
-            if parent_id == parent_pg_id:
-                vg_connections.append(c)
-        
-        # Filter to only connections involving processors in this virtual group
-        vg_proc_ids = set(virtual_group.get("processor_ids", []))
-        vg_connections_filtered = []
-        for c in vg_connections:
-            # Handle both nested and flat connection structures
-            comp = c.get("component", {})
-            source = comp.get("source", {})
-            dest = comp.get("destination", {})
-            source_id = source.get("id") if source else c.get("sourceId")
-            dest_id = dest.get("id") if dest else c.get("destinationId")
-            if source_id in vg_proc_ids or dest_id in vg_proc_ids:
-                vg_connections_filtered.append(c)
-        error_handling = await self._extract_error_handling(
-            group_processors, vg_connections_filtered, prep_res
-        )
-        
-        return {
-            "name": virtual_group.get("name"),
-            "virtual": True,
-            "purpose": virtual_group.get("purpose", ""),
-            "summary": response.get("content", ""),
-            "processor_count": len(group_processors),
-            "categories": categorized,
-            "io_endpoints": io_endpoints,
-            "error_handling": error_handling
-        }
-    
-    async def _analyze_pg_with_summaries(
-        self,
-        pg: Dict,
-        child_summaries: List[Dict],
-        prep_res: Dict[str, Any],
-        direct_processors: List[Dict] = None
-    ) -> Dict:
-        """Analyze a PG using child summaries AND parent's own processors (if present)."""
-        from ..prompts.documentation import PG_WITH_CHILDREN_PROMPT, PG_WITH_CHILDREN_AND_PROCESSORS_PROMPT
-        
-        children_digest = [
-            {
-                "name": cs.get("name"),
-                "purpose": cs.get("purpose", cs.get("summary", "")),  # Full summary - no truncation
-                "io": cs.get("io_endpoints", []),
-                "error_handling": cs.get("error_handling", []),  # Include error handling context
-                "virtual": cs.get("virtual", False)
-            }
-            for cs in child_summaries
-        ]
-        
-        # Check if parent PG has its own processors
-        has_parent_processors = direct_processors and len(direct_processors) > 0
-        
-        if has_parent_processors:
-            # Parent has both children AND its own processors - use enhanced prompt
-            # Fetch processor details first (needed for states in categorization)
-            proc_ids = [p.get("id") for p in direct_processors if p.get("id")]
-            cached_proc_details = {}
-            if proc_ids:
-                try:
-                    result = await self.call_nifi_tool(
-                        "get_nifi_object_details",
-                        {
-                            "object_type": "processor",
-                            "object_ids": proc_ids,
-                            "output_format": "doc_optimized",
-                            "include_properties": True
-                        },
-                        prep_res
-                    )
-                    if isinstance(result, str):
-                        result = json.loads(result)
-                    if not isinstance(result, list):
-                        result = [result] if isinstance(result, dict) else []
-                    for item in result:
-                        if isinstance(item, dict) and item.get("status") == "success":
-                            cached_proc_details[item.get("id")] = item.get("data", {})
-                except Exception as e:
-                    self.bound_logger.warning(f"Failed to fetch parent processor details: {e}")
-                    cached_proc_details = {}
-            
-            # Extract IO endpoints from parent's processors
-            parent_io_endpoints = await self._extract_io_endpoints_detailed(
-                direct_processors, prep_res, cached_proc_details
-            )
-            
-            # Categorize parent's processors with states
-            categorized = self._categorize_processors(direct_processors, include_states=True, cached_proc_details=cached_proc_details)
-            
-            # Extract business properties from parent's processors
-            business_logic = []
-            for proc_id, proc_data in cached_proc_details.items():
-                proc_name = proc_data.get("name", "Unknown")
-                proc_type = proc_data.get("type", "").split(".")[-1]
-                business_props = proc_data.get("business_properties", {})
-                
-                if business_props:
-                    business_logic.append({
-                        "processor": proc_name,
-                        "type": proc_type,
-                        "properties": business_props
-                    })
-            
-            # Format connections for parent's own processors
-            # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
-            pg_connections = []
-            for c in prep_res["flow_graph"].get("connections", []):
-                # Check both possible structures
-                parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
-                if parent_id == pg.get("id"):
-                    pg_connections.append(c)
-            connection_summary = self._format_connections_for_prompt(pg_connections, cached_proc_details)
-            
-            prompt = PG_WITH_CHILDREN_AND_PROCESSORS_PROMPT.format(
-                pg_name=pg.get("name", pg.get("id", "")[:8]),
-                child_count=len(child_summaries),
-                children_digest=json.dumps(children_digest, indent=2),
-                processor_count=len(direct_processors),
-                categories_json=json.dumps(categorized, indent=2),
-                connections_json=json.dumps(connection_summary, indent=2, default=str),
-                io_endpoints_json=json.dumps(parent_io_endpoints, indent=2, default=str),
-                business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]"
-            )
-            
-            # Aggregate IO endpoints from both parent and children
-            all_io = list(parent_io_endpoints)
-            parent_categories = categorized
-        else:
-            # Parent only has children, no own processors - use original prompt
-            prompt = PG_WITH_CHILDREN_PROMPT.format(
-                pg_name=pg.get("name", pg.get("id", "")[:8]),
-                child_count=len(child_summaries),
-                children_digest=json.dumps(children_digest, indent=2)
-            )
-            
-            all_io = []
-            parent_categories = {}
-        
-        # Use full name for action_id (no truncation) - helps with event correlation
-        pg_name = pg.get('name', pg.get('id', ''))
-        action_id = f"pg-summary-{pg_name}" if pg_name else f"pg-summary-{pg.get('id', 'unknown')[:8]}"
-        response = await self.call_llm_async(
-            messages=[{"role": "user", "content": prompt}],
-            tools=None,
-            execution_state=prep_res,
-            action_id=action_id
-        )
-        
-        # Aggregate IO endpoints from children (if not already done for parent)
-        if not has_parent_processors:
-            all_io = []
-        all_errors = []
-        for cs in child_summaries:
-            # DEFENSIVE: Ensure cs is a dict before calling .get()
-            if isinstance(cs, dict):
-                io_endpoints = cs.get("io_endpoints", [])
-                error_handling = cs.get("error_handling", [])
-                if isinstance(io_endpoints, list):
-                    all_io.extend(io_endpoints)
-                if isinstance(error_handling, list):
-                    all_errors.extend(error_handling)
-            else:
-                self.bound_logger.warning(f"child_summary is not a dict in _analyze_pg_with_summaries: {type(cs)}")
-        
-        # DEFENSIVE: Build children list safely
-        children_names = []
-        for cs in child_summaries:
-            if isinstance(cs, dict):
-                children_names.append(cs.get("name", "Unknown"))
-            else:
-                children_names.append("Unknown")
-        
-        return {
-            "name": pg.get("name"),
-            "id": pg.get("id"),
-            "virtual": False,
-            "summary": response.get("content", "") if isinstance(response, dict) else "",
-            "child_count": len(child_summaries),
-            "children": children_names,
-            "processor_count": len(direct_processors) if direct_processors else 0,
-            "categories": parent_categories,
-            "io_endpoints": all_io,
-            "error_handling": all_errors
-        }
-    
-    async def _analyze_pg_direct(
-        self,
-        pg: Dict,
-        processors: List[Dict],
-        prep_res: Dict[str, Any]
-    ) -> Dict:
-        """Analyze a small leaf PG directly."""
-        from ..prompts.documentation import PG_SUMMARY_PROMPT
-        
-        # Fetch processor details once with doc_optimized format (includes relationships and properties)
-        # This data will be reused by both IO extraction and error handling
-        proc_ids = [p.get("id") for p in processors if p.get("id")]
-        cached_proc_details = {}
-        if proc_ids:
-            try:
-                result = await self.call_nifi_tool(
-                    "get_nifi_object_details",
-                    {
-                        "object_type": "processor",
-                        "object_ids": proc_ids,
-                        "output_format": "doc_optimized",
-                        "include_properties": True
-                    },
-                    prep_res
-                )
-                if isinstance(result, str):
-                    result = json.loads(result)
-                if not isinstance(result, list):
-                    result = [result] if isinstance(result, dict) else []
-                for item in result:
-                    if isinstance(item, dict) and item.get("status") == "success":
-                        proc_id = item.get("id")
-                        proc_data = item.get("data", {})
-                        # DEFENSIVE: Ensure data is a dict before storing
-                        if isinstance(proc_data, dict):
-                            cached_proc_details[proc_id] = proc_data
-                        else:
-                            self.bound_logger.warning(f"Processor data for {proc_id} is not a dict: {type(proc_data)}")
-                            cached_proc_details[proc_id] = {}
-            except Exception as e:
-                self.bound_logger.warning(f"Failed to fetch processor details for analysis: {e}")
-                cached_proc_details = {}
-        
-        # Categorize processors with states (using cached details for accurate states)
-        categorized = self._categorize_processors(processors, include_states=True, cached_proc_details=cached_proc_details)
-        
-        # Use cached details for IO extraction
-        io_endpoints = await self._extract_io_endpoints_detailed(processors, prep_res, cached_proc_details)
-        
-        # Extract business properties (routing rules, JSONPath expressions, etc.) from cached details
-        business_logic = []
-        for proc_id, proc_data in cached_proc_details.items():
-            # DEFENSIVE: Ensure proc_data is a dict
-            if not isinstance(proc_data, dict):
-                self.bound_logger.warning(f"proc_data for {proc_id} is not a dict: {type(proc_data)}")
-                continue
-            proc_name = proc_data.get("name", "Unknown")
-            proc_type = proc_data.get("type", "")
-            if proc_type:
-                proc_type = proc_type.split(".")[-1]
-            business_props = proc_data.get("business_properties", {})
-            
-            # DEFENSIVE: Ensure business_props is a dict
-            if business_props and isinstance(business_props, dict):
-                business_logic.append({
-                    "processor": proc_name,
-                    "type": proc_type,
-                    "properties": business_props
-                })
-        
-        # Format connections for this PG
-        # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
-        pg_connections = []
-        for c in prep_res["flow_graph"].get("connections", []):
-            parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
-            if parent_id == pg.get("id"):
-                pg_connections.append(c)
-        connection_summary = self._format_connections_for_prompt(pg_connections, cached_proc_details)
-        
-        prompt = PG_SUMMARY_PROMPT.format(
-            pg_name=pg.get("name", pg.get("id", "")[:8]),
-            pg_purpose="",
-            processor_count=len(processors),
-            categories_json=json.dumps(categorized, indent=2),
-            io_endpoints_json=json.dumps(io_endpoints, indent=2, default=str),
-            business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]",
-            connections_json=json.dumps(connection_summary, indent=2, default=str),
-            child_summaries_json="[]"
-        )
-        
-        # Use full name for action_id (no truncation) - helps with event correlation
-        pg_name = pg.get('name', pg.get('id', ''))
-        action_id = f"pg-direct-{pg_name}" if pg_name else f"pg-direct-{pg.get('id', 'unknown')[:8]}"
-        response = await self.call_llm_async(
-            messages=[{"role": "user", "content": prompt}],
-            tools=None,
-            execution_state=prep_res,
-            action_id=action_id
-        )
-        
-        # Extract error handling for leaf PG (reuse cached details)
-        # Note: pg_connections already fetched above for prompt
-        error_handling = await self._extract_error_handling(
-            processors, pg_connections, prep_res, cached_proc_details
-        )
-        
-        return {
-            "name": pg.get("name"),
-            "id": pg.get("id"),
-            "virtual": False,
-            "summary": response.get("content", ""),
-            "processor_count": len(processors),
-            "categories": categorized,
-            "io_endpoints": io_endpoints,
-            "error_handling": error_handling
-        }
-    
-    def _categorize_processors(
-        self, 
-        processors: List[Dict],
-        include_states: bool = True,
-        cached_proc_details: Optional[Dict[str, Dict]] = None
-    ) -> Dict[str, List[Dict]]:
-        """Categorize processors and return category -> processor info mapping.
-        
-        Args:
-            processors: List of processor dicts
-            include_states: Whether to include processor states in the output
-            cached_proc_details: Optional cached processor details to get state from
-            
-        Returns:
-            Dict mapping category -> list of processor info dicts with name and optionally state
-        """
-        categorized = {}
-        
-        for proc in processors:
-            proc_id = proc.get("id")
-            proc_type = proc.get("component", {}).get("type", proc.get("type", ""))
-            proc_name = proc.get("component", {}).get("name", proc.get("name", "?"))
-            
-            # Get state from cached details if available, otherwise from proc dict
-            proc_state = "UNKNOWN"
-            if cached_proc_details and proc_id:
-                proc_state = cached_proc_details.get(proc_id, {}).get("state", 
-                    proc.get("component", {}).get("state", proc.get("state", "UNKNOWN")))
-            else:
-                proc_state = proc.get("component", {}).get("state", proc.get("state", "UNKNOWN"))
-            
-            category = self.categorizer.categorize(proc_type).value
-            
-            if category not in categorized:
-                categorized[category] = []
-            
-            proc_info = {"name": proc_name}
-            if include_states:
-                proc_info["state"] = proc_state
-            
-            categorized[category].append(proc_info)
-        
-        return categorized
-    
-    def _format_connections_for_prompt(
-        self,
-        connections: List[Dict],
-        cached_proc_details: Optional[Dict[str, Dict]] = None
-    ) -> List[Dict]:
-        """Format connections for LLM prompt.
-        
-        Returns a simplified list of connections showing data flow between processors.
-        
-        Handles two connection formats:
-        1. Nested: conn["component"]["source"] and conn["component"]["destination"]
-        2. Flat: conn["sourceId"], conn["sourceName"], etc. at top level
-        """
-        formatted = []
-        
-        for conn in connections:
-            # Try nested structure first (component.source/destination)
-            comp = conn.get("component", {})
-            source = comp.get("source", {})
-            dest = comp.get("destination", {})
-            
-            # If nested structure exists, use it
-            if source or dest:
-                source_id = source.get("id")
-                dest_id = dest.get("id")
-                source_name = source.get("name", "?")
-                dest_name = dest.get("name", "?")
-                relationships = comp.get("selectedRelationships", [])
-            else:
-                # Use flat structure (top-level fields)
-                source_id = conn.get("sourceId")
-                dest_id = conn.get("destinationId")
-                source_name = conn.get("sourceName", "?")
-                dest_name = conn.get("destinationName", "?")
-                relationships = conn.get("selectedRelationships", []) or []
-            
-            # Get processor names from cached details if available
-            if cached_proc_details:
-                if source_id in cached_proc_details:
-                    source_name = cached_proc_details[source_id].get("name", source_name)
-                if dest_id in cached_proc_details:
-                    dest_name = cached_proc_details[dest_id].get("name", dest_name)
-            
-            formatted.append({
-                "from": source_name,
-                "to": dest_name,
-                "relationships": relationships if relationships else ["success"]
-            })
-        
-        return formatted
-    
-    async def _extract_io_endpoints_detailed(
-        self,
-        processors: List[Dict],
-        prep_res: Dict[str, Any],
-        cached_proc_details: Optional[Dict[str, Dict]] = None
-    ) -> List[Dict]:
-        """
-        Extract detailed IO endpoint information including file paths, URLs, topics, etc.
-        
-        This is a critical function - it captures all external interaction points
-        that must be documented (files, URLs, databases, message queues, etc.).
-        
-        Args:
-            processors: List of processor dicts
-            prep_res: Preparation context
-            cached_proc_details: Optional cached processor details to avoid duplicate API calls
-        """
-        io_categories = ["IO_READ", "IO_WRITE"]
-        io_processors = []
-        
-        # Identify IO processors
-        for proc in processors:
-            proc_type = proc.get("component", {}).get("type", proc.get("type", ""))
-            category = self.categorizer.categorize(proc_type).value
-            
-            if category in io_categories:
-                io_processors.append({
-                    "id": proc.get("id"),
-                    "name": proc.get("component", {}).get("name", proc.get("name", "?")),
-                    "type": proc_type,
-                    "category": category
-                })
-        
-        if not io_processors:
-            return []
-        
-        # Fetch detailed info for IO processors (using batch mode from Phase 2)
-        proc_ids = [p["id"] for p in io_processors]
-        
-        # Skip API call if no IO processors found
-        if not proc_ids:
-            return []
-        
-        # Use cached details if available, otherwise fetch
-        proc_details_map = {}
-        if cached_proc_details:
-            proc_details_map = {pid: cached_proc_details.get(pid, {}) for pid in proc_ids}
-            # Check if we have all the data we need (must have component.config.properties)
-            missing_ids = [
-                pid for pid in proc_ids 
-                if not proc_details_map.get(pid, {}).get("component", {}).get("config", {}).get("properties")
-            ]
-            if missing_ids:
-                # Fetch missing ones
-                try:
-                    result = await self.call_nifi_tool(
-                        "get_nifi_object_details",
-                        {
-                            "object_type": "processor",
-                            "object_ids": missing_ids,
-                            "output_format": "doc_optimized",
-                            "include_properties": True
-                        },
-                        prep_res
-                    )
-                    if isinstance(result, str):
-                        import json
-                        result = json.loads(result)
-                    if not isinstance(result, list):
-                        result = [result] if isinstance(result, dict) else []
-                    for item in result:
-                        if isinstance(item, dict) and item.get("status") == "success":
-                            proc_details_map[item.get("id")] = item.get("data", {})
-                except Exception as e:
-                    self.bound_logger.warning(f"Failed to fetch missing processor details: {e}")
-        else:
-            # No cache, fetch all
-            try:
-                result = await self.call_nifi_tool(
-                    "get_nifi_object_details",
-                    {
-                        "object_type": "processor",
-                        "object_ids": proc_ids,
-                        "output_format": "doc_optimized",  # Gets business_properties
-                        "include_properties": True
-                    },
-                    prep_res
-                )
-                
-                if isinstance(result, str):
-                    import json
-                    result = json.loads(result)
-                
-                # DEFENSIVE: Ensure result is iterable (list)
-                if not isinstance(result, list):
-                    self.bound_logger.warning(f"IO tool result is not a list: {type(result)}")
-                    result = [result] if isinstance(result, dict) else []
-                
-                # Map results by ID
-                for item in result:
-                    # DEFENSIVE: Ensure item is a dict before calling .get()
-                    if isinstance(item, dict) and item.get("status") == "success":
-                        proc_details_map[item.get("id")] = item.get("data", {})
-            
-            except Exception as e:
-                self.bound_logger.warning(f"Failed to fetch detailed IO endpoints: {e}")
-                # Fallback to basic extraction
-                return self._extract_io_basic(processors)
-        
-        # Build detailed endpoint info
-        endpoints = []
-        
-        # Extract endpoint details for each IO processor
-        for io_proc in io_processors:
-                proc_id = io_proc["id"]
-                details = proc_details_map.get(proc_id, {})
-                # DEFENSIVE: Ensure details is a dict
-                if not isinstance(details, dict):
-                    self.bound_logger.warning(f"Details for {proc_id} is not a dict: {type(details)}")
-                    continue
-                component = details.get("component", details)
-                # DEFENSIVE: Ensure component is a dict
-                if not isinstance(component, dict):
-                    self.bound_logger.warning(f"Component for {proc_id} is not a dict: {type(component)}")
-                    component = {}
-                config = component.get("config", {})
-                # DEFENSIVE: Ensure config is a dict
-                if not isinstance(config, dict):
-                    self.bound_logger.warning(f"Config for {proc_id} is not a dict: {type(config)}")
-                    config = {}
-                properties = config.get("properties", {})
-                # DEFENSIVE: Ensure properties is a dict (critical - this is where the error likely occurs)
-                if not isinstance(properties, dict):
-                    self.bound_logger.error(f"Properties for {proc_id} is not a dict: {type(properties)}, value: {properties}")
-                    properties = {}
-                business_props = details.get("business_properties", {})
-                # DEFENSIVE: Ensure business_props is a dict
-                if not isinstance(business_props, dict):
-                    self.bound_logger.warning(f"Business properties for {proc_id} is not a dict: {type(business_props)}")
-                    business_props = {}
-                
-                # Format processor reference with name, type, ID
-                # Ensure we have the right structure for format_processor_reference
-                proc_for_formatting = {"id": proc_id}
-                if "component" in details:
-                    proc_for_formatting["component"] = details["component"]
-                elif component and component != details:
-                    # component is already extracted, wrap it
-                    proc_for_formatting["component"] = component
-                else:
-                    # Fallback: use what we have from io_proc
-                    proc_for_formatting["component"] = {
-                        "name": io_proc["name"],
-                        "type": io_proc["type"],
-                        "id": proc_id
-                    }
-                
-                proc_formatted = format_processor_reference(proc_for_formatting)
-                
-                endpoint = {
-                    "processor": io_proc["name"],
-                    "processor_type": io_proc["type"].split(".")[-1],
-                    "processor_id": proc_id[:8] if proc_id else "N/A",
-                    "processor_reference": proc_formatted,  # Full formatted reference
-                    "type": io_proc["type"].split(".")[-1],  # Keep for backward compat
-                    "direction": "INPUT" if io_proc["category"] == "IO_READ" else "OUTPUT",
-                    "endpoint_details": {}
-                }
-                
-                # Extract endpoint-specific details based on processor type
-                proc_type_simple = io_proc["type"].split(".")[-1]
-                
-                # File-based processors
-                if proc_type_simple in ["GetFile", "PutFile", "ListFile"]:
-                    endpoint["endpoint_details"] = {
-                        "type": "file_system",
-                        "directory": properties.get("Directory", business_props.get("directory", "")),
-                        "file_filter": properties.get("File Filter", business_props.get("file_filter", "")),
-                        "path": properties.get("Directory", "")
-                    }
-                
-                # SFTP processors
-                elif proc_type_simple in ["GetSFTP", "PutSFTP", "ListSFTP"]:
-                    endpoint["endpoint_details"] = {
-                        "type": "sftp",
-                        "hostname": properties.get("Hostname", ""),
-                        "port": properties.get("Port", ""),
-                        "directory": properties.get("Remote Directory", ""),
-                        "username": properties.get("Username", "")
-                    }
-                
-                # HTTP client processors (outbound)
-                elif proc_type_simple in ["InvokeHTTP", "GetHTTP", "PostHTTP"]:
-                    endpoint["endpoint_details"] = {
-                        "type": "http",
-                        "url": properties.get("Remote URL", business_props.get("url", "")),
-                        "method": properties.get("HTTP Method", business_props.get("method", "GET")),
-                        "ssl_context": properties.get("SSL Context Service", "")
-                    }
-                
-                # HTTP server processors (inbound listener)
-                elif proc_type_simple == "HandleHttpRequest":
-                    # Build allowed methods list
-                    allowed_methods = []
-                    if properties.get("Allow GET", "").lower() == "true":
-                        allowed_methods.append("GET")
-                    if properties.get("Allow POST", "").lower() == "true":
-                        allowed_methods.append("POST")
-                    if properties.get("Allow PUT", "").lower() == "true":
-                        allowed_methods.append("PUT")
-                    if properties.get("Allow DELETE", "").lower() == "true":
-                        allowed_methods.append("DELETE")
-                    if properties.get("Allow HEAD", "").lower() == "true":
-                        allowed_methods.append("HEAD")
-                    if properties.get("Allow OPTIONS", "").lower() == "true":
-                        allowed_methods.append("OPTIONS")
-                    # Check for additional methods
-                    additional_methods = properties.get("Additional HTTP Methods")
-                    if additional_methods:
-                        allowed_methods.extend([m.strip() for m in additional_methods.split(",") if m.strip()])
-                    
-                    # Build URL from port and path
-                    port = properties.get("Listening Port", "")
-                    hostname = properties.get("Hostname", "")
-                    path = properties.get("Allowed Paths", "")
-                    protocol = "https" if properties.get("SSL Context Service") else "http"
-                    
-                    # Construct full URL
-                    if hostname:
-                        base_url = f"{protocol}://{hostname}:{port}" if port else f"{protocol}://{hostname}"
-                    else:
-                        base_url = f"{protocol}://localhost:{port}" if port else f"{protocol}://localhost"
-                    
-                    full_url = f"{base_url}{path}" if path else base_url
-                    
-                    endpoint["endpoint_details"] = {
-                        "type": "http_server",
-                        "url": full_url,
-                        "port": port,
-                        "hostname": hostname or "localhost",
-                        "path": path,
-                        "protocol": protocol,
-                        "allowed_methods": allowed_methods,
-                        "ssl_context": properties.get("SSL Context Service"),
-                        "client_authentication": properties.get("Client Authentication", "No Authentication")
-                    }
-                
-                # HTTP server processors (outbound response)
-                elif proc_type_simple == "HandleHttpResponse":
-                    status_code = properties.get("HTTP Status Code", "")
-                    # Status code might be an expression, try to extract numeric value
-                    status_code_value = status_code
-                    if isinstance(status_code, str) and not status_code.isdigit():
-                        # Try to extract number from expression like "${code:defaultValue('200')}"
-                        import re
-                        match = re.search(r'\d+', status_code)
-                        if match:
-                            status_code_value = match.group()
-                    
-                    endpoint["endpoint_details"] = {
-                        "type": "http_response",
-                        "status_code": status_code_value,
-                        "status_code_expression": status_code if status_code != status_code_value else None,
-                        "http_context_map": properties.get("HTTP Context Map"),
-                        "response_attributes_regex": properties.get("Attributes to add to the HTTP Response (Regex)")
-                    }
-                
-                # Kafka processors
-                elif "Kafka" in proc_type_simple or proc_type_simple in ["ConsumeKafka", "PublishKafka"]:
-                    endpoint["endpoint_details"] = {
-                        "type": "kafka",
-                        "topic": properties.get("topic", properties.get("Topic Name(s)", business_props.get("topic", ""))),
-                        "bootstrap_servers": properties.get("bootstrap.servers", business_props.get("bootstrap_servers", "")),
-                        "consumer_group": properties.get("Group ID", "")
-                    }
-                
-                # Database processors
-                elif proc_type_simple in ["QueryDatabaseTable", "PutDatabaseRecord", "ExecuteSQL"]:
-                    endpoint["endpoint_details"] = {
-                        "type": "database",
-                        "connection_url": properties.get("Database Connection URL", ""),
-                        "table": properties.get("Table Name", ""),
-                        "connection_pool": properties.get("Database Connection Pooling Service", "")
-                    }
-                
-                # JMS processors
-                elif proc_type_simple in ["ConsumeJMS", "PublishJMS", "GetJMSQueue", "PutJMS"]:
-                    endpoint["endpoint_details"] = {
-                        "type": "jms",
-                        "destination": properties.get("Destination Name", ""),
-                        "connection_factory": properties.get("Connection Factory Service", "")
-                    }
-                
-                # S3 processors
-                elif "S3" in proc_type_simple:
-                    endpoint["endpoint_details"] = {
-                        "type": "s3",
-                        "bucket": properties.get("Bucket", ""),
-                        "object_key": properties.get("Object Key", ""),
-                        "region": properties.get("Region", "")
-                    }
-                
-                # MongoDB processors
-                elif proc_type_simple in ["GetMongo", "PutMongo"]:
-                    endpoint["endpoint_details"] = {
-                        "type": "mongodb",
-                        "uri": properties.get("Mongo URI", ""),
-                        "database": properties.get("Mongo Database Name", ""),
-                        "collection": properties.get("Mongo Collection Name", "")
-                    }
-                
-                # Elasticsearch processors
-                elif proc_type_simple in ["GetElasticsearch", "PutElasticsearchRecord"]:
-                    endpoint["endpoint_details"] = {
-                        "type": "elasticsearch",
-                        "url": properties.get("Elasticsearch URL", ""),
-                        "index": properties.get("Index", ""),
-                        "type": properties.get("Type", "")
-                    }
-                
-                # Generic fallback - try to extract any URL/path-like properties
-                else:
-                    endpoint["endpoint_details"] = {
-                        "type": "generic",
-                        "properties": {}
-                    }
-                    # Look for common endpoint property names
-                    for key in ["Remote URL", "URL", "Hostname", "Directory", "Path", 
-                               "Connection URL", "Endpoint", "Address"]:
-                        if key in properties and properties[key]:
-                            endpoint["endpoint_details"]["properties"][key] = properties[key]
-                
-                endpoints.append(endpoint)
-        
-        return endpoints
-    
-    def _extract_io_basic(
-        self,
-        processors: List[Dict]
-    ) -> List[Dict]:
-        """Fallback basic IO extraction if detailed fetch fails."""
-        io_categories = ["IO_READ", "IO_WRITE"]
-        endpoints = []
-        
-        for proc in processors:
-            proc_type = proc.get("component", {}).get("type", proc.get("type", ""))
-            category = self.categorizer.categorize(proc_type).value
-            
-            if category in io_categories:
-                proc_name = proc.get("component", {}).get("name", proc.get("name", "?"))
-                proc_id = proc.get("id", "")
-                proc_formatted = format_processor_reference(proc)
-                
-                endpoints.append({
-                    "processor": proc_name,
-                    "processor_type": proc_type.split(".")[-1],
-                    "processor_id": proc_id[:8] if proc_id else "N/A",
-                    "processor_reference": proc_formatted,
-                    "type": proc_type.split(".")[-1],  # Keep for backward compat
-                    "direction": "INPUT" if category == "IO_READ" else "OUTPUT",
-                    "endpoint_details": {"type": "unknown", "note": "Details not available"}
-                })
-        
-        return endpoints
-    
-    def _extract_io_from_categorized(
-        self,
-        categorized: Dict[str, List[str]],
-        processors: List[Dict]
-    ) -> List[Dict]:
-        """
-        DEPRECATED: Use _extract_io_endpoints_detailed() instead.
-        
-        Kept for backward compatibility but should be replaced.
-        """
-        return self._extract_io_basic(processors)
-    
-    async def _extract_error_handling(
-        self,
-        processors: List[Dict],
-        connections: List[Dict],
-        prep_res: Dict[str, Any],
-        cached_proc_details: Optional[Dict[str, Dict]] = None
-    ) -> List[Dict]:
-        """
-        Extract error handling information from processors and connections.
-        
-        Lightweight analysis that identifies:
-        - Processors with error/failure relationships
-        - Whether errors are handled (connected) or ignored (auto-terminated)
-        - Where errors are routed to
-        
-        This is a lightweight initial implementation that can be expanded later
-        with retry analysis, error handling patterns, etc.
-        """
-        error_handling = []
-        
-        # Build connection map: source_id -> {relationship -> dest_id}
-        # Handle both nested (component.source/destination) and flat (top-level sourceId/destinationId) structures
-        connection_map = {}
-        for conn in connections:
-            # Try nested structure first
-            comp = conn.get("component", {})
-            source = comp.get("source", {})
-            dest = comp.get("destination", {})
-            
-            # If nested structure exists, use it
-            if source or dest:
-                source_id = source.get("id")
-                dest_id = dest.get("id")
-                relationships = comp.get("selectedRelationships", [])
-            else:
-                # Use flat structure (top-level fields)
-                source_id = conn.get("sourceId")
-                dest_id = conn.get("destinationId")
-                relationships = conn.get("selectedRelationships", []) or []
-            
-            if source_id:
-                if source_id not in connection_map:
-                    connection_map[source_id] = {}
-                for rel in relationships:
-                    connection_map[source_id][rel] = dest_id
-        
-        # Get detailed processor info to access relationships
-        proc_ids = [p.get("id") for p in processors]
-        
-        # Skip API call if no processors
-        if not proc_ids:
-            return []
-        
-        # Use cached details if available, otherwise fetch
-        proc_details_map = {}
-        if cached_proc_details:
-            proc_details_map = {pid: cached_proc_details.get(pid, {}) for pid in proc_ids}
-            # Check if we have relationships data
-            missing_ids = [
-                pid for pid in proc_ids 
-                if not proc_details_map.get(pid, {}).get("component", {}).get("relationships")
-            ]
-            if missing_ids:
-                # Fetch missing ones with summary format (lightweight - just need relationships)
-                try:
-                    result = await self.call_nifi_tool(
-                        "get_nifi_object_details",
-                        {
-                            "object_type": "processor",
-                            "object_ids": missing_ids,
-                            "output_format": "summary",
-                            "include_properties": False
-                        },
-                        prep_res
-                    )
-                    if isinstance(result, str):
-                        import json
-                        result = json.loads(result)
-                    if not isinstance(result, list):
-                        result = [result] if isinstance(result, dict) else []
-                    for item in result:
-                        if isinstance(item, dict) and item.get("status") == "success":
-                            proc_details_map[item.get("id")] = item.get("data", {})
-                except Exception as e:
-                    self.bound_logger.warning(f"Failed to fetch missing processor details for error analysis: {e}")
-        else:
-            # No cache, fetch all with summary format (lightweight - just need relationships)
-            try:
-                result = await self.call_nifi_tool(
-                    "get_nifi_object_details",
-                    {
-                        "object_type": "processor",
-                        "object_ids": proc_ids,
-                        "output_format": "summary",  # Lightweight - just need relationships
-                        "include_properties": False
-                    },
-                    prep_res
-                )
-                
-                if isinstance(result, str):
-                    import json
-                    result = json.loads(result)
-                
-                # DEFENSIVE: Ensure result is iterable (list)
-                if not isinstance(result, list):
-                    self.bound_logger.warning(f"Tool result is not a list: {type(result)}")
-                    result = [result] if isinstance(result, dict) else []
-                
-                # Map processor details by ID
-                for item in result:
-                    # DEFENSIVE: Ensure item is a dict before calling .get()
-                    if isinstance(item, dict) and item.get("status") == "success":
-                        proc_details_map[item.get("id")] = item.get("data", {})
-            
-            except Exception as e:
-                self.bound_logger.warning(f"Failed to fetch processor details for error analysis: {e}")
-                # Fallback to basic processor data
-                proc_details_map = {
-                    p.get("id"): p.get("component", p)
-                    for p in processors
-                }
-        
-        # Analyze each processor for error handling
-        for proc in processors:
-            proc_id = proc.get("id")
-            proc_name = proc.get("component", {}).get("name", proc.get("name", "?"))
-            proc_type = proc.get("component", {}).get("type", proc.get("type", ""))
-            
-            # Get relationships from detailed data or fallback
-            details = proc_details_map.get(proc_id, {})
-            component = details.get("component", details)
-            relationships = component.get("relationships", [])
-            
-            if not relationships:
-                # Try fallback
-                relationships = proc.get("component", {}).get("relationships", [])
-            
-            # Normalize relationships to dicts with at least a 'name' field
-            normalized_relationships = []
-            for rel in relationships or []:
-                if isinstance(rel, dict):
-                    # Already in expected format
-                    name = rel.get("name", "")
-                    auto_term = rel.get("autoTerminate", False)
-                else:
-                    # NiFi often returns relationships as plain strings
-                    name = str(rel)
-                    auto_term = False
-                normalized_relationships.append({
-                    "name": name,
-                    "autoTerminate": auto_term
-                })
-            
-            # Look for error-related relationships
-            error_keywords = ["failure", "error", "retry", "invalid", "unmatched", "exception"]
-            error_relationships = [
-                rel for rel in normalized_relationships
-                if any(keyword in (rel.get("name", "") or "").lower() for keyword in error_keywords)
-            ]
-            
-            if not error_relationships:
-                continue
-            
-                # Analyze each error relationship
-            for rel in error_relationships:
-                rel_name = rel.get("name", "")
-                auto_terminated = rel.get("autoTerminate", False)
-                
-                # Check if relationship is connected
-                is_handled = False
-                destination = None
-                destination_type = None
-                destination_id = None
-                
-                if proc_id in connection_map and rel_name in connection_map[proc_id]:
-                    # Error is routed somewhere
-                    dest_id = connection_map[proc_id][rel_name]
-                    is_handled = True
-                    destination_id = dest_id
-                    
-                    # Find destination processor name and type
-                    for dest_proc in processors:
-                        if dest_proc.get("id") == dest_id:
-                            dest_comp = dest_proc.get("component", {})
-                            destination = dest_comp.get("name", dest_proc.get("name", "Unknown"))
-                            destination_type = dest_comp.get("type", "")
-                            break
-                    
-                    if not destination:
-                        # Might be a port or other component - check connections
-                        for conn in connections:
-                            # Handle both nested and flat connection structures
-                            comp = conn.get("component", {})
-                            dest_comp = comp.get("destination", {})
-                            
-                            # Check nested structure first
-                            if dest_comp:
-                                conn_dest_id = dest_comp.get("id")
-                            else:
-                                # Use flat structure
-                                conn_dest_id = conn.get("destinationId")
-                            
-                            if conn_dest_id == dest_id:
-                                # Get destination name and type
-                                if dest_comp:
-                                    destination_type = dest_comp.get("type", "")
-                                    destination = dest_comp.get("name", "Unknown")
-                                else:
-                                    destination_type = conn.get("destinationType", "UNKNOWN")
-                                    destination = conn.get("destinationName", "Unknown")
-                                break
-                        
-                        if not destination:
-                            destination = "Unknown"
-                            destination_type = "UNKNOWN"
-                    
-                    # Format destination reference with name, type, ID
-                    destination_formatted = format_destination_reference(
-                        dest_id, destination, destination_type
-                    )
-                            
-                elif auto_terminated:
-                    # Error is auto-terminated (ignored)
-                    destination_formatted = "IGNORED (auto-terminated)"
-                    is_handled = False
-                else:
-                    # Error relationship exists but not connected and not auto-terminated
-                    # This is a potential issue - error not handled
-                    destination_formatted = "NOT HANDLED"
-                    is_handled = False
-                
-                # Format processor reference with name, type, ID
-                proc_formatted = format_processor_reference(proc)
-                
-                error_handling.append({
-                    "processor": proc_name,
-                    "processor_type": proc_type.split(".")[-1],
-                    "processor_id": proc_id[:8] if proc_id else "N/A",
-                    "processor_reference": proc_formatted,  # Full formatted reference
-                    "error_relationship": rel_name,
-                    "handled": is_handled,
-                    "destination": destination_formatted,  # Formatted with name, type, ID
-                    "destination_id": destination_id[:8] if destination_id else None,
-                    "auto_terminated": auto_terminated
-                })
-        
-        return error_handling
-    
-    def _build_connectivity_summary(
-        self,
-        processors: List[Dict],
-        connections: List[Dict]
-    ) -> List[Dict]:
-        """Build simplified connectivity for LLM."""
-        proc_id_to_name = {
-            p.get("id"): p.get("component", {}).get("name", p.get("name", "?"))
-            for p in processors
-        }
-        
-        summary = []
-        for conn in connections[:50]:
-            # Handle both nested and flat connection structures
-            comp = conn.get("component", {})
-            source = comp.get("source", {})
-            dest = comp.get("destination", {})
-            
-            # If nested structure exists, use it
-            if source or dest:
-                source_id = source.get("id", "")
-                dest_id = dest.get("id", "")
-                relationships = comp.get("selectedRelationships", [])
-            else:
-                # Use flat structure (top-level fields)
-                source_id = conn.get("sourceId", "")
-                dest_id = conn.get("destinationId", "")
-                relationships = conn.get("selectedRelationships", []) or []
-            
-            summary.append({
-                "from": proc_id_to_name.get(source_id, source_id[:8] if source_id else "?"),
-                "to": proc_id_to_name.get(dest_id, dest_id[:8] if dest_id else "?"),
-                "relationship": relationships[0] if relationships else "?"
-            })
-        
-        return summary
-    
     async def post_async(
         self,
         shared: Dict[str, Any],
@@ -2411,6 +1294,14 @@ class HierarchicalAnalysisNode(AsyncNiFiWorkflowNode):
         if exec_res.get("status") == "error":
             shared["error"] = exec_res.get("error")
             return "error"
+        
+        # If analysis was skipped, use the loaded data
+        if exec_res.get("status") == "skipped":
+            self.bound_logger.info("Analysis was skipped - preserving loaded shared state")
+            # The shared state should already have pg_summaries and virtual_groups from initial_shared_state
+            # Just ensure current_phase is updated
+            shared["current_phase"] = "GENERATION"
+            return "complete"  # -> DocumentationNode
         
         pg_summaries = shared.get("pg_summaries", {})
         if not isinstance(pg_summaries, dict):
@@ -2687,46 +1578,55 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
         # 1. Executive Summary
         root_summary = pg_summaries.get(root_pg_id, {})
         self.bound_logger.info(f"Generating executive summary for root PG {root_pg_id}...")
-        sections["summary"] = await self._generate_executive_summary(
-            root_summary, pg_summaries, prep_res
+        sections["summary"] = await generate_executive_summary(
+            root_summary, pg_summaries, self.call_llm_async, prep_res, self.bound_logger
         )
         self.bound_logger.info(f"Executive summary generated: {len(sections['summary'])} chars")
         await self._emit_section_event("summary", prep_res)
         
         # 2. Hierarchical Mermaid Diagram
         self.bound_logger.info("Generating hierarchical Mermaid diagram...")
-        sections["diagram"] = await self._generate_hierarchical_diagram(
-            pg_tree, pg_summaries, prep_res
+        sections["diagram"] = await generate_hierarchical_diagram(
+            pg_tree, pg_summaries, self.call_llm_async, prep_res, self.bound_logger
         )
         self.bound_logger.info(f"Mermaid diagram generated: {len(sections['diagram'])} chars")
         await self._emit_section_event("diagram", prep_res)
         
         # 3. Hierarchical Documentation
         self.bound_logger.info("Building hierarchical documentation...")
-        sections["hierarchy_doc"] = self._build_hierarchical_doc(
-            root_pg_id, pg_tree, pg_summaries, prep_res
+        virtual_groups = prep_res.get("virtual_groups", {})
+        sections["hierarchy_doc"] = build_hierarchical_doc(
+            root_pg_id, pg_tree, pg_summaries, virtual_groups
         )
         self.bound_logger.info(f"Hierarchical doc generated: {len(sections['hierarchy_doc'])} chars")
         await self._emit_section_event("hierarchy_doc", prep_res)
         
         # 4. Aggregated IO Endpoints
         self.bound_logger.info("Building aggregated IO endpoints table...")
-        sections["io_table"] = self._build_aggregated_io_table(pg_summaries)
+        sections["io_table"] = build_aggregated_io_table(pg_summaries)
         self.bound_logger.info(f"IO table generated: {len(sections['io_table'])} chars")
         await self._emit_section_event("io_table", prep_res)
         
         # 5. Error Handling Analysis
         self.bound_logger.info("Building error handling table...")
-        sections["error_handling_table"] = self._build_error_handling_table(pg_summaries)
+        sections["error_handling_table"] = build_error_handling_table(pg_summaries)
         self.bound_logger.info(f"Error handling table generated: {len(sections['error_handling_table'])} chars")
         await self._emit_section_event("error_handling_table", prep_res)
         
         # 6. Assemble final document
         self.bound_logger.info("Assembling final document from all sections...")
-        final_document = self._assemble_hierarchical_document(sections, prep_res)
+        pg_name = pg_tree.get(root_pg_id, {}).get("name", root_pg_id)
+        final_document = assemble_hierarchical_document(
+            pg_name,
+            sections.get("summary", ""),
+            sections.get("diagram", ""),
+            sections.get("hierarchy_doc", ""),
+            sections.get("io_table", ""),
+            sections.get("error_handling_table", "")
+        )
         self.bound_logger.info(f"Final document assembled: {len(final_document)} chars, {len(sections)} sections")
         
-        validation_issues = self._validate_output(final_document, pg_summaries)
+        validation_issues = validate_output(final_document, pg_summaries)
         
         elapsed_ms = int((time.time() - prep_res["generation_start_time"]) * 1000)
         
@@ -2747,728 +1647,6 @@ class DocumentationNode(AsyncNiFiWorkflowNode):
                 )
             }
         }
-    
-    async def _generate_executive_summary(
-        self,
-        root_summary: Dict,
-        all_summaries: Dict[str, Dict],
-        prep_res: Dict[str, Any]
-    ) -> str:
-        """Generate executive summary from hierarchical summaries."""
-        from ..prompts.documentation import HIERARCHICAL_SUMMARY_PROMPT
-        
-        # Collect IO endpoints with PG context for deduplication
-        # Use processor:direction:pg_name as key to distinguish similar processors in different PGs
-        seen = set()
-        unique_io = []
-        for pg_id, summary in all_summaries.items():
-            pg_name = summary.get("name", "unknown")
-            for io in summary.get("io_endpoints", []):
-                # Include PG name in key to preserve context and avoid losing important distinctions
-                key = f"{io.get('processor')}:{io.get('direction')}:{pg_name}"
-                if key not in seen:
-                    seen.add(key)
-                    # Add PG name to IO endpoint for context in the prompt
-                    io_with_context = {**io, "pg_name": pg_name}
-                    unique_io.append(io_with_context)
-        
-        hierarchy_overview = []
-        for pg_id, summary in all_summaries.items():
-            if not summary.get("virtual"):
-                # Include full summary (no truncation) - important for generation quality
-                hierarchy_overview.append({
-                    "name": summary.get("name"),
-                    "purpose": summary.get("summary", "")  # Full summary, not truncated
-                })
-        
-        prompt = HIERARCHICAL_SUMMARY_PROMPT.format(
-            max_words=prep_res.get("summary_max_words", 500),
-            root_summary=root_summary.get("summary", "No summary available"),
-            io_endpoints=json.dumps(unique_io, indent=2),
-            hierarchy_overview=json.dumps(hierarchy_overview, indent=2)
-        )
-        
-        response = await self.call_llm_async(
-            messages=[{"role": "user", "content": prompt}],
-            tools=None,
-            execution_state=prep_res,
-            action_id="generation-exec-summary"
-        )
-        
-        return response.get("content", "Summary generation failed.")
-    
-    async def _generate_hierarchical_diagram(
-        self,
-        pg_tree: Dict[str, Dict],
-        pg_summaries: Dict[str, Dict],
-        prep_res: Dict[str, Any]
-    ) -> str:
-        """Generate Mermaid diagram showing PG hierarchy."""
-        from ..prompts.documentation import HIERARCHICAL_DIAGRAM_PROMPT
-        
-        hierarchy = []
-        for pg_id, pg in pg_tree.items():
-            summary = pg_summaries.get(pg_id, {})
-            hierarchy.append({
-                "id": pg_id[:8],
-                "name": pg.get("name", pg_id[:8]),
-                "parent": pg.get("parent", "")[:8] if pg.get("parent") else None,
-                "purpose": summary.get("summary", "")[:200],  # Increased from 50 to 200 chars for better context
-                "has_io": bool(summary.get("io_endpoints"))
-            })
-        
-        for pg_id, virtual_groups in prep_res.get("virtual_groups", {}).items():
-            for vg in virtual_groups:
-                hierarchy.append({
-                    "id": f"vg-{vg.get('name', 'group')[:6]}",
-                    "name": vg.get("name"),
-                    "parent": pg_id[:8],
-                    "purpose": vg.get("purpose", "")[:200],  # Increased from 50 to 200 chars for better context
-                    "virtual": True
-                })
-        
-        prompt = HIERARCHICAL_DIAGRAM_PROMPT.format(
-            hierarchy_json=json.dumps(hierarchy, indent=2),
-            max_nodes=prep_res.get("max_mermaid_nodes", 50)
-        )
-        
-        response = await self.call_llm_async(
-            messages=[{"role": "user", "content": prompt}],
-            tools=None,
-            execution_state=prep_res,
-            action_id="generation-diagram"
-        )
-        
-        content = response.get("content", "")
-        
-        # Extract Mermaid code from markdown code block
-        mermaid_match = re.search(r'```mermaid\s*([\s\S]*?)```', content)
-        if mermaid_match:
-            diagram_code = mermaid_match.group(1).strip()
-        elif content.strip().startswith("graph") or content.strip().startswith("flowchart"):
-            diagram_code = content.strip()
-        else:
-            self.bound_logger.warning("LLM did not generate valid Mermaid diagram, using fallback")
-            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
-        
-        # Clean and validate the diagram code
-        # Fix common issues: missing newlines after keywords
-        diagram_code = re.sub(r'(flowchart\s+TD)(subgraph)', r'\1\n    \2', diagram_code)
-        diagram_code = re.sub(r'(graph\s+TD)(subgraph)', r'\1\n    \2', diagram_code)
-        # Ensure subgraph declarations have proper spacing
-        diagram_code = re.sub(r'subgraph\s+(["\']?)([^"\']+)\1', r'subgraph \1\2\1', diagram_code)
-        # Fix missing newlines before subgraph
-        diagram_code = re.sub(r'}\s*(subgraph)', r'}\n    \1', diagram_code)
-        # Fix missing newlines after subgraph declarations
-        diagram_code = re.sub(r'(subgraph[^\n]+)\s*([A-Z])', r'\1\n        \2', diagram_code)
-
-        # Validate basic structure
-        if not (diagram_code.strip().startswith("graph") or diagram_code.strip().startswith("flowchart")):
-            self.bound_logger.warning("Mermaid diagram does not start with 'graph' or 'flowchart', using fallback")
-            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
-
-        # Detect and fix HTML entity corruption
-        # Handle corrupted patterns like: name="" value="" -> "name value"
-        # This happens when HTML entities get mangled during processing
-        original_code = diagram_code
-
-        # Fix corrupted subgraph declarations like: subgraph name[" label=""]=""
-        # Pattern: subgraph Name[" text=""]="" -> subgraph Name["text"]
-        diagram_code = re.sub(r'subgraph\s+(\w+)\[\s*"([^"]*?)"\s*=\s*""\s*\]', r'subgraph \1["\2"]', diagram_code)
-        
-        # Fix more severe corruption: subgraph Name[" text=""]="" direction="" -> subgraph Name["text"]
-        diagram_code = re.sub(r'subgraph\s+(\w+)\[\s*"\s*([^"]*?)\s*"\s*=\s*""\s*\]\s*=\s*""', r'subgraph \1["\2"]', diagram_code)
-        
-        # Fix patterns like: [" narrative="" swift="" screening"]=""
-        # This happens when quotes get double-encoded: " becomes &quot; becomes ""
-        diagram_code = re.sub(r'\[\s*"\s*([^"]*?)\s*""\s*([^"]*?)\s*"\s*\]\s*=\s*""', r'["\1 \2"]', diagram_code)
-        
-        # Fix corrupted node labels like: A[[label=""]]=""
-        diagram_code = re.sub(r'\[\[([^\]]*?)"\s*=\s*""\s*\]\]', r'[[\1]]', diagram_code)
-        
-        # Fix corrupted connections like: A --&gt; B  (should be A --> B)
-        diagram_code = re.sub(r'--&gt;', '-->', diagram_code)
-        
-        # More aggressive cleanup for heavily corrupted diagrams
-        # Remove trailing ="" patterns that are artifacts of corruption
-        diagram_code = re.sub(r'=""(\s*(?:subgraph|end|direction|tb|[a-z]\[\[))', r'\1', diagram_code)
-        
-        # Fix subgraph declarations that got mangled: subgraph Name["text"] -> subgraph Name["text"]
-        diagram_code = re.sub(r'subgraph\s+(\w+)\[\s*"([^"]*?)"\s*\]', r'subgraph \1["\2"]', diagram_code)
-        
-        # Clean up any remaining corruption artifacts: remove ="" patterns
-        diagram_code = re.sub(r'\s*=""\s*', ' ', diagram_code)
-        
-        # Fix patterns where quotes got split: " text="" -> "text"
-        diagram_code = re.sub(r'"\s+([^"]+?)\s*""', r'"\1"', diagram_code)
-        
-        # Fix patterns where subgraph names got corrupted: Narrative_SWIFT_Screening[" text=""]=""
-        # Extract the actual name and fix the label
-        diagram_code = re.sub(r'subgraph\s+(\w+)\[\s*"\s*([^"]*?)\s*"\s*=\s*""\s*\]\s*=\s*""', r'subgraph \1["\2"]', diagram_code)
-
-        # If the code changed significantly, log the cleanup
-        if original_code != diagram_code:
-            self.bound_logger.info(f"Applied corruption cleanup to Mermaid diagram. Original length: {len(original_code)}, Cleaned length: {len(diagram_code)}")
-
-        # Decode any remaining HTML entities FIRST (before validation)
-        if '&gt;' in diagram_code or '&lt;' in diagram_code or '&amp;' in diagram_code or '&quot;' in diagram_code:
-            import html
-            diagram_code = html.unescape(diagram_code)
-            self.bound_logger.info("Decoded HTML entities in Mermaid diagram")
-            # Re-apply cleaning after HTML entity decoding
-            diagram_code = re.sub(r'=""(\s*(?:subgraph|end|direction|tb|[a-z]\[\[))', r'\1', diagram_code)
-            diagram_code = re.sub(r'\s*=""\s*', ' ', diagram_code)
-
-        # Final validation - reject if still contains corruption patterns
-        # Look for patterns that suggest HTML entity corruption or malformed attributes:
-        # - Multiple quotes together: "" or '' (not valid in Mermaid)
-        # - Equals signs in subgraph/node labels (not valid syntax)
-        # - Patterns like: name="" or ="value" which suggest corruption
-        if re.search(r'["\']\s*["\']', diagram_code) or re.search(r'=\s*["\']', diagram_code):
-            self.bound_logger.warning("Mermaid diagram still contains malformed attributes after cleanup, using fallback")
-            self.bound_logger.debug(f"Corrupted diagram code (first 200 chars): {diagram_code[:200]}")
-            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
-
-        # Check for malformed node definitions (multiple = signs in node labels)
-        # Valid nodes: A[Label], A[[Label]], A{{Label}}, A[(Label)]
-        # Invalid: A[Label="value="] or similar corruption
-        if re.search(r'\[\[[^\]]*="[^"]*="[^\]]*\]\]', diagram_code):
-            self.bound_logger.warning("Mermaid diagram contains malformed node labels after cleanup, using fallback")
-            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
-
-        # Check for patterns like: subgraph " name=" which suggests corruption
-        if re.search(r'subgraph\s+["\'][^"\']*=\s*["\']', diagram_code):
-            self.bound_logger.warning("Mermaid diagram contains malformed subgraph labels after cleanup, using fallback")
-            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
-
-        # Additional check: if diagram contains patterns like [" text=""]="", reject it
-        if re.search(r'\[\s*["\'][^"\']*["\']\s*=\s*["\']\s*["\']\s*\]', diagram_code):
-            self.bound_logger.warning("Mermaid diagram contains severely corrupted label patterns, using fallback")
-            return "graph TD\n    A[Flow] --> B[Documentation Failed]"
-
-        # Log the final cleaned diagram for debugging
-        self.bound_logger.debug(f"Final cleaned Mermaid diagram (first 300 chars): {diagram_code[:300]}")
-
-        return diagram_code
-    
-    def _build_hierarchical_doc(
-        self,
-        root_pg_id: str,
-        pg_tree: Dict[str, Dict],
-        pg_summaries: Dict[str, Dict],
-        prep_res: Dict[str, Any],
-        depth: int = 0
-    ) -> str:
-        """Build nested documentation sections from hierarchy with enhanced details."""
-        lines = []
-        
-        pg = pg_tree.get(root_pg_id, {})
-        summary = pg_summaries.get(root_pg_id, {})
-        
-        header_level = min(depth + 2, 4)
-        header = "#" * header_level
-        
-        pg_name = pg.get("name", root_pg_id[:8])
-        lines.append(f"{header} {pg_name}")
-        lines.append("")
-        
-        # Summary text (from LLM analysis)
-        if summary.get("summary"):
-            lines.append(summary["summary"])
-            lines.append("")
-        
-        # Enhanced IO Endpoints section with detailed information
-        io_endpoints = summary.get("io_endpoints", [])
-        if io_endpoints:
-            lines.append("### External Interactions")
-            lines.append("")
-            
-            inputs = [e for e in io_endpoints if e.get("direction") == "INPUT"]
-            outputs = [e for e in io_endpoints if e.get("direction") == "OUTPUT"]
-            
-            if inputs:
-                lines.append("**Input Sources:**")
-                for io in inputs:
-                    endpoint_details = io.get("endpoint_details", {})
-                    endpoint_type = endpoint_details.get("type", "unknown")
-                    
-                    if endpoint_type == "http_server":
-                        url = endpoint_details.get("url", "")
-                        methods = endpoint_details.get("allowed_methods", [])
-                        lines.append(f"- **{io.get('processor')}**: `{url}` (Methods: {', '.join(methods)})")
-                    elif endpoint_type == "file_system":
-                        directory = endpoint_details.get("directory", "")
-                        file_filter = endpoint_details.get("file_filter", "")
-                        filter_str = f" (Filter: `{file_filter}`)" if file_filter else ""
-                        lines.append(f"- **{io.get('processor')}**: Directory `{directory}`{filter_str}")
-                    elif endpoint_type == "kafka":
-                        topic = endpoint_details.get("topic", "")
-                        bootstrap = endpoint_details.get("bootstrap_servers", "")
-                        lines.append(f"- **{io.get('processor')}**: Topic `{topic}` (Broker: `{bootstrap}`)")
-                    elif endpoint_type == "database":
-                        table = endpoint_details.get("table", "")
-                        connection_url = endpoint_details.get("connection_url", "")
-                        lines.append(f"- **{io.get('processor')}**: Table `{table}` (Connection: `{connection_url}`)")
-                    else:
-                        lines.append(f"- **{io.get('processor')}**: {endpoint_type}")
-                lines.append("")
-            
-            if outputs:
-                lines.append("**Output Destinations:**")
-                for io in outputs:
-                    endpoint_details = io.get("endpoint_details", {})
-                    endpoint_type = endpoint_details.get("type", "unknown")
-                    
-                    if endpoint_type == "http":
-                        url = endpoint_details.get("url", "")
-                        method = endpoint_details.get("method", "GET")
-                        if url:
-                            lines.append(f"- **{io.get('processor')}**: `{method} {url}`")
-                        else:
-                            lines.append(f"- **{io.get('processor')}**: {method} (URL not configured)")
-                    elif endpoint_type == "http_response":
-                        status_code = endpoint_details.get("status_code", "")
-                        lines.append(f"- **{io.get('processor')}**: HTTP Response (Status: {status_code})")
-                    elif endpoint_type == "file_system":
-                        directory = endpoint_details.get("directory", "")
-                        file_filter = endpoint_details.get("file_filter", "")
-                        filter_str = f" (Filter: `{file_filter}`)" if file_filter else ""
-                        lines.append(f"- **{io.get('processor')}**: Directory `{directory}`{filter_str}")
-                    elif endpoint_type == "kafka":
-                        topic = endpoint_details.get("topic", "")
-                        bootstrap = endpoint_details.get("bootstrap_servers", "")
-                        lines.append(f"- **{io.get('processor')}**: Topic `{topic}` (Broker: `{bootstrap}`)")
-                    elif endpoint_type == "database":
-                        table = endpoint_details.get("table", "")
-                        connection_url = endpoint_details.get("connection_url", "")
-                        lines.append(f"- **{io.get('processor')}**: Table `{table}` (Connection: `{connection_url}`)")
-                    else:
-                        lines.append(f"- **{io.get('processor')}**: {endpoint_type}")
-                lines.append("")
-        
-        # Processor States section (if any are not RUNNING)
-        categories = summary.get("categories", {})
-        stopped_processors = []
-        for category, proc_list in categories.items():
-            for proc in proc_list:
-                if isinstance(proc, dict):
-                    state = proc.get("state", "UNKNOWN")
-                    if state not in ["RUNNING", "UNKNOWN"]:
-                        stopped_processors.append(f"{proc.get('name')} ({state})")
-        
-        if stopped_processors:
-            lines.append("### Processor Status")
-            lines.append("")
-            lines.append(f"**Note:** The following processors are not running: {', '.join(stopped_processors)}")
-            lines.append("")
-        
-        # Error Handling summary
-        error_handling = summary.get("error_handling", [])
-        if error_handling:
-            unhandled = [e for e in error_handling if not e.get("handled") and not e.get("auto_terminated")]
-            if unhandled:
-                lines.append("### Error Handling")
-                lines.append("")
-                lines.append(f"**Warning:** {len(unhandled)} error relationship(s) are not handled:")
-                for err in unhandled[:5]:  # Limit to first 5
-                    proc_ref = err.get("processor_reference", err.get("processor", "?"))
-                    rel = err.get("error_relationship", "?")
-                    lines.append(f"- `{proc_ref}`: `{rel}` relationship → NOT HANDLED")
-                if len(unhandled) > 5:
-                    lines.append(f"- ... and {len(unhandled) - 5} more unhandled errors")
-                lines.append("")
-        
-        # Virtual Groups (if any)
-        virtual_groups = prep_res.get("virtual_groups", {}).get(root_pg_id, [])
-        if virtual_groups:
-            lines.append("### Logical Components")
-            lines.append("")
-            for vg in virtual_groups:
-                lines.append(f"- **{vg.get('name')}**: {vg.get('purpose', '')}")
-            lines.append("")
-        
-        # Recursively process children
-        children = pg.get("children", [])
-        if children:
-            for child_id in children:
-                child_doc = self._build_hierarchical_doc(
-                    child_id, pg_tree, pg_summaries, prep_res, depth + 1
-                )
-                lines.append(child_doc)
-        
-        return "\n".join(lines)
-    
-    def _build_aggregated_io_table(
-        self, 
-        pg_summaries: Dict[str, Dict]
-    ) -> str:
-        """
-        Build detailed aggregated IO table with endpoint specifics.
-        
-        CRITICAL: This section must include all endpoint details (paths, URLs, topics, etc.)
-        as these are essential for understanding external interactions.
-        """
-        all_inputs = []
-        all_outputs = []
-        
-        for pg_id, summary in pg_summaries.items():
-            pg_name = summary.get("name", pg_id[:8])
-            for io in summary.get("io_endpoints", []):
-                io_with_pg = {**io, "pg": pg_name}
-                if io.get("direction") == "INPUT":
-                    all_inputs.append(io_with_pg)
-                else:
-                    all_outputs.append(io_with_pg)
-        
-        if not all_inputs and not all_outputs:
-            return "*No external IO endpoints identified.*"
-        
-        lines = []
-        
-        if all_inputs:
-            lines.append("### Data Inputs")
-            lines.append("")
-            for io in all_inputs:
-                endpoint_details = io.get("endpoint_details", {})
-                endpoint_type = endpoint_details.get("type", "unknown")
-                
-                # Use formatted reference (name, type, ID)
-                proc_ref = io.get("processor_reference", 
-                    f"{io.get('processor')} ({io.get('processor_type')}) [id:{io.get('processor_id')}]")
-                
-                lines.append(f"#### {proc_ref}")
-                lines.append(f"**Process Group:** {io.get('pg')}")
-                
-                # Format endpoint details based on type
-                if endpoint_type == "file_system":
-                    lines.append(f"- **Directory:** `{endpoint_details.get('directory', 'N/A')}`")
-                    if endpoint_details.get("file_filter"):
-                        lines.append(f"- **File Filter:** `{endpoint_details.get('file_filter')}`")
-                
-                elif endpoint_type == "sftp":
-                    lines.append(f"- **Host:** `{endpoint_details.get('hostname', 'N/A')}:{endpoint_details.get('port', 'N/A')}`")
-                    lines.append(f"- **Directory:** `{endpoint_details.get('directory', 'N/A')}`")
-                    if endpoint_details.get("username"):
-                        lines.append(f"- **Username:** `{endpoint_details.get('username')}`")
-                
-                elif endpoint_type == "http":
-                    lines.append(f"- **URL:** `{endpoint_details.get('url', 'N/A')}`")
-                    lines.append(f"- **Method:** `{endpoint_details.get('method', 'N/A')}`")
-                    if endpoint_details.get("ssl_context"):
-                        lines.append(f"- **SSL Context:** `{endpoint_details.get('ssl_context')}`")
-                
-                elif endpoint_type == "http_server":
-                    lines.append(f"- **URL:** `{endpoint_details.get('url', 'N/A')}`")
-                    lines.append(f"- **Port:** `{endpoint_details.get('port', 'N/A')}`")
-                    lines.append(f"- **Path:** `{endpoint_details.get('path', '/')}`")
-                    if endpoint_details.get("allowed_methods"):
-                        methods = ", ".join(endpoint_details.get("allowed_methods", []))
-                        lines.append(f"- **Allowed Methods:** `{methods}`")
-                    if endpoint_details.get("ssl_context"):
-                        lines.append(f"- **SSL Context:** `{endpoint_details.get('ssl_context')}`")
-                    if endpoint_details.get("client_authentication") and endpoint_details.get("client_authentication") != "No Authentication":
-                        lines.append(f"- **Client Authentication:** `{endpoint_details.get('client_authentication')}`")
-                
-                elif endpoint_type == "http_response":
-                    lines.append(f"- **Status Code:** `{endpoint_details.get('status_code', 'N/A')}`")
-                    if endpoint_details.get("status_code_expression"):
-                        lines.append(f"- **Status Code Expression:** `{endpoint_details.get('status_code_expression')}`")
-                    if endpoint_details.get("http_context_map"):
-                        lines.append(f"- **HTTP Context Map:** `{endpoint_details.get('http_context_map')}`")
-                
-                elif endpoint_type == "kafka":
-                    lines.append(f"- **Topic:** `{endpoint_details.get('topic', 'N/A')}`")
-                    lines.append(f"- **Bootstrap Servers:** `{endpoint_details.get('bootstrap_servers', 'N/A')}`")
-                    if endpoint_details.get("consumer_group"):
-                        lines.append(f"- **Consumer Group:** `{endpoint_details.get('consumer_group')}`")
-                
-                elif endpoint_type == "database":
-                    lines.append(f"- **Connection:** `{endpoint_details.get('connection_url', 'N/A')}`")
-                    if endpoint_details.get("table"):
-                        lines.append(f"- **Table:** `{endpoint_details.get('table')}`")
-                
-                elif endpoint_type == "jms":
-                    lines.append(f"- **Destination:** `{endpoint_details.get('destination', 'N/A')}`")
-                
-                elif endpoint_type == "s3":
-                    lines.append(f"- **Bucket:** `{endpoint_details.get('bucket', 'N/A')}`")
-                    if endpoint_details.get("object_key"):
-                        lines.append(f"- **Object Key:** `{endpoint_details.get('object_key')}`")
-                
-                elif endpoint_type == "mongodb":
-                    lines.append(f"- **Database:** `{endpoint_details.get('database', 'N/A')}`")
-                    lines.append(f"- **Collection:** `{endpoint_details.get('collection', 'N/A')}`")
-                
-                elif endpoint_type == "elasticsearch":
-                    lines.append(f"- **URL:** `{endpoint_details.get('url', 'N/A')}`")
-                    lines.append(f"- **Index:** `{endpoint_details.get('index', 'N/A')}`")
-                
-                else:
-                    # Generic fallback - show all properties
-                    props = endpoint_details.get("properties", {})
-                    if props:
-                        for key, value in props.items():
-                            if value:
-                                lines.append(f"- **{key}:** `{value}`")
-                    else:
-                        lines.append("- *Endpoint details not available*")
-                
-                lines.append("")
-        
-        if all_outputs:
-            lines.append("### Data Outputs")
-            lines.append("")
-            for io in all_outputs:
-                endpoint_details = io.get("endpoint_details", {})
-                endpoint_type = endpoint_details.get("type", "unknown")
-                
-                # Use formatted reference (name, type, ID)
-                proc_ref = io.get("processor_reference",
-                    f"{io.get('processor')} ({io.get('processor_type')}) [id:{io.get('processor_id')}]")
-                
-                lines.append(f"#### {proc_ref}")
-                lines.append(f"**Process Group:** {io.get('pg')}")
-                
-                # Same formatting logic as inputs
-                if endpoint_type == "file_system":
-                    lines.append(f"- **Directory:** `{endpoint_details.get('directory', 'N/A')}`")
-                    if endpoint_details.get("file_filter"):
-                        lines.append(f"- **File Filter:** `{endpoint_details.get('file_filter')}`")
-                
-                elif endpoint_type == "sftp":
-                    lines.append(f"- **Host:** `{endpoint_details.get('hostname', 'N/A')}:{endpoint_details.get('port', 'N/A')}`")
-                    lines.append(f"- **Directory:** `{endpoint_details.get('directory', 'N/A')}`")
-                
-                elif endpoint_type == "http":
-                    lines.append(f"- **URL:** `{endpoint_details.get('url', 'N/A')}`")
-                    lines.append(f"- **Method:** `{endpoint_details.get('method', 'N/A')}`")
-                    if endpoint_details.get("ssl_context"):
-                        lines.append(f"- **SSL Context:** `{endpoint_details.get('ssl_context')}`")
-                
-                elif endpoint_type == "http_server":
-                    lines.append(f"- **URL:** `{endpoint_details.get('url', 'N/A')}`")
-                    lines.append(f"- **Port:** `{endpoint_details.get('port', 'N/A')}`")
-                    lines.append(f"- **Path:** `{endpoint_details.get('path', '/')}`")
-                    if endpoint_details.get("allowed_methods"):
-                        methods = ", ".join(endpoint_details.get("allowed_methods", []))
-                        lines.append(f"- **Allowed Methods:** `{methods}`")
-                    if endpoint_details.get("ssl_context"):
-                        lines.append(f"- **SSL Context:** `{endpoint_details.get('ssl_context')}`")
-                    if endpoint_details.get("client_authentication") and endpoint_details.get("client_authentication") != "No Authentication":
-                        lines.append(f"- **Client Authentication:** `{endpoint_details.get('client_authentication')}`")
-                
-                elif endpoint_type == "http_response":
-                    lines.append(f"- **Status Code:** `{endpoint_details.get('status_code', 'N/A')}`")
-                    if endpoint_details.get("status_code_expression"):
-                        lines.append(f"- **Status Code Expression:** `{endpoint_details.get('status_code_expression')}`")
-                    if endpoint_details.get("http_context_map"):
-                        lines.append(f"- **HTTP Context Map:** `{endpoint_details.get('http_context_map')}`")
-                
-                elif endpoint_type == "kafka":
-                    lines.append(f"- **Topic:** `{endpoint_details.get('topic', 'N/A')}`")
-                    lines.append(f"- **Bootstrap Servers:** `{endpoint_details.get('bootstrap_servers', 'N/A')}`")
-                
-                elif endpoint_type == "database":
-                    lines.append(f"- **Connection:** `{endpoint_details.get('connection_url', 'N/A')}`")
-                    if endpoint_details.get("table"):
-                        lines.append(f"- **Table:** `{endpoint_details.get('table')}`")
-                
-                elif endpoint_type == "jms":
-                    lines.append(f"- **Destination:** `{endpoint_details.get('destination', 'N/A')}`")
-                
-                elif endpoint_type == "s3":
-                    lines.append(f"- **Bucket:** `{endpoint_details.get('bucket', 'N/A')}`")
-                    if endpoint_details.get("object_key"):
-                        lines.append(f"- **Object Key:** `{endpoint_details.get('object_key')}`")
-                
-                elif endpoint_type == "mongodb":
-                    lines.append(f"- **Database:** `{endpoint_details.get('database', 'N/A')}`")
-                    lines.append(f"- **Collection:** `{endpoint_details.get('collection', 'N/A')}`")
-                
-                elif endpoint_type == "elasticsearch":
-                    lines.append(f"- **URL:** `{endpoint_details.get('url', 'N/A')}`")
-                    lines.append(f"- **Index:** `{endpoint_details.get('index', 'N/A')}`")
-                
-                else:
-                    props = endpoint_details.get("properties", {})
-                    if props:
-                        for key, value in props.items():
-                            if value:
-                                lines.append(f"- **{key}:** `{value}`")
-                    else:
-                        lines.append("- *Endpoint details not available*")
-                
-                lines.append("")
-        
-        return "\n".join(lines)
-    
-    def _build_error_handling_table(
-        self,
-        pg_summaries: Dict[str, Dict]
-    ) -> str:
-        """
-        Build error handling table showing where errors are handled or ignored.
-        
-        Lightweight initial implementation - can be expanded later with:
-        - Retry policies
-        - Error handling patterns
-        - Dead letter queue analysis
-        """
-        all_errors = []
-        
-        for pg_id, summary in pg_summaries.items():
-            pg_name = summary.get("name", pg_id[:8])
-            for error in summary.get("error_handling", []):
-                error_with_pg = {**error, "pg": pg_name}
-                all_errors.append(error_with_pg)
-        
-        if not all_errors:
-            return "*No error handling relationships identified.*"
-        
-        # Group by handled/ignored status
-        handled_errors = [e for e in all_errors if e.get("handled")]
-        ignored_errors = [e for e in all_errors if e.get("auto_terminated")]
-        unhandled_errors = [e for e in all_errors if not e.get("handled") and not e.get("auto_terminated")]
-        
-        lines = []
-        
-        if handled_errors:
-            lines.append("### Handled Errors")
-            lines.append("")
-            lines.append("| Process Group | Processor | Error Relationship | Destination |")
-            lines.append("|---------------|-----------|---------------------|-------------|")
-            for error in handled_errors:
-                # Use formatted references (name, type, ID)
-                proc_ref = error.get("processor_reference", 
-                    f"{error.get('processor')} ({error.get('processor_type')}) [id:{error.get('processor_id')}]")
-                dest_ref = error.get("destination", "Unknown")
-                
-                lines.append(
-                    f"| {error.get('pg')} | `{proc_ref}` | "
-                    f"`{error.get('error_relationship')}` | `{dest_ref}` |"
-                )
-            lines.append("")
-        
-        if ignored_errors:
-            lines.append("### Ignored Errors (Auto-Terminated)")
-            lines.append("")
-            lines.append("| Process Group | Processor | Error Relationship |")
-            lines.append("|---------------|-----------|---------------------|")
-            for error in ignored_errors:
-                # Use formatted reference (name, type, ID)
-                proc_ref = error.get("processor_reference",
-                    f"{error.get('processor')} ({error.get('processor_type')}) [id:{error.get('processor_id')}]")
-                
-                lines.append(
-                    f"| {error.get('pg')} | `{proc_ref}` | "
-                    f"`{error.get('error_relationship')}` |"
-                )
-            lines.append("")
-            lines.append("*Note: These errors are automatically terminated and not routed anywhere.*")
-            lines.append("")
-        
-        if unhandled_errors:
-            lines.append("### ⚠️ Unhandled Errors")
-            lines.append("")
-            lines.append("| Process Group | Processor | Error Relationship |")
-            lines.append("|---------------|-----------|---------------------|")
-            for error in unhandled_errors:
-                # Use formatted reference (name, type, ID)
-                proc_ref = error.get("processor_reference",
-                    f"{error.get('processor')} ({error.get('processor_type')}) [id:{error.get('processor_id')}]")
-                
-                lines.append(
-                    f"| {error.get('pg')} | `{proc_ref}` | "
-                    f"`{error.get('error_relationship')}` |"
-                )
-            lines.append("")
-            lines.append("*Warning: These error relationships exist but are not connected or auto-terminated.*")
-            lines.append("*This may indicate missing error handling logic.*")
-            lines.append("")
-        
-        return "\n".join(lines)
-    
-    def _assemble_hierarchical_document(
-        self, 
-        sections: Dict, 
-        prep_res: Dict
-    ) -> str:
-        """Assemble final hierarchical Markdown document."""
-        pg_id = prep_res.get("process_group_id", "root")
-        pg_name = prep_res.get("pg_tree", {}).get(pg_id, {}).get("name", pg_id)
-        
-        # Extract default diagram to avoid backslash in f-string
-        default_diagram = 'graph TD\n    A[Error]'
-        diagram_content = sections.get('diagram', default_diagram)
-        
-        doc = f"""# NiFi Flow Documentation
-
-## Process Group: {pg_name}
-
----
-
-## Executive Summary
-
-{sections.get('summary', 'Summary not available.')}
-
----
-
-## Flow Architecture
-
-```mermaid
-{diagram_content}
-```
-
----
-
-## Detailed Breakdown
-
-{sections.get('hierarchy_doc', 'No hierarchy documentation available.')}
-
----
-
-## External Interactions
-
-{sections.get('io_table', 'No IO endpoints identified.')}
-
----
-
-## Error Handling
-
-{sections.get('error_handling_table', 'No error handling relationships identified.')}
-
----
-
-*Generated by NiFi Flow Documentation Workflow (Hierarchical Analysis)*
-"""
-        return doc
-    
-    def _validate_output(
-        self, 
-        document: str, 
-        pg_summaries: Dict
-    ) -> List[str]:
-        """Validate generated output quality."""
-        issues = []
-        
-        uuid_pattern = r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
-        if re.search(uuid_pattern, document):
-            issues.append("Raw UUIDs found in document - consider using names instead")
-        
-        mermaid_match = re.search(r'```mermaid\s*([\s\S]*?)```', document)
-        if mermaid_match:
-            mermaid_content = mermaid_match.group(1)
-            if not (mermaid_content.strip().startswith("graph") or 
-                   mermaid_content.strip().startswith("flowchart")):
-                issues.append("Mermaid diagram may have invalid syntax")
-        
-        if len(pg_summaries) > 1:
-            mentioned_pgs = sum(1 for pg in pg_summaries.values() 
-                               if pg.get("name", "") in document)
-            if mentioned_pgs < len(pg_summaries) * 0.5:
-                issues.append("Less than half of PGs mentioned in documentation")
-        
-        return issues
     
     async def _emit_section_event(self, section: str, prep_res: Dict):
         """Emit event for section generation."""

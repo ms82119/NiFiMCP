@@ -96,7 +96,8 @@ async def submit_chat(message: ChatMessage, background_tasks: BackgroundTasks):
             max_tokens_limit=message.max_tokens_limit,
             max_loop_iterations=message.max_loop_iterations,
             workflow_name=workflow_name,
-            process_group_id=message.process_group_id
+            process_group_id=message.process_group_id,
+            initial_shared_state=message.initial_shared_state
         )
         
         logger.info(f"Background task added successfully for request {request_id}")
@@ -217,7 +218,8 @@ async def execute_workflow(
     max_tokens_limit: int = 32000,
     max_loop_iterations: int = 10,
     workflow_name: str = "unguided",
-    process_group_id: Optional[str] = None
+    process_group_id: Optional[str] = None,
+    initial_shared_state: Optional[Dict[str, Any]] = None
 ):
     """Execute workflow using existing PocketFlow workflow system."""
     try:
@@ -271,6 +273,25 @@ async def execute_workflow(
                 "generation": doc_config.get("generation", {}),
                 "output": doc_config.get("output", {})
             }
+            
+            # Merge initial shared state if provided (for skipping phases)
+            if initial_shared_state:
+                logger.info(f"Merging initial shared state (for skipping phases)")
+                # Preserve critical fields that should not be overwritten
+                preserved_fields = ["user_request_id", "workflow_id", "workflow_name"]
+                preserved_values = {k: shared_state[k] for k in preserved_fields if k in shared_state}
+                
+                # Merge initial state, with initial_shared_state taking precedence for most fields
+                shared_state.update(initial_shared_state)
+                
+                # Restore preserved fields
+                shared_state.update(preserved_values)
+                
+                # Log what phases are being skipped
+                if initial_shared_state.get("skip_discovery"):
+                    logger.info("Discovery phase will be skipped (using loaded shared state)")
+                if initial_shared_state.get("skip_analysis"):
+                    logger.info("Analysis phase will be skipped (using loaded shared state)")
             
         else:
             # Unguided workflow - use existing logic

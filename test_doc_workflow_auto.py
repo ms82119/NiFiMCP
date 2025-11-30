@@ -57,6 +57,41 @@ MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000")
 TIMEOUT_SECONDS = 600  # 10 minutes max for workflow
 POLL_INTERVAL = 2  # Check status every 2 seconds
 TOKEN_STORE_PATH = project_root / "nifi_tokens.json"
+DEBUG_DIR = project_root / "logs" / "debug"
+
+
+def find_latest_shared_state_file(phase: str) -> Optional[Path]:
+    """
+    Find the latest shared state file for a given phase.
+    
+    Args:
+        phase: One of 'discovery', 'analysis', or 'generation'
+        
+    Returns:
+        Path to the latest file, or None if not found
+    """
+    if not DEBUG_DIR.exists():
+        return None
+    
+    pattern = f"{phase}_shared_state_*.json"
+    files = list(DEBUG_DIR.glob(pattern))
+    
+    if not files:
+        return None
+    
+    # Sort by modification time, newest first
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0]
+
+
+def load_shared_state_file(file_path: Path) -> Optional[Dict[str, Any]]:
+    """Load a shared state JSON file."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Warning: Could not load shared state file {file_path}: {e}")
+        return None
 
 
 def get_stored_token(server_id: str) -> Optional[str]:
@@ -248,7 +283,9 @@ async def submit_documentation_request(
     process_group_id: str,
     nifi_server_id: str,
     provider: str = "openai",
-    model_name: str = "gpt-4o-mini"
+    model_name: str = "gpt-4o-mini",
+    skip_discovery: bool = False,
+    skip_analysis: bool = False
 ) -> str:
     """Submit a documentation workflow request and return request_id."""
     url = f"{API_BASE_URL}/api/chat/"
@@ -264,6 +301,41 @@ async def submit_documentation_request(
         "max_tokens_limit": 32000,
         "max_loop_iterations": 10
     }
+    
+    # Load shared state files if skipping phases
+    initial_shared_state = {}
+    
+    if skip_discovery:
+        discovery_file = find_latest_shared_state_file("discovery")
+        if discovery_file:
+            print(f"📂 Loading discovery shared state from: {discovery_file.name}")
+            discovery_state = load_shared_state_file(discovery_file)
+            if discovery_state:
+                initial_shared_state.update(discovery_state)
+                initial_shared_state["skip_discovery"] = True
+                print(f"   ✅ Loaded discovery state (flow_graph, pg_tree, etc.)")
+            else:
+                print(f"   ⚠️  Failed to load discovery state, discovery will not be skipped")
+        else:
+            print(f"   ⚠️  No discovery shared state file found, discovery will not be skipped")
+    
+    if skip_analysis:
+        analysis_file = find_latest_shared_state_file("analysis")
+        if analysis_file:
+            print(f"📂 Loading analysis shared state from: {analysis_file.name}")
+            analysis_state = load_shared_state_file(analysis_file)
+            if analysis_state:
+                initial_shared_state.update(analysis_state)
+                initial_shared_state["skip_analysis"] = True
+                print(f"   ✅ Loaded analysis state (pg_summaries, virtual_groups, etc.)")
+            else:
+                print(f"   ⚠️  Failed to load analysis state, analysis will not be skipped")
+        else:
+            print(f"   ⚠️  No analysis shared state file found, analysis will not be skipped")
+    
+    # Add initial shared state to payload if we have any
+    if initial_shared_state:
+        payload["initial_shared_state"] = initial_shared_state
     
     print(f"\n📤 Submitting documentation request...")
     print(f"   Process Group: {process_group_id}")
@@ -482,6 +554,25 @@ async def validate_output(request_id: str) -> Dict[str, Any]:
                 if final_doc:
                     validation_results["final_document_in_shared"] = True
                     validation_results["final_document_size"] = len(final_doc)
+                    
+                    # Also check final_document in shared_state if not found in chat history
+                    # (important when skipping phases - document might only be in shared_state)
+                    if not validation_results["has_final_document"] and "# NiFi Flow Documentation" in final_doc:
+                        validation_results["has_final_document"] = True
+                        validation_results["document_size"] = len(final_doc)
+                        
+                        # Check for required sections in shared_state document
+                        if "## Executive Summary" in final_doc or "Executive Summary" in final_doc:
+                            validation_results["has_summary"] = True
+                        
+                        if "```mermaid" in final_doc or "flowchart" in final_doc or "graph" in final_doc:
+                            validation_results["has_diagram"] = True
+                        
+                        if "## External Interactions" in final_doc or "Data Inputs" in final_doc:
+                            validation_results["has_io_table"] = True
+                        
+                        if "## Error Handling" in final_doc or "Handled Errors" in final_doc:
+                            validation_results["has_error_handling"] = True
                 else:
                     validation_results["final_document_in_shared"] = False
             except (json.JSONDecodeError, TypeError):
@@ -727,6 +818,10 @@ Examples:
                        help="Submit token to API and exit (requires nifi_server_id)")
     parser.add_argument("--debug-shared", action="store_true",
                        help="After run, print internal shared workflow state (pg_summaries, doc_sections, final_document)")
+    parser.add_argument("--skip-discovery", action="store_true",
+                       help="Skip discovery phase and load from latest discovery_shared_state_*.json file")
+    parser.add_argument("--skip-analysis", action="store_true",
+                       help="Skip analysis phase and load from latest analysis_shared_state_*.json file")
     
     args = parser.parse_args()
     
@@ -846,7 +941,9 @@ Examples:
         # Step 1: Submit request
         request_id = await submit_documentation_request(
             process_group_id,
-            nifi_server_id
+            nifi_server_id,
+            skip_discovery=args.skip_discovery,
+            skip_analysis=args.skip_analysis
         )
         
         # Step 2: Monitor execution

@@ -25,6 +25,8 @@ class ChatMessage(BaseModel):
     workflow_name: Optional[str] = Field("unguided", description="Workflow to use: 'unguided' or 'flow_documentation'")
     # Documentation workflow specific
     process_group_id: Optional[str] = Field(None, description="Process group ID for flow_documentation workflow")
+    # Skip phases (for testing - loads from saved shared state files)
+    initial_shared_state: Optional[Dict[str, Any]] = Field(None, description="Initial shared state to merge (for skipping phases)")
 
 
 class ChatResponse(BaseModel):
