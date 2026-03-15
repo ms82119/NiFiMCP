@@ -392,6 +392,29 @@ class NiFiClient:
             local_logger.error(f"An unexpected error occurred getting root process group ID: {e}", exc_info=True)
             raise ConnectionError(f"An unexpected error occurred getting root process group ID: {e}") from e
 
+    async def download_flow_definition(self, process_group_id: str, include_referenced_services: bool = False) -> dict:
+        """Downloads the flow definition for a process group as JSON (same as UI 'Download flow definition').
+        include_referenced_services=False corresponds to 'without external services'."""
+        if not self._token:
+            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+        client = await self._get_client()
+        endpoint = f"/process-groups/{process_group_id}/download"
+        params = {"includeReferencedServices": str(include_referenced_services).lower()}
+        try:
+            logger.info(f"Downloading flow definition for group {process_group_id} from {self.base_url}{endpoint}")
+            response = await client.get(endpoint, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to download flow definition: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to download flow definition: {e.response.status_code}, {e.response.text}") from e
+        except (httpx.RequestError, ValueError) as e:
+            logger.error(f"Error downloading flow definition: {e}")
+            raise ConnectionError(f"Error downloading flow definition: {e}") from e
+        except Exception as e:
+            logger.error(f"An unexpected error downloading flow definition: {e}", exc_info=True)
+            raise ConnectionError(f"An unexpected error downloading flow definition: {e}") from e
+
     async def list_processors(self, process_group_id: str, user_request_id: str = "-", action_id: str = "-") -> list[dict]:
         """Lists processors within a specified process group."""
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)

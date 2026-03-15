@@ -21,7 +21,8 @@ DEFAULT_LOGGING_CONFIG = {
 
 DEFAULT_APP_CONFIG = {
     'nifi': {
-        'servers': [] # Default to empty list
+        'servers': [],  # Default to empty list
+        'flow_export_directory': 'flow_exports',  # Relative to project root; or absolute path
     },
     'llm': {
         'google': {'api_key': None, 'models': ['gemini-1.5-pro-latest']},
@@ -139,6 +140,17 @@ def get_nifi_server_config(server_id: str) -> dict | None:
             return server
     print(f"Warning: NiFi server configuration not found for ID: {server_id}")
     return None
+
+
+def get_flow_export_directory() -> str:
+    """Returns the resolved flow export directory (absolute path). Relative paths are resolved against PROJECT_ROOT."""
+    raw = _APP_CONFIG.get('nifi', {}).get('flow_export_directory', DEFAULT_APP_CONFIG['nifi'].get('flow_export_directory', 'flow_exports'))
+    if not raw:
+        raw = 'flow_exports'
+    path = Path(raw)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return str(path.resolve())
 
 # --- MCP Feature Flags --- Accessors ---
 def get_feature_auto_stop_enabled(headers: dict | None = None) -> bool:

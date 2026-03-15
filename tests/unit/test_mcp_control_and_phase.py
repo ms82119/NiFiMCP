@@ -142,6 +142,7 @@ class TestSessionInfoAndTokens:
         expected_keys = {
             "server_id", "server_name", "phase", "connection_started_at",
             "connection_started_ago", "total_tokens_in", "total_tokens_out",
+            "flow_export_directory", "saved_flow_snapshots",
         }
         for k in expected_keys:
             assert k in out, f"Missing key: {k}"
@@ -149,3 +150,45 @@ class TestSessionInfoAndTokens:
         assert out["server_name"] == "Test NiFi"
         assert out["total_tokens_in"] >= 0
         assert out["total_tokens_out"] >= 0
+        assert isinstance(out["flow_export_directory"], str)
+        assert isinstance(out["saved_flow_snapshots"], list)
+
+    @pytest.mark.anyio
+    async def test_get_nifi_session_info_snapshots_filtered_by_server_prefix(self, tmp_path):
+        """saved_flow_snapshots lists only JSON files matching {sanitized_server_id}_*.json."""
+        from unittest.mock import patch
+        from nifi_mcp_server.api_tools.control import _sanitize_server_id_for_filename
+
+        (tmp_path / "other_server_20250314-120000.json").write_text("{}")
+        (tmp_path / "test-server_20250314-120001.json").write_text("{}")
+        (tmp_path / "test-server_20250314-120002.json").write_text("{}")
+        (tmp_path / "not-a-match.json").write_text("{}")
+
+        server_token = current_nifi_server_id.set("test-server")
+        started_token = mcp_session_started_at.set(1000000.0)
+        try:
+            with patch("nifi_mcp_server.api_tools.control.get_nifi_server_config") as m_conf:
+                m_conf.return_value = {"name": "Test NiFi"}
+                with patch("nifi_mcp_server.api_tools.control.get_flow_export_directory", return_value=str(tmp_path)):
+                    out = await get_nifi_session_info()
+        finally:
+            current_nifi_server_id.reset(server_token)
+            mcp_session_started_at.reset(started_token)
+
+        assert out["flow_export_directory"] == str(tmp_path)
+        snapshots = out["saved_flow_snapshots"]
+        assert len(snapshots) == 2
+        filenames = {s["filename"] for s in snapshots}
+        assert "test-server_20250314-120001.json" in filenames
+        assert "test-server_20250314-120002.json" in filenames
+        assert "other_server_20250314-120000.json" not in filenames
+        assert "not-a-match.json" not in filenames
+        for s in snapshots:
+            assert "filename" in s and "path" in s and "modified" in s
+
+    def test_sanitize_server_id_for_filename(self):
+        from nifi_mcp_server.api_tools.control import _sanitize_server_id_for_filename
+        assert _sanitize_server_id_for_filename("nifi-local-example") == "nifi-local-example"
+        assert _sanitize_server_id_for_filename("my server") == "my_server"
+        assert _sanitize_server_id_for_filename("a/b\\c") == "a_b_c"
+        assert _sanitize_server_id_for_filename("") == "nifi"
