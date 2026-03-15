@@ -479,14 +479,19 @@ class NiFiClient:
         relationships: list[str],
         source_type: str = "PROCESSOR", # Usually PROCESSOR
         target_type: str = "PROCESSOR", # Usually PROCESSOR
-        name: Optional[str] = None
+        name: Optional[str] = None,
+        source_group_id: Optional[str] = None,
+        target_group_id: Optional[str] = None,
     ) -> dict:
-        """Creates a connection between two components in a process group."""
+        """Creates a connection between two components in a process group. For cross-PG port connections, pass source_group_id and target_group_id."""
         if not self._token:
             raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/connections"
+
+        src_group = source_group_id if source_group_id is not None else process_group_id
+        dest_group = target_group_id if target_group_id is not None else process_group_id
 
         # Construct the request body (ConnectionEntity)
         request_body = {
@@ -498,12 +503,12 @@ class NiFiClient:
                 "name": name or "", # Optional connection name
                 "source": {
                     "id": source_id,
-                    "groupId": process_group_id,
+                    "groupId": src_group,
                     "type": source_type.upper()
                 },
                 "destination": {
                     "id": target_id,
-                    "groupId": process_group_id,
+                    "groupId": dest_group,
                     "type": target_type.upper()
                 },
                 "selectedRelationships": relationships
@@ -773,7 +778,7 @@ class NiFiClient:
             raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
 
         # Validate update_type
-        valid_update_types = ["properties", "auto-terminatedrelationships"]
+        valid_update_types = ["properties", "auto-terminatedrelationships", "position"]
         if update_type not in valid_update_types:
             raise ValueError(f"Invalid update_type '{update_type}'. Must be one of {valid_update_types}")
 
@@ -851,6 +856,12 @@ class NiFiClient:
             # Assign to component.config.autoTerminatedRelationships based on UI capture
             update_component["config"]["autoTerminatedRelationships"] = update_data
             log_message_part = f"config.autoTerminatedRelationships: {update_data}"
+
+        elif update_type == "position":
+            if not isinstance(update_data, dict) or "x" not in update_data or "y" not in update_data:
+                raise TypeError("update_data must be a dict with 'x' and 'y' (numbers) when update_type is 'position'.")
+            update_component["position"] = {"x": float(update_data["x"]), "y": float(update_data["y"])}
+            log_message_part = f"position: {update_component['position']}"
 
         # Construct final payload
         update_payload = {
@@ -1184,6 +1195,29 @@ class NiFiClient:
             local_logger.error(f"An unexpected error occurred getting process group details for {process_group_id}: {e}", exc_info=True)
             raise ConnectionError(f"An unexpected error occurred getting process group details: {e}") from e
 
+    async def update_process_group_position(self, process_group_id: str, x: float, y: float) -> dict:
+        """Updates a process group's position on the canvas. GETs current entity then PUTs with new position."""
+        if not self._token:
+            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+        try:
+            current = await self.get_process_group_details(process_group_id)
+        except (ValueError, ConnectionError) as e:
+            logger.error(f"Failed to fetch process group {process_group_id} for position update: {e}")
+            raise
+        rev = current.get("revision", {})
+        comp = current.get("component", {}).copy()
+        comp["position"] = {"x": float(x), "y": float(y)}
+        payload = {"revision": rev, "component": comp}
+        client = await self._get_client()
+        endpoint = f"/process-groups/{process_group_id}"
+        try:
+            response = await client.put(endpoint, json=payload)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to update process group {process_group_id} position: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to update process group position: {e.response.status_code}, {e.response.text}") from e
+
     async def get_process_group_flow(self, process_group_id: str, ui_only: bool = False) -> dict:
         """Fetches the flow details for a specific process group, often including counts.
         
@@ -1488,6 +1522,52 @@ class NiFiClient:
         except Exception as e:
             logger.error(f"An unexpected error occurred changing state for output port {port_id}: {e}", exc_info=True)
             raise ConnectionError(f"An unexpected error occurred changing output port state: {e}") from e
+
+    async def update_input_port_position(self, port_id: str, x: float, y: float) -> dict:
+        """Updates an input port's position on the canvas. GETs current entity then PUTs with new position."""
+        if not self._token:
+            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+        try:
+            current = await self.get_input_port_details(port_id)
+        except (ValueError, ConnectionError) as e:
+            logger.error(f"Failed to fetch input port {port_id} for position update: {e}")
+            raise
+        rev = current.get("revision", {})
+        comp = current.get("component", {}).copy()
+        comp["position"] = {"x": float(x), "y": float(y)}
+        payload = {"revision": rev, "component": comp}
+        client = await self._get_client()
+        endpoint = f"/input-ports/{port_id}"
+        try:
+            response = await client.put(endpoint, json=payload)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to update input port {port_id} position: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to update input port position: {e.response.status_code}, {e.response.text}") from e
+
+    async def update_output_port_position(self, port_id: str, x: float, y: float) -> dict:
+        """Updates an output port's position on the canvas. GETs current entity then PUTs with new position."""
+        if not self._token:
+            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+        try:
+            current = await self.get_output_port_details(port_id)
+        except (ValueError, ConnectionError) as e:
+            logger.error(f"Failed to fetch output port {port_id} for position update: {e}")
+            raise
+        rev = current.get("revision", {})
+        comp = current.get("component", {}).copy()
+        comp["position"] = {"x": float(x), "y": float(y)}
+        payload = {"revision": rev, "component": comp}
+        client = await self._get_client()
+        endpoint = f"/output-ports/{port_id}"
+        try:
+            response = await client.put(endpoint, json=payload)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to update output port {port_id} position: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to update output port position: {e.response.status_code}, {e.response.text}") from e
 
     async def create_input_port(self, pg_id: str, name: str, position: Dict[str, float]) -> dict:
         """Creates a new input port in the specified process group."""
