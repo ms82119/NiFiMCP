@@ -51,6 +51,9 @@ class NiFiClient:
         self._client = None
         self._token = None
         self._auth_config = None  # Cache auth configuration
+        # True when token came from OIDC token store; False when from /access/token (username/password).
+        # Cookie is only sent for OIDC so NiFi 1.x username/password auth is not confused by __Secure-* cookie.
+        self._token_from_oidc = False
         # Generate a unique client ID for this instance, used for revisions
         self._client_id = str(uuid.uuid4())
         logger.info(f"NiFiClient initialized for {self.base_url} with client ID: {self._client_id}")
@@ -72,13 +75,12 @@ class NiFiClient:
         headers = {}
         cookies = {}
         if self._token:
-            # Try both Authorization header and cookie format
-            # Some NiFi 2.x OIDC setups expect the token in a cookie
             headers["Authorization"] = f"Bearer {self._token}"
-            # Also set as cookie (NiFi 2.x OIDC may require this)
-            cookies["__Secure-Authorization-Bearer"] = self._token
-            # NiFi often requires client ID for state changes, let's check if we need it here
-            # Might need to parse initial response or call another endpoint if needed.
+            # Only send cookie for OIDC tokens. NiFi 1.x username/password auth uses /access/token;
+            # sending __Secure-Authorization-Bearer can cause 403 on mutate operations when NiFi
+            # does not expect that cookie for this auth type.
+            if self._token_from_oidc:
+                cookies["__Secure-Authorization-Bearer"] = self._token
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -274,12 +276,13 @@ class NiFiClient:
                 stored_token = get_token(server_id)
                 if stored_token:
                     # Validate token format (should be a JWT with 3 parts separated by dots)
-                    token_parts = stored_token.split('.')
+                    token_parts = stored_token.strip().split('.')
                     if len(token_parts) == 3:
                         logger.info(f"Using stored access token for OIDC authentication (token length: {len(stored_token)}, JWT format valid)")
                     else:
                         logger.warning(f"Token format may be invalid (expected JWT with 3 parts, got {len(token_parts)} parts)")
-                    self._token = stored_token
+                    self._token = stored_token.strip()
+                    self._token_from_oidc = True
                     # Force recreation of the main client with the token
                     if self._client:
                         await self._client.aclose()
@@ -318,7 +321,9 @@ class NiFiClient:
                     headers={"Content-Type": "application/x-www-form-urlencoded"}
                 )
                 response.raise_for_status()
-                self._token = response.text
+                # NiFi returns token as text/plain; strip whitespace so Bearer header is valid
+                self._token = (response.text or "").strip()
+                self._token_from_oidc = False
                 logger.info("Authentication successful.")
                 
                 # Force recreation of the main client with the token
@@ -1654,6 +1659,7 @@ class NiFiClient:
 
         client = await self._get_client()
         endpoint = f"/flow/process-groups/{pg_id}"
+        full_url = f"{self.base_url.rstrip('/')}{endpoint}"
 
         # The payload is simple for the bulk operation
         update_payload = {
@@ -1664,6 +1670,11 @@ class NiFiClient:
 
         try:
             logger.info(f"Setting process group {pg_id} state to {normalized_state}")
+            logger.debug(
+                "NiFi API request: method=PUT url={} payload={}",
+                full_url,
+                update_payload,
+            )
             response = await client.put(endpoint, json=update_payload)
             response.raise_for_status()
             updated_entity = response.json()
@@ -1671,6 +1682,15 @@ class NiFiClient:
             return updated_entity
 
         except httpx.HTTPStatusError as e:
+            # Status code (e.g. 403) is from NiFi's REST API, not from this server
+            resp = e.response
+            logger.error(
+                "NiFi API error (process group state): status={} url={} request_payload={} response_body={}",
+                resp.status_code,
+                full_url,
+                update_payload,
+                resp.text[:2000] if resp.text else "(empty)",
+            )
             logger.error(f"Failed to set process group {pg_id} state to {normalized_state}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to set process group state: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
@@ -2522,6 +2542,7 @@ class NiFiClient:
         
         client = await self._get_client()
         endpoint = f"/controller-services/{controller_service_id}/run-status"
+        full_url = f"{self.base_url.rstrip('/')}{endpoint}"
 
         # Construct the request body to enable the service
         request_body = {
@@ -2532,6 +2553,11 @@ class NiFiClient:
 
         try:
             local_logger.info(f"Enabling controller service {controller_service_id}")
+            local_logger.debug(
+                "NiFi API request: method=PUT url={} payload={}",
+                full_url,
+                request_body,
+            )
             response = await client.put(endpoint, json=request_body)
             response.raise_for_status()
             updated_entity = response.json()
@@ -2539,6 +2565,15 @@ class NiFiClient:
             return updated_entity
 
         except httpx.HTTPStatusError as e:
+            # Status code (e.g. 403) is from NiFi's REST API, not from this server
+            resp = e.response
+            local_logger.error(
+                "NiFi API error (enable controller service): status={} url={} request_payload={} response_body={}",
+                resp.status_code,
+                full_url,
+                request_body,
+                resp.text[:2000] if resp.text else "(empty)",
+            )
             local_logger.error(f"Failed to enable controller service {controller_service_id}: {e.response.status_code} - {e.response.text}")
             if e.response.status_code == 404:
                 raise ValueError(f"Controller service {controller_service_id} not found") from e

@@ -376,6 +376,11 @@ async def execute_tool(
     """Execute a specific MCP tool by name.
 
     Requires the `X-Nifi-Server-Id` header to specify which configured NiFi server to target.
+
+    Note: Tool execution is NOT restricted by workflow phase or mode. The `phase` query
+    parameter on GET /tools only filters which tools are *listed*; any listed tool can
+    be executed here. A 403 on mutate operations (start, enable, etc.) comes from NiFi's
+    REST API (insufficient NiFi permissions), not from this server.
     """
     user_request_id = request.state.user_request_id
     action_id = request.state.action_id
@@ -720,11 +725,12 @@ async def validate_workflow(
 # Run with uvicorn if this module is run directly
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.environ.get("MCP_SERVER_PORT", "8000"))
     # Disable default access logs to potentially reduce noise/interleaving
     uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=8000, 
-        log_level="info", # Keep uvicorn's own level if desired
-        access_log=False # Disable standard access log lines
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",  # Keep uvicorn's own level if desired
+        access_log=False,  # Disable standard access log lines
     )

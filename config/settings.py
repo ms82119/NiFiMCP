@@ -31,9 +31,11 @@ DEFAULT_APP_CONFIG = {
         'expert_help_model': {'provider': None, 'model': None}
     },
     'mcp_features': {
-        'auto_stop_enabled': True,
-        'auto_delete_enabled': True,
-        'auto_purge_enabled': True
+        'auto_delete_enabled': True
+    },
+    'operation_timeouts': {
+        'auto_stop_verify_seconds': 15,
+        'auto_stop_verify_connection_seconds': 5
     },
     'logging': {
         'llm_enqueue_enabled': True
@@ -140,14 +142,8 @@ def get_nifi_server_config(server_id: str) -> dict | None:
 
 # --- MCP Feature Flags --- Accessors ---
 def get_feature_auto_stop_enabled(headers: dict | None = None) -> bool:
-    """Returns whether the Auto-Stop feature is enabled, checking header override first."""
-    if headers:
-        # Convert header keys to lowercase for case-insensitive comparison
-        headers = {k.lower(): v for k, v in headers.items()}
-        header_value = headers.get("x-mcp-auto-stop-enabled") # Headers are case-insensitive
-        if header_value is not None:
-            return str(header_value).lower() == "true"
-    return _APP_CONFIG.get('mcp_features', {}).get('auto_stop_enabled', DEFAULT_APP_CONFIG['mcp_features']['auto_stop_enabled'])
+    """Auto-Stop is always enabled. Kept for backward compatibility; headers and config are ignored."""
+    return True
 
 def get_feature_auto_delete_enabled(headers: dict | None = None) -> bool:
     """Returns whether the Auto-Delete feature is enabled, checking header override first."""
@@ -160,14 +156,29 @@ def get_feature_auto_delete_enabled(headers: dict | None = None) -> bool:
     return _APP_CONFIG.get('mcp_features', {}).get('auto_delete_enabled', DEFAULT_APP_CONFIG['mcp_features']['auto_delete_enabled'])
 
 def get_feature_auto_purge_enabled(headers: dict | None = None) -> bool:
-    """Returns whether the Auto-Purge feature is enabled, checking header override first."""
-    if headers:
-        # Convert header keys to lowercase for case-insensitive comparison
-        headers = {k.lower(): v for k, v in headers.items()}
-        header_value = headers.get("x-mcp-auto-purge-enabled")
-        if header_value is not None:
-            return str(header_value).lower() == "true"
-    return _APP_CONFIG.get('mcp_features', {}).get('auto_purge_enabled', DEFAULT_APP_CONFIG['mcp_features']['auto_purge_enabled'])
+    """Auto-Purge is always enabled. Kept for backward compatibility; headers and config are ignored."""
+    return True
+
+# --- Operation timeouts (for Auto-Stop verify, disable wait, etc.) ---
+def get_auto_stop_verify_seconds() -> int:
+    """Seconds to wait when verifying a component has stopped (processor/PG, controller-service disable)."""
+    val = os.environ.get("NIFI_AUTO_STOP_VERIFY_SECONDS")
+    if val is not None:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return _APP_CONFIG.get('operation_timeouts', {}).get('auto_stop_verify_seconds', 15)
+
+def get_auto_stop_verify_connection_seconds() -> int:
+    """Seconds to wait when verifying connection endpoints have stopped (connection/processor delete)."""
+    val = os.environ.get("NIFI_AUTO_STOP_VERIFY_CONNECTION_SECONDS")
+    if val is not None:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return _APP_CONFIG.get('operation_timeouts', {}).get('auto_stop_verify_connection_seconds', 5)
 
 # --- Logging Configuration Accessors ---
 
@@ -237,11 +248,9 @@ nifi_server_summary = [(s.get('id', 'N/A'), s.get('name', 'N/A')) for s in get_n
 print(f"NiFi Servers configured: {len(nifi_server_summary)} {nifi_server_summary if nifi_server_summary else '(None)'}")
 print(f"Logging config loaded: {'Yes' if LOGGING_CONFIG != DEFAULT_LOGGING_CONFIG else 'No (Using Defaults)'}")
 
-# Print MCP Feature Flags status
+# Print MCP Feature Flags status (Auto-Stop and Auto-Purge are always on)
 print("\nMCP Feature Flags:")
-print(f"  Auto-Stop Enabled: {get_feature_auto_stop_enabled()}")
 print(f"  Auto-Delete Enabled: {get_feature_auto_delete_enabled()}")
-print(f"  Auto-Purge Enabled: {get_feature_auto_purge_enabled()}")
 
 # Print Logging Configuration status
 print("\nLogging Configuration:")

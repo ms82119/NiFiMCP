@@ -344,7 +344,7 @@ async def test_auto_purge_connection_with_queued_data(
     assert new_queued_count > 0, "No data queued in new connection for disabled test"
     global_logger.info(f"Test: Verified {new_queued_count} items queued in new connection {new_connection_id}")
 
-    # Attempt delete with Auto-Purge disabled
+    # Attempt delete with header that would have disabled Auto-Purge (Auto-Purge is now always on)
     headers_auto_purge_false = {**mcp_headers, "X-Mcp-Auto-Purge-Enabled": "false"}
     delete_args = {
         "objects": [{
@@ -361,9 +361,9 @@ async def test_auto_purge_connection_with_queued_data(
         headers=headers_auto_purge_false,
         custom_logger=global_logger
     )
-    assert delete_result_list[0].get("status") == "error", \
-        "Expected error when deleting connection with queued data and Auto-Purge disabled"
-    global_logger.info("Test: Got expected error with Auto-Purge disabled")
+    assert delete_result_list[0].get("status") == "success", \
+        "Auto-Purge is always on; delete with queued data should purge and succeed"
+    global_logger.info("Test: Delete with queued data succeeded (Auto-Purge always on)")
 
 @pytest.mark.anyio
 async def test_purge_single_connection(

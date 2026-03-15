@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "nifi": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "nifi_mcp_server.stdio_server"],
+      "env": {}
+    }
+  }
+}

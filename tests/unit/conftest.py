@@ -32,10 +32,11 @@ def global_logger():
     import logging
     return logging.getLogger(__name__)
 
-@pytest.fixture(scope="session") 
+@pytest.fixture(scope="session")
 def base_url():
-    """Mock base URL for unit tests."""
-    return "http://localhost:8000"
+    """Base URL for unit tests; respects MCP_SERVER_URL (e.g. http://localhost:8001)."""
+    import os
+    return os.environ.get("MCP_SERVER_URL", "http://localhost:8000")
 
 @pytest.fixture(scope="session")
 def target_nifi_server_id():

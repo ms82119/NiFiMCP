@@ -54,9 +54,11 @@ DEFAULT_APP_CONFIG = {
         'expert_help_model': {'provider': None, 'model': None}
     },
     'mcp_features': {
-        'auto_stop_enabled': True,
-        'auto_delete_enabled': True,
-        'auto_purge_enabled': True
+        'auto_delete_enabled': True
+    },
+    'operation_timeouts': {
+        'auto_stop_verify_seconds': 15,
+        'auto_stop_verify_connection_seconds': 5
     },
     'logging': {
         'llm_enqueue_enabled': True

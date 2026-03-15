@@ -76,7 +76,7 @@ If cleanup fails, it's usually due to:
 
 Tests use the following configuration:
 - **NiFi Server**: `nifi-local-example` (http://localhost:8080)
-- **MCP Server**: http://localhost:8000
+- **MCP Server**: Default `http://localhost:8000`. Override with `MCP_SERVER_URL` (e.g. `MCP_SERVER_URL=http://localhost:8001 pytest tests/...`).
 - **Test naming**: Uses server ID to avoid conflicts
 
 ## Best Practices

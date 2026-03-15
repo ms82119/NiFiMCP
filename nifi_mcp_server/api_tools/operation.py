@@ -107,6 +107,34 @@ async def operate_nifi_object(
                     validation_errors = component.get("validationErrors", [])
                     name = component.get("name", object_id)
 
+                    # Idempotency: already RUNNING is success
+                    if current_state == "RUNNING":
+                        local_logger.info(f"Processor '{name}' is already RUNNING.")
+                        filtered = filter_created_processor_data(proc_details)
+                        return {"status": "success", "message": f"Processor '{name}' is already running.", "entity": filtered}
+
+                    # Enable controller services in the same process group before start
+                    pg_id = component.get("parentGroupId")
+                    if pg_id:
+                        try:
+                            from ..request_context import current_user_request_id, current_action_id
+                            user_request_id = current_user_request_id.get() or "-"
+                            action_id = current_action_id.get() or "-"
+                            cs_list = await nifi_client.list_controller_services(pg_id, user_request_id=user_request_id, action_id=action_id)
+                            for cs_entity in cs_list or []:
+                                cs_comp = cs_entity.get("component", {})
+                                cs_state = cs_comp.get("state")
+                                if cs_state == "DISABLED":
+                                    cs_id = cs_entity.get("id")
+                                    cs_name = cs_comp.get("name", cs_id)
+                                    try:
+                                        await nifi_client.enable_controller_service(cs_id)
+                                        local_logger.info(f"[Start flow] Enabled controller service '{cs_name}' ({cs_id})")
+                                    except Exception as e:
+                                        local_logger.warning(f"[Start flow] Could not enable controller service '{cs_name}': {e}")
+                        except Exception as e:
+                            local_logger.warning(f"[Start flow] Could not enable controller services in PG {pg_id}: {e}")
+
                     if validation_status != "VALID":
                         error_list_str = ", ".join(validation_errors) if validation_errors else "No specific errors listed."
                         error_msg = f"Processor '{name}' cannot be started. Validation status: {validation_status}. Errors: [{error_list_str}]"
@@ -128,6 +156,18 @@ async def operate_nifi_object(
                     local_logger.error(f"Error during start pre-check: {e}", exc_info=True)
                     local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API (pre-check)")
                     return {"status": "error", "message": f"Failed pre-start check: {e}", "entity": None}
+
+            if operation_type == "stop":
+                # Idempotency: already STOPPED is success
+                try:
+                    proc_details = await nifi_client.get_processor_details(object_id)
+                    current_state = (proc_details.get("component") or {}).get("state")
+                    if current_state == "STOPPED":
+                        local_logger.info("Processor is already STOPPED.")
+                        filtered = filter_created_processor_data(proc_details)
+                        return {"status": "success", "message": "Processor is already stopped.", "entity": filtered}
+                except Exception:
+                    pass  # Proceed with stop API call
             # --- End of Pre-check ---
 
             nifi_update_req = {"operation": operation_name_for_log, "processor_id": object_id, "state": target_state}
@@ -202,6 +242,12 @@ async def operate_nifi_object(
                         local_logger.warning(error_msg)
                         return {"status": "error", "message": error_msg, "entity": None}
 
+                    # Idempotency: already RUNNING is success
+                    if current_state == "RUNNING":
+                        local_logger.info(f"Port '{name}' is already RUNNING.")
+                        filtered = filter_created_processor_data(port_details_for_check)
+                        return {"status": "success", "message": f"Port '{name}' is already running.", "entity": filtered}
+
                     local_logger.info(f"Port pre-checks passed (Validation: {validation_status}, State: {current_state}). Proceeding with start.")
 
                 except ValueError as e:
@@ -213,6 +259,21 @@ async def operate_nifi_object(
                     local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API (pre-check)")
                     return {"status": "error", "message": f"Failed pre-start check for port {object_id}: {e}", "entity": None}
             # --- End of Port Pre-check ---
+
+            if operation_type == "stop":
+                # Idempotency: already STOPPED is success
+                try:
+                    try:
+                        port_details = await nifi_client.get_input_port_details(object_id)
+                    except ValueError:
+                        port_details = await nifi_client.get_output_port_details(object_id)
+                    current_state = (port_details.get("component") or {}).get("state")
+                    if current_state == "STOPPED":
+                        local_logger.info("Port is already STOPPED.")
+                        filtered = filter_created_processor_data(port_details)
+                        return {"status": "success", "message": "Port is already stopped.", "entity": filtered}
+                except Exception:
+                    pass  # Proceed with stop API call
 
             if port_type_found is None:
                 local_logger.info("Determining port type (input/output)...")
@@ -265,6 +326,26 @@ async def operate_nifi_object(
 
         # --- Process Group Logic ---
         elif object_type == "process_group":
+            if operation_type == "start":
+                # Enable controller services in this process group before start
+                try:
+                    from ..request_context import current_user_request_id, current_action_id
+                    user_request_id = current_user_request_id.get() or "-"
+                    action_id = current_action_id.get() or "-"
+                    cs_list = await nifi_client.list_controller_services(object_id, user_request_id=user_request_id, action_id=action_id)
+                    for cs_entity in cs_list or []:
+                        cs_comp = cs_entity.get("component", {})
+                        cs_state = cs_comp.get("state")
+                        if cs_state == "DISABLED":
+                            cs_id = cs_entity.get("id")
+                            cs_name = cs_comp.get("name", cs_id)
+                            try:
+                                await nifi_client.enable_controller_service(cs_id)
+                                local_logger.info(f"[Start flow] Enabled controller service '{cs_name}' ({cs_id})")
+                            except Exception as e:
+                                local_logger.warning(f"[Start flow] Could not enable controller service '{cs_name}': {e}")
+                except Exception as e:
+                    local_logger.warning(f"[Start flow] Could not enable controller services in PG {object_id}: {e}")
             operation_name_for_log = "update_process_group_state"
             nifi_update_req = {"operation": operation_name_for_log, "process_group_id": object_id, "state": target_state}
             local_logger.bind(interface="nifi", direction="request", data=nifi_update_req).debug("Calling NiFi API (Bulk Update)")
@@ -318,6 +399,13 @@ async def operate_nifi_object(
                         local_logger.warning(error_msg)
                         return {"status": "warning", "message": error_msg, "entity": None}
 
+                    # Idempotency: already ENABLED is success
+                    if current_state == "ENABLED":
+                        local_logger.info(f"Controller service '{name}' is already ENABLED.")
+                        from .utils import filter_controller_service_data
+                        filtered = filter_controller_service_data(cs_details)
+                        return {"status": "success", "message": f"Controller service '{name}' is already enabled.", "entity": filtered}
+
                     local_logger.info(f"Controller service pre-checks passed (Validation: {validation_status}, State: {current_state}). Proceeding with enable.")
 
                 except ValueError as e:
@@ -329,6 +417,19 @@ async def operate_nifi_object(
                     local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API (pre-check)")
                     return {"status": "error", "message": f"Failed pre-enable check: {e}", "entity": None}
             # --- End of Pre-check ---
+
+            if operation_type == "disable":
+                # Idempotency: already DISABLED is success
+                try:
+                    cs_details = await nifi_client.get_controller_service_details(object_id)
+                    current_state = (cs_details.get("component") or {}).get("state")
+                    if current_state == "DISABLED":
+                        local_logger.info("Controller service is already DISABLED.")
+                        from .utils import filter_controller_service_data
+                        filtered = filter_controller_service_data(cs_details)
+                        return {"status": "success", "message": "Controller service is already disabled.", "entity": filtered}
+                except Exception:
+                    pass  # Proceed with disable API call
 
             operation_name_for_log = f"{operation_type}_controller_service"
             nifi_update_req = {"operation": operation_name_for_log, "controller_service_id": object_id, "state": target_state}

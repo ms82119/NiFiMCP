@@ -159,9 +159,9 @@ async def get_config():
     """Get application configuration."""
     try:
         return {
-            "feature_auto_stop": settings.get_feature_auto_stop_enabled(),
+            "feature_auto_stop": True,
             "feature_auto_delete": settings.get_feature_auto_delete_enabled(),
-            "feature_auto_purge": settings.get_feature_auto_purge_enabled(),
+            "feature_auto_purge": True,
             "llm_enqueue_enabled": settings.get_llm_enqueue_enabled(),
             "interface_debug_enabled": settings.get_interface_debug_enabled(),
             "workflow_execution_mode": settings.get_workflow_execution_mode(),

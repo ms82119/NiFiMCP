@@ -65,8 +65,10 @@ def _convert_mapcomposite_to_dict(value):
             return str(value)
 
 # --- Configuration --- #
-# URL for the FastAPI server
-API_BASE_URL = "http://localhost:8000"
+# URL for the MCP REST API (same server as nifi_mcp_server.server).
+# Set MCP_SERVER_URL to override, or MCP_SERVER_PORT to change port only (e.g. when 8000 is in use).
+_default_port = os.environ.get("MCP_SERVER_PORT", "8000")
+API_BASE_URL = os.environ.get("MCP_SERVER_URL", f"http://localhost:{_default_port}")
 
 # --- Remove All MCP Client, Threading, Asyncio imports and helpers --- #
 # (Imports like ClientSession, stdio_client, websocket_client, McpError, ToolError removed)

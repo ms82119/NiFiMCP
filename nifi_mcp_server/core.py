@@ -214,13 +214,10 @@ def handle_nifi_errors(original_func: Callable[..., Coroutine[Any, Any, Any]]):
                 error_message_lower = error_message.lower()
                 request_logger.warning(f"NiFi operation failed (attempt {attempt}/{max_attempts}): {error_message}")
 
-                # --- Auto-Stop Logic ---
-                request_headers = kwargs.get("request_headers") 
-                is_as_enabled = mcp_settings.get_feature_auto_stop_enabled(headers=request_headers)
-                
+                # --- Auto-Stop Logic (always on) ---
                 local_logger = request_logger # Use the same logger for consistent context
 
-                if (is_as_enabled and
+                if (
                    ("running" in error_message_lower or
                     "must be stopped" in error_message_lower or
                     "has running components" in error_message_lower) and

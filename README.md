@@ -79,6 +79,10 @@ After this I will consider looking into support for more models.  I will say tha
    ```bash
    uvicorn nifi_mcp_server.server:app --reload --port 8000
    ```
+   If port 8000 is in use, set `MCP_SERVER_PORT` and use the same value for `--port` (and for the chat UI, see step 7):
+   ```bash
+   MCP_SERVER_PORT=8001 uvicorn nifi_mcp_server.server:app --reload --port 8001
+   ```
 
 ### Version 2.0+ (Current) - FastAPI/JavaScript Client
 
@@ -86,6 +90,10 @@ After this I will consider looking into support for more models.  I will say tha
    Start the FastAPI client with:
    ```bash
    uvicorn api.main:app --reload --port 3000
+   ```
+   If you ran the MCP server on a different port (e.g. 8001), set the same port for the chat UI so it can reach the API:
+   ```bash
+   MCP_SERVER_PORT=8001 uvicorn api.main:app --reload --port 3000
    ```
 
 8. **Access the Application:**
@@ -105,6 +113,14 @@ After this I will consider looking into support for more models.  I will say tha
 ## Usage Tips
 
 For detailed usage information, tips, and UI features, see the [Usage Guide](./docs/UsageGuide.md).
+
+## Using the NiFi MCP Server in Cursor IDE
+
+You can use the same NiFi MCP tools directly in Cursor (or other MCP clients) over **stdio**, without running the REST server or chat UI. The project includes a stdio entrypoint and a Cursor MCP config.
+
+- **Setup**: Open this project in Cursor; the `.cursor/mcp.json` config will start the NiFi MCP server when Cursor connects. Ensure at least one NiFi server is configured in `config.yaml`.
+- **Server selection**: Set the `NIFI_SERVER_ID` environment variable in the MCP config to a server id from `config.yaml`, or leave it unset to use the first configured server.
+- **Details**: See [Cursor MCP Setup](./docs/Cursor-MCP-Setup.md).
 
 ## Running Automated Tests
 
