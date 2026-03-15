@@ -2096,13 +2096,19 @@ class NiFiClient:
             logger.warning(f"Error deleting flowfile listing request {request_id}: {e}")
             # Don't raise an error here as this is cleanup
 
-    # --- Provenance Query Methods (Processor-based) ---
+    # --- Provenance Query Methods ---
     
     async def submit_provenance_query(self, query_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Submits a provenance query to search for flowfiles.
         
+        Supports search by processor_id and/or flowfile_uuid, with optional time window.
+        
         Args:
-            query_payload: Should contain 'processor_id' and optional 'max_results'
+            query_payload: Must contain at least one of:
+                - processor_id: search events for this processor
+                - flowfile_uuid: search events for this FlowFile UUID (trace one flowfile)
+                Optional: max_results (default 1000), start_date, end_date (NiFi format
+                e.g. "MM/DD/YYYY HH:MM:SS EST").
             
         Returns:
             Dict containing the provenance query details with ID
@@ -2110,27 +2116,35 @@ class NiFiClient:
         if not self._token:
             raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
 
-        # Extract parameters from the query payload
         processor_id = query_payload.get('processor_id')
+        flowfile_uuid = query_payload.get('flowfile_uuid')
         max_results = query_payload.get('max_results', 1000)
+        start_date = query_payload.get('start_date')
+        end_date = query_payload.get('end_date')
         
-        if not processor_id:
-            raise ValueError("processor_id is required for provenance query")
+        if not processor_id and not flowfile_uuid:
+            raise ValueError("At least one of processor_id or flowfile_uuid is required for provenance query")
 
-        # Format the request according to NiFi API requirements
+        search_terms: Dict[str, Any] = {}
+        if processor_id:
+            search_terms["ProcessorID"] = {"value": processor_id, "inverse": False}
+        if flowfile_uuid:
+            search_terms["FlowFileUUID"] = {"value": flowfile_uuid, "inverse": False}
+
+        request_body: Dict[str, Any] = {
+            "maxResults": max_results,
+            "summarize": True,
+            "incrementalResults": False,
+            "searchTerms": search_terms,
+        }
+        if start_date:
+            request_body["startDate"] = start_date
+        if end_date:
+            request_body["endDate"] = end_date
+
         nifi_payload = {
             "provenance": {
-                "request": {
-                    "maxResults": max_results,
-                    "summarize": True,
-                    "incrementalResults": False,
-                    "searchTerms": {
-                        "ProcessorID": {
-                            "value": processor_id,
-                            "inverse": False
-                        }
-                    }
-                }
+                "request": request_body
             }
         }
 
@@ -2138,7 +2152,7 @@ class NiFiClient:
         endpoint = "/provenance"
         
         try:
-            logger.info(f"Submitting provenance query for processor {processor_id}")
+            logger.info(f"Submitting provenance query (processor_id={processor_id!r}, flowfile_uuid={flowfile_uuid!r})")
             response = await client.post(endpoint, json=nifi_payload)
             response.raise_for_status()
             query_response_data = response.json()

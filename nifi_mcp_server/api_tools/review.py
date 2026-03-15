@@ -30,6 +30,8 @@ from nifi_mcp_server.flow_documenter_improved import (
     build_graph_structure,
     find_decision_branches,
     identify_flow_paths,
+    resolve_port_connections,
+    build_cross_pg_flow_map,
 )
 
 # Import context variables
@@ -361,6 +363,53 @@ async def _list_components_recursively_with_timeout(
         "timeout_occurred": False
     }
 
+
+async def _enrich_pg_hierarchy_with_boundary_ports(
+    node: Dict[str, Any],
+    depth: int,
+    nifi_client: NiFiClient,
+    max_depth_for_ports: int = 2,
+) -> Dict[str, Any]:
+    """
+    Recursively enrich process group hierarchy nodes with input_ports, output_ports, and counts.
+    Only enriches nodes at depth <= max_depth_for_ports to avoid excessive API calls.
+    Handles both 'child_process_groups' and 'children' keys; normalizes output to child_process_groups.
+    Preserves existing node keys (e.g. completed, timeout_occurred, continuation_token on root).
+    """
+    node_id = node.get("id")
+    node_name = node.get("name", "Unknown")
+    children_raw = node.get("child_process_groups", node.get("children", []))
+    out = dict(node)
+    out.pop("children", None)
+    out["child_process_groups"] = []
+    if depth <= max_depth_for_ports and node_id:
+        try:
+            input_ports = await nifi_client.get_input_ports(node_id)
+            output_ports = await nifi_client.get_output_ports(node_id)
+            out["input_ports"] = [
+                {"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")}
+                for p in (input_ports or []) if p.get("id")
+            ]
+            out["output_ports"] = [
+                {"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")}
+                for p in (output_ports or []) if p.get("id")
+            ]
+            out["counts"] = await _get_process_group_contents_counts(node_id)
+        except Exception:
+            out["input_ports"] = []
+            out["output_ports"] = []
+            out["counts"] = {}
+    else:
+        out["input_ports"] = []
+        out["output_ports"] = []
+    for child in children_raw:
+        enriched_child = await _enrich_pg_hierarchy_with_boundary_ports(
+            child, depth + 1, nifi_client, max_depth_for_ports
+        )
+        out["child_process_groups"].append(enriched_child)
+    return out
+
+
 async def _get_process_group_hierarchy_with_timeout(
     pg_id: str, 
     recursive_search: bool,
@@ -607,6 +656,7 @@ async def list_nifi_objects(
     search_scope: Literal["current_group", "recursive"] = "current_group",
     timeout_seconds: Optional[float] = None,
     continuation_token: Optional[str] = None,
+    include_boundary_ports: bool = False,
     # mcp_context: dict = {} # Removed context parameter
 ) -> Union[List[Dict], Dict]:
     """
@@ -642,6 +692,10 @@ async def list_nifi_objects(
     continuation_token : Optional[str], optional
         Token from a previous partial result to resume processing from where it left off.
         Format: "process_group_id:depth" or "process_group_id:depth:children".
+    include_boundary_ports : bool, optional
+        When True and object_type is 'process_groups' with search_scope 'recursive', each node
+        in the hierarchy is enriched with input_ports and output_ports (id, name) and optionally
+        counts. Only applied for nodes up to depth 2 to avoid excessive API calls on large trees.
     # Removed mcp_context from docstring
 
     Returns
@@ -719,6 +773,11 @@ async def list_nifi_objects(
                 local_logger.info(f"Finished fetching recursive hierarchy for PG {target_pg_id}")
                 if hierarchy.get("timeout_occurred"):
                     local_logger.warning(f"Hierarchy fetch timed out. Processed {hierarchy.get('processed_count', 0)} groups. Use continuation_token to resume.")
+                if include_boundary_ports:
+                    local_logger.info("Enriching hierarchy with boundary ports and counts (depth <= 2)")
+                    hierarchy = await _enrich_pg_hierarchy_with_boundary_ports(
+                        hierarchy, 0, nifi_client, max_depth_for_ports=2
+                    )
                 return hierarchy
 
         # --- Processor, Connection, Port, Controller Service Handling --- 
@@ -1475,6 +1534,171 @@ async def get_nifi_object_details(
     
     return results
 
+
+async def _document_single_pg(
+    pg_id: str,
+    nifi_client: NiFiClient,
+    include_flow_summary: bool,
+    include_properties: bool,
+    include_descriptions: bool,
+    user_request_id: str,
+    action_id: str,
+) -> Dict[str, Any]:
+    """Document one process group: fetch components, run simplified doc, optionally add flow_summary. Returns dict with process_group_id, process_group_name, documentation."""
+    local_logger = current_request_logger.get() or logger
+    processors_list = await nifi_client.list_processors(pg_id, user_request_id=user_request_id, action_id=action_id)
+    connections_list = await nifi_client.list_connections(pg_id, user_request_id=user_request_id, action_id=action_id)
+    input_ports_list = await nifi_client.get_input_ports(pg_id)
+    output_ports_list = await nifi_client.get_output_ports(pg_id)
+    documentation = await document_nifi_flow_simplified(
+        processors=processors_list or [],
+        connections=connections_list or [],
+        input_ports=input_ports_list or [],
+        output_ports=output_ports_list or [],
+        include_properties=include_properties,
+        include_descriptions=include_descriptions,
+        nifi_client=nifi_client,
+        user_request_id=user_request_id,
+        action_id=action_id,
+    )
+    if include_flow_summary:
+        processors_list = processors_list or []
+        connections_list = connections_list or []
+        input_ports_list = input_ports_list or []
+        output_ports_list = output_ports_list or []
+        has_incoming: Set[str] = set()
+        for conn in connections_list:
+            comp = conn.get("component", {})
+            dest = comp.get("destination", {})
+            dest_id = dest.get("id")
+            if dest_id:
+                has_incoming.add(dest_id)
+        entry_points: List[Dict[str, Any]] = []
+        for proc in processors_list:
+            pid = proc.get("id")
+            if not pid or pid in has_incoming:
+                continue
+            comp = proc.get("component", {})
+            ptype = comp.get("type", "") or ""
+            name = comp.get("name", "Unknown")
+            kind = "HTTP_ENTRY" if ("HandleHttpRequest" in ptype or "ListenHTTP" in ptype or "InvokeHTTP" in ptype) else "PROCESSOR"
+            entry_points.append({"id": pid, "name": name, "type": "PROCESSOR", "kind": kind})
+        for port in input_ports_list:
+            pid = port.get("id")
+            if not pid or pid in has_incoming:
+                continue
+            comp = port.get("component", {})
+            entry_points.append({"id": pid, "name": comp.get("name", "Unknown"), "type": "INPUT_PORT", "kind": "INPUT_PORT"})
+        controller_services: List[Dict[str, Any]] = []
+        try:
+            cs_list = await nifi_client.list_controller_services(pg_id, user_request_id=user_request_id, action_id=action_id)
+            for cs in (cs_list or []):
+                ccomp = cs.get("component", {})
+                controller_services.append({"id": cs.get("id"), "name": ccomp.get("name", ""), "state": ccomp.get("state", "")})
+        except Exception as e:
+            local_logger.warning(f"Could not list controller services for flow summary: {e}")
+        all_components: Dict[str, Any] = {}
+        for p in processors_list:
+            if p.get("id"):
+                all_components[p["id"]] = p
+        for port in input_ports_list + output_ports_list:
+            if port.get("id"):
+                all_components[port["id"]] = port
+        components_for_paths: Dict[str, Dict[str, Any]] = {}
+        for p in processors_list:
+            c = p.get("component", {})
+            if p.get("id"):
+                components_for_paths[p["id"]] = {"type": c.get("type", "PROCESSOR"), "name": c.get("name", "Unknown")}
+        for port in input_ports_list:
+            c = port.get("component", {})
+            if port.get("id"):
+                components_for_paths[port["id"]] = {"type": "INPUT_PORT", "name": c.get("name", "Unknown")}
+        for port in output_ports_list:
+            c = port.get("component", {})
+            if port.get("id"):
+                components_for_paths[port["id"]] = {"type": "OUTPUT_PORT", "name": c.get("name", "Unknown")}
+        source_components = [{"id": ep["id"], "name": ep["name"], "type": ep["type"]} for ep in entry_points]
+        graph_data = build_graph_structure(processors_list, connections_list, input_ports_list, output_ports_list)
+        decision_branches = find_decision_branches(all_components, graph_data)
+        flow_paths = identify_flow_paths(components_for_paths, graph_data, source_components)
+        boundary_ports = {
+            "input_ports": [{"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")} for p in input_ports_list if p.get("id")],
+            "output_ports": [{"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")} for p in output_ports_list if p.get("id")],
+        }
+        pg_ids_set: Set[str] = {pg_id}
+        for conn in connections_list:
+            comp = conn.get("component", {})
+            for endpoint in (comp.get("source"), comp.get("destination")):
+                if endpoint and endpoint.get("groupId"):
+                    pg_ids_set.add(endpoint["groupId"])
+        process_groups_map: Dict[str, Dict[str, Any]] = {}
+        for pid in pg_ids_set:
+            try:
+                process_groups_map[pid] = {"id": pid, "name": await _get_process_group_name(pid)}
+            except Exception:
+                process_groups_map[pid] = {"id": pid, "name": f"Unknown ({pid})"}
+        enriched_connections = await resolve_port_connections(
+            connections_list, process_groups_map, nifi_client,
+            user_request_id=user_request_id, action_id=action_id
+        )
+        cross_pg_connections = [
+            {
+                "connection_id": c.get("id"),
+                "source_pg_name": c.get("source_pg_name"),
+                "dest_pg_name": c.get("dest_pg_name"),
+                "cross_pg": c.get("cross_pg", False),
+                "source_type": (c.get("component") or {}).get("source", {}).get("type"),
+                "dest_type": (c.get("component") or {}).get("destination", {}).get("type"),
+            }
+            for c in enriched_connections
+            if c.get("cross_pg") or (c.get("source_pg_name") or c.get("dest_pg_name"))
+        ]
+        cross_pg_flow_map = build_cross_pg_flow_map(process_groups_map, enriched_connections)
+        documentation["flow_summary"] = {
+            "entry_points": entry_points,
+            "controller_services": controller_services,
+            "decision_branches": decision_branches,
+            "flow_paths": flow_paths,
+            "boundary_ports": boundary_ports,
+            "cross_pg_connections": cross_pg_connections,
+            "cross_pg_flow_map": cross_pg_flow_map,
+        }
+    return {
+        "process_group_id": pg_id,
+        "process_group_name": await _get_process_group_name(pg_id),
+        "documentation": documentation,
+    }
+
+
+async def _document_child_groups_recursive(
+    doc_dict: Dict[str, Any],
+    nifi_client: NiFiClient,
+    include_flow_summary: bool,
+    include_properties: bool,
+    include_descriptions: bool,
+    user_request_id: str,
+    action_id: str,
+    depth_left: int,
+) -> Dict[str, Any]:
+    """Add child_groups to a document result by recursing into child PGs up to depth_left."""
+    if depth_left <= 0:
+        return doc_dict
+    pg_id = doc_dict.get("process_group_id")
+    if not pg_id:
+        return doc_dict
+    children = await nifi_client.get_process_groups(pg_id)
+    child_groups = []
+    for child_entity in (children or []):
+        child_id = child_entity.get("id")
+        if not child_id:
+            continue
+        child_doc = await _document_single_pg(child_id, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id)
+        child_doc = await _document_child_groups_recursive(child_doc, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id, depth_left - 1)
+        child_groups.append(child_doc)
+    doc_dict["child_groups"] = child_groups
+    return doc_dict
+
+
 @mcp.tool()
 @tool_phases(["Review", "Build", "Modify", "Operate"])
 async def document_nifi_flow(
@@ -1484,40 +1708,47 @@ async def document_nifi_flow(
     include_properties: bool = True,
     include_descriptions: bool = True,
     include_flow_summary: bool = True,
+    include_child_groups: bool = False,
 ) -> Dict[str, Any]:
     """
     Analyzes and documents a NiFi flow starting from a given process group or processor.
 
     This tool extracts processor information with embedded connection details, providing
-    a simplified and token-efficient representation of the flow structure. When
+    a simplified and token-efficient representation of the flow structure.     When
     include_flow_summary is True, also adds flow_summary with entry_points, controller_services,
-    decision_branches, flow_paths, and boundary_ports.
+    decision_branches, flow_paths, boundary_ports, cross_pg_connections, and cross_pg_flow_map.
+    When include_child_groups is True, recurses into child process groups up to max_depth and
+    returns child_groups (each with the same structure: process_group_id, process_group_name,
+    documentation, child_groups).
 
     Parameters
     ----------
     process_group_id : str, optional
-        The ID of the process group to start documentation from. If None, `starting_processor_id` must be provided, and the tool will start from that processor's parent group.
+        The ID of the process group to start documentation from. If None, `starting_processor_id` must be provided, or the root group is used.
     starting_processor_id : str, optional
         The ID of a specific processor to focus the documentation around. The tool will analyze the flow connected to this processor within its parent group.
     max_depth : int, optional
-        DEPRECATED: This parameter is kept for compatibility but is not used in the simplified implementation.
+        When include_child_groups is True, maximum depth of child process groups to document (default 10). Ignored when include_child_groups is False.
     include_properties : bool, optional
         Whether to include important processor properties in the documentation. Defaults to True.
     include_descriptions : bool, optional
         Whether to include processor and connection descriptions/comments (if available). Defaults to True.
     include_flow_summary : bool, optional
         When True (default), adds documentation.flow_summary with entry_points, controller_services,
-        decision_branches, flow_paths, and boundary_ports for LLM-friendly flow structure.
+        decision_branches, flow_paths, boundary_ports, cross_pg_connections, cross_pg_flow_map.
+    include_child_groups : bool, optional
+        When True, document descendant process groups and attach as child_groups (nested). Default False.
 
     Returns
     -------
     Dict[str, Any]
+        status, process_group_id, process_group_name, documentation (and child_groups when include_child_groups is True).
         A dictionary containing the documented flow with simplified structure:
         - 'components': Dictionary containing:
             - 'processors': Dict of processors with embedded incoming/outgoing connection info
             - 'ports': Dict of input/output ports
         - 'flow_summary' (when include_flow_summary=True): entry_points, controller_services,
-          decision_branches, flow_paths, boundary_ports
+          decision_branches, flow_paths, boundary_ports, cross_pg_connections, cross_pg_flow_map
         Each processor includes:
         - Basic info (id, name, type, state, properties, description)
         - 'outgoing_connections': List of connections where this processor is the source
@@ -1537,19 +1768,13 @@ async def document_nifi_flow(
     user_request_id = current_user_request_id.get() or "-"
     action_id = current_action_id.get() or "-"
     
-    local_logger.info(f"Starting NiFi flow documentation. PG: {process_group_id}, Start Proc: {starting_processor_id}, Max Depth: {max_depth}")
+    local_logger.info(f"Starting NiFi flow documentation. PG: {process_group_id}, Start Proc: {starting_processor_id}, include_child_groups: {include_child_groups}, max_depth: {max_depth}")
 
     try:
-        # Determine the target process group ID
         pg_id = process_group_id
         if starting_processor_id and not pg_id:
             local_logger.info(f"No process_group_id provided, finding parent group for starting processor {starting_processor_id}")
-            nifi_req = {"operation": "get_processor_details", "id": starting_processor_id}
-            local_logger.bind(interface="nifi", direction="request", data=nifi_req).debug("Calling NiFi API")
             proc_details = await nifi_client.get_processor_details(starting_processor_id)
-            nifi_resp = {"has_proc_details": bool(proc_details and 'component' in proc_details)}
-            local_logger.bind(interface="nifi", direction="response", data=nifi_resp).debug("Received from NiFi API")
-            
             pg_id = proc_details.get("component", {}).get("parentGroupId")
             if not pg_id:
                 raise ToolError(f"Could not determine parent process group ID for processor {starting_processor_id}")
@@ -1558,127 +1783,22 @@ async def document_nifi_flow(
             local_logger.info("No process_group_id or starting_processor_id provided, defaulting to root process group.")
             pg_id = await nifi_client.get_root_process_group_id(user_request_id=user_request_id, action_id=action_id)
             if not pg_id:
-                 raise ToolError("Could not retrieve the root process group ID.")
+                raise ToolError("Could not retrieve the root process group ID.")
             local_logger.info(f"Resolved root process group ID: {pg_id}")
-            
         if not pg_id:
-             raise ToolError("Failed to determine a target process group ID for documentation.")
+            raise ToolError("Failed to determine a target process group ID for documentation.")
 
-        # Fetch components for the target process group
-        local_logger.info(f"Fetching components for process group {pg_id}...")
-        nifi_req_components = {"operation": "list_all", "process_group_id": pg_id}
-        local_logger.bind(interface="nifi", direction="request", data=nifi_req_components).debug("Calling NiFi API (multiple calls)")
-        
-        processors_list = await nifi_client.list_processors(pg_id, user_request_id=user_request_id, action_id=action_id)
-        connections_list = await nifi_client.list_connections(pg_id, user_request_id=user_request_id, action_id=action_id)
-        input_ports_list = await nifi_client.get_input_ports(pg_id)
-        output_ports_list = await nifi_client.get_output_ports(pg_id)
-        
-        nifi_resp_components = {
-            "processor_count": len(processors_list) if isinstance(processors_list, list) else -1,
-            "connection_count": len(connections_list) if isinstance(connections_list, list) else -1,
-            "port_count": len(input_ports_list) if isinstance(input_ports_list, list) else -1,
-            "output_port_count": len(output_ports_list) if isinstance(output_ports_list, list) else -1,
-        }
-        local_logger.bind(interface="nifi", direction="response", data=nifi_resp_components).debug("Received from NiFi API (multiple component lists)")
-
-        # Use the simplified documentation function that embeds connections in processors
-        documentation = await document_nifi_flow_simplified(
-            processors=processors_list or [],
-            connections=connections_list or [],
-            input_ports=input_ports_list or [],
-            output_ports=output_ports_list or [],
-            include_properties=include_properties,
-            include_descriptions=include_descriptions,
-            nifi_client=nifi_client,  # Pass the client for detailed processor info
-            user_request_id=user_request_id,
-            action_id=action_id
-        )
-
-        if include_flow_summary:
-            processors_list = processors_list or []
-            connections_list = connections_list or []
-            input_ports_list = input_ports_list or []
-            output_ports_list = output_ports_list or []
-            # Build set of component ids that have incoming connections
-            has_incoming: Set[str] = set()
-            for conn in connections_list:
-                comp = conn.get("component", {})
-                dest = comp.get("destination", {})
-                dest_id = dest.get("id")
-                if dest_id:
-                    has_incoming.add(dest_id)
-            # Entry points: processors and input ports with no incoming connections
-            entry_points: List[Dict[str, Any]] = []
-            for proc in processors_list:
-                pid = proc.get("id")
-                if not pid or pid in has_incoming:
-                    continue
-                comp = proc.get("component", {})
-                ptype = comp.get("type", "") or ""
-                name = comp.get("name", "Unknown")
-                if "HandleHttpRequest" in ptype or "ListenHTTP" in ptype or "InvokeHTTP" in ptype:
-                    kind = "HTTP_ENTRY"
-                else:
-                    kind = "PROCESSOR"
-                entry_points.append({"id": pid, "name": name, "type": "PROCESSOR", "kind": kind})
-            for port in input_ports_list:
-                pid = port.get("id")
-                if not pid or pid in has_incoming:
-                    continue
-                comp = port.get("component", {})
-                entry_points.append({"id": pid, "name": comp.get("name", "Unknown"), "type": "INPUT_PORT", "kind": "INPUT_PORT"})
-            # Controller services
-            controller_services: List[Dict[str, Any]] = []
-            try:
-                cs_list = await nifi_client.list_controller_services(pg_id, user_request_id=user_request_id, action_id=action_id)
-                for cs in (cs_list or []):
-                    ccomp = cs.get("component", {})
-                    controller_services.append({"id": cs.get("id"), "name": ccomp.get("name", ""), "state": ccomp.get("state", "")})
-            except Exception as e:
-                local_logger.warning(f"Could not list controller services for flow summary: {e}")
-            # all_components: id -> full entity (for find_decision_branches)
-            all_components: Dict[str, Any] = {}
-            for p in processors_list:
-                if p.get("id"):
-                    all_components[p["id"]] = p
-            for port in input_ports_list + output_ports_list:
-                if port.get("id"):
-                    all_components[port["id"]] = port
-            # components: id -> { type, name } for identify_flow_paths
-            components_for_paths: Dict[str, Dict[str, Any]] = {}
-            for p in processors_list:
-                c = p.get("component", {})
-                if p.get("id"):
-                    components_for_paths[p["id"]] = {"type": c.get("type", "PROCESSOR"), "name": c.get("name", "Unknown")}
-            for port in input_ports_list:
-                c = port.get("component", {})
-                if port.get("id"):
-                    components_for_paths[port["id"]] = {"type": "INPUT_PORT", "name": c.get("name", "Unknown")}
-            for port in output_ports_list:
-                c = port.get("component", {})
-                if port.get("id"):
-                    components_for_paths[port["id"]] = {"type": "OUTPUT_PORT", "name": c.get("name", "Unknown")}
-            source_components = [{"id": ep["id"], "name": ep["name"], "type": ep["type"]} for ep in entry_points]
-            graph_data = build_graph_structure(processors_list, connections_list, input_ports_list, output_ports_list)
-            decision_branches = find_decision_branches(all_components, graph_data)
-            flow_paths = identify_flow_paths(components_for_paths, graph_data, source_components)
-            boundary_ports = {
-                "input_ports": [{"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")} for p in input_ports_list if p.get("id")],
-                "output_ports": [{"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")} for p in output_ports_list if p.get("id")],
-            }
-            documentation["flow_summary"] = {
-                "entry_points": entry_points,
-                "controller_services": controller_services,
-                "decision_branches": decision_branches,
-                "flow_paths": flow_paths,
-                "boundary_ports": boundary_ports,
-            }
+        root = await _document_single_pg(pg_id, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id)
+        if include_child_groups and max_depth > 0:
+            root = await _document_child_groups_recursive(root, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id, max_depth)
 
         local_logger.info("Flow documentation analysis complete.")
         return {
             "status": "success",
-            "documentation": documentation
+            "process_group_id": root["process_group_id"],
+            "process_group_name": root["process_group_name"],
+            "documentation": root["documentation"],
+            "child_groups": root.get("child_groups", []),
         }
 
     except NiFiAuthenticationError as e:
@@ -1913,12 +2033,256 @@ async def get_flow_outline(
         raise ToolError(f"An unexpected error occurred: {e}") from e
 
 
+async def _get_single_pg_status(
+    nifi_client: NiFiClient,
+    target_pg_id: str,
+    include_bulletins: bool,
+    bulletin_limit: int,
+    user_request_id: str,
+    action_id: str,
+) -> Dict[str, Any]:
+    """Compute status for a single process group. Used by get_process_group_status and its recursion."""
+    local_logger = current_request_logger.get() or logger
+    local_logger = local_logger.bind(process_group_id=target_pg_id)
+    results = {
+        "process_group_id": target_pg_id,
+        "process_group_name": await _get_process_group_name(target_pg_id),
+        "component_summary": {
+            "processors": {"total": 0, "running": 0, "stopped": 0, "invalid": 0, "disabled": 0},
+            "input_ports": {"total": 0, "running": 0, "stopped": 0, "invalid": 0, "disabled": 0},
+            "output_ports": {"total": 0, "running": 0, "stopped": 0, "invalid": 0, "disabled": 0},
+        },
+        "invalid_components": [],
+        "queue_summary": {
+            "total_queued_count": 0,
+            "total_queued_size_bytes": 0,
+            "total_queued_size_human": "0 B",
+            "connections_with_data": []
+        },
+        "bulletins": []
+    }
+    # --- Step 1: Get Components (Processors, Connections, Ports) ---
+    local_logger.info("Fetching components (processors, connections, ports)...")
+    tasks = {
+        "processors": nifi_client.list_processors(target_pg_id, user_request_id=user_request_id, action_id=action_id),
+        "connections": nifi_client.list_connections(target_pg_id, user_request_id=user_request_id, action_id=action_id),
+        "input_ports": nifi_client.get_input_ports(target_pg_id),
+        "output_ports": nifi_client.get_output_ports(target_pg_id)
+    }
+    nifi_req = {"operation": "list_components", "process_group_id": target_pg_id}
+    local_logger.bind(interface="nifi", direction="request", data=nifi_req).debug("Calling NiFi API (multiple component lists)")
+    component_responses = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    processors_resp, connections_resp, input_ports_resp, output_ports_resp = component_responses
+    nifi_resp = {
+        "processor_count": len(processors_resp) if isinstance(processors_resp, list) else -1,
+        "connection_count": len(connections_resp) if isinstance(connections_resp, list) else -1,
+        "input_port_count": len(input_ports_resp) if isinstance(input_ports_resp, list) else -1,
+        "output_port_count": len(output_ports_resp) if isinstance(output_ports_resp, list) else -1,
+    }
+    local_logger.bind(interface="nifi", direction="response", data=nifi_resp).debug("Received from NiFi API (multiple component lists)")
+    if isinstance(processors_resp, Exception): local_logger.error(f"Error listing processors: {processors_resp}"); processors_resp = []
+    if isinstance(connections_resp, Exception):
+        error_msg = str(connections_resp) or repr(connections_resp) or "Unknown error"
+        local_logger.error(f"Error listing connections: {error_msg}")
+        connections_resp = []
+    if isinstance(input_ports_resp, Exception): local_logger.error(f"Error listing input ports: {input_ports_resp}"); input_ports_resp = []
+    if isinstance(output_ports_resp, Exception): local_logger.error(f"Error listing output ports: {output_ports_resp}"); output_ports_resp = []
+    # --- Step 2: Process Components for Status and Validation ---
+    local_logger.info("Processing component statuses...")
+    comp_summary = results["component_summary"]
+    invalid_list = results["invalid_components"]
+    for proc in processors_resp:
+        comp = proc.get("component", {})
+        state = comp.get("state", "UNKNOWN").lower()
+        comp_summary["processors"]["total"] += 1
+        if state in comp_summary["processors"]: comp_summary["processors"][state] += 1
+        validation_status = comp.get("validationStatus", "UNKNOWN")
+        if validation_status == "INVALID":
+            invalid_list.append({
+                "id": proc.get("id"),
+                "name": comp.get("name"),
+                "type": "processor",
+                "validation_status": validation_status,
+                "validation_errors": comp.get("validationErrors", [])
+            })
+    for port in input_ports_resp:
+        comp = port.get("component", {})
+        state = comp.get("state", "UNKNOWN").lower()
+        comp_summary["input_ports"]["total"] += 1
+        if state in comp_summary["input_ports"]: comp_summary["input_ports"][state] += 1
+        validation_status = comp.get("validationStatus", "UNKNOWN")
+        if validation_status == "INVALID":
+            invalid_list.append({
+                "id": port.get("id"),
+                "name": comp.get("name"),
+                "type": "input_port",
+                "validation_status": validation_status,
+                "validation_errors": comp.get("validationErrors", [])
+            })
+    for port in output_ports_resp:
+        comp = port.get("component", {})
+        state = comp.get("state", "UNKNOWN").lower()
+        comp_summary["output_ports"]["total"] += 1
+        if state in comp_summary["output_ports"]: comp_summary["output_ports"][state] += 1
+        validation_status = comp.get("validationStatus", "UNKNOWN")
+        if validation_status == "INVALID":
+            invalid_list.append({
+                "id": port.get("id"),
+                "name": comp.get("name"),
+                "type": "output_port",
+                "validation_status": validation_status,
+                "validation_errors": comp.get("validationErrors", [])
+            })
+    # --- Step 3: Get Queue Status for Connections ---
+    local_logger.info("Fetching connection queue statuses via process group snapshot...")
+    queue_summary = results["queue_summary"]
+    nifi_req_q = {"operation": "get_process_group_status_snapshot", "process_group_id": target_pg_id}
+    local_logger.bind(interface="nifi", direction="request", data=nifi_req_q).debug("Calling NiFi API")
+    group_status_snapshot = {}
+    try:
+        group_status_snapshot = await nifi_client.get_process_group_status_snapshot(target_pg_id)
+        local_logger.bind(interface="nifi", direction="response", data={"has_snapshot": bool(group_status_snapshot)}).debug("Received from NiFi API")
+    except (ConnectionError, ValueError, NiFiAuthenticationError) as status_err:
+        local_logger.error(f"Failed to get process group status snapshot for queue summary: {status_err}")
+        group_status_snapshot = {}
+    except Exception as status_exc:
+        local_logger.error(f"Unexpected error getting process group status snapshot: {status_exc}", exc_info=True)
+        group_status_snapshot = {}
+    connection_snapshots = group_status_snapshot.get("aggregateSnapshot", {}).get("connectionStatusSnapshots", [])
+    local_logger.debug(f"Processing {len(connection_snapshots)} connection snapshots from group status.")
+    connections_map = {conn.get("id"): conn for conn in connections_resp if conn.get("id")}
+    for snapshot_entity in connection_snapshots:
+        snapshot_data = snapshot_entity.get("connectionStatusSnapshot")
+        if not snapshot_data:
+            continue
+        conn_id = snapshot_data.get("id")
+        if not conn_id:
+            continue
+        queued_count = int(snapshot_data.get("flowFilesQueued", 0))
+        queued_bytes = int(snapshot_data.get("bytesQueued", 0))
+        conn_info = connections_map.get(conn_id, {})
+        conn_component = conn_info.get("component", {})
+        conn_name = conn_component.get("name", "")
+        source_name = conn_component.get("source", {}).get("name", "Unknown Source")
+        dest_name = conn_component.get("destination", {}).get("name", "Unknown Destination")
+        if queued_count > 0:
+            queue_summary["total_queued_count"] += queued_count
+            queue_summary["total_queued_size_bytes"] += queued_bytes
+            queue_summary["connections_with_data"].append({
+                "id": conn_id,
+                "name": conn_name,
+                "sourceName": source_name,
+                "destName": dest_name,
+                "queued_count": queued_count,
+                "queued_size_bytes": queued_bytes,
+                "queued_size_human": snapshot_data.get("queuedSize", "0 B")
+            })
+    total_bytes = queue_summary["total_queued_size_bytes"]
+    if total_bytes < 1024:
+        queue_summary["total_queued_size_human"] = f"{total_bytes} B"
+    elif total_bytes < 1024**2:
+        queue_summary["total_queued_size_human"] = f"{total_bytes/1024:.1f} KB"
+    elif total_bytes < 1024**3:
+        queue_summary["total_queued_size_human"] = f"{total_bytes/(1024**2):.1f} MB"
+    else:
+        queue_summary["total_queued_size_human"] = f"{total_bytes/(1024**3):.1f} GB"
+    # --- Step 4: Get Bulletins (if requested) ---
+    if include_bulletins:
+        local_logger.info(f"Fetching bulletins (limit {bulletin_limit})...")
+        try:
+            bulletins = await nifi_client.get_bulletin_board(group_id=target_pg_id, limit=bulletin_limit)
+            results["bulletins"] = bulletins
+        except Exception as e:
+            local_logger.error(f"Failed to fetch bulletins: {e}")
+            results["bulletins"] = [{"error": f"Failed to fetch bulletins: {e}"}]
+    else:
+        results["bulletins"] = None
+    # --- Step 5: Health verdict and bulletin summary ---
+    invalid_list = results["invalid_components"]
+    bulletins_list = results["bulletins"] if isinstance(results["bulletins"], list) else []
+    count_by_level = {"ERROR": 0, "WARNING": 0, "INFO": 0}
+    last_errors = []
+    for item in bulletins_list:
+        if isinstance(item, dict) and "error" in item:
+            continue
+        b_data = item.get("bulletin", item) if isinstance(item, dict) else {}
+        level = (b_data.get("level") or "").upper()
+        if level in count_by_level:
+            count_by_level[level] += 1
+        if level == "ERROR":
+            last_errors.append({
+                "message": b_data.get("message", ""),
+                "source_id": b_data.get("sourceId"),
+                "source_name": b_data.get("sourceName"),
+                "timestamp": b_data.get("timestamp"),
+                "category": b_data.get("category"),
+            })
+    last_errors = last_errors[:10]
+    results["bulletin_summary"] = {
+        "count_by_level": count_by_level,
+        "last_errors": last_errors,
+    } if include_bulletins and not any(isinstance(x, dict) and x.get("error") for x in bulletins_list) else None
+    has_invalid = len(invalid_list) > 0
+    has_error_bulletins = count_by_level["ERROR"] > 0
+    comp_summary = results["component_summary"]
+    stopped_processors = comp_summary["processors"].get("stopped", 0)
+    stopped_ports = comp_summary["input_ports"].get("stopped", 0) + comp_summary["output_ports"].get("stopped", 0)
+    conns_with_data = len(queue_summary["connections_with_data"])
+    has_degraded = (stopped_processors + stopped_ports > 0 or (queue_summary["total_queued_count"] > 0 and conns_with_data > 5)) and not has_invalid and not has_error_bulletins
+    if has_invalid or has_error_bulletins:
+        reasons = []
+        if has_invalid:
+            reasons.append(f"{len(invalid_list)} invalid component(s)")
+        if has_error_bulletins:
+            reasons.append(f"{count_by_level['ERROR']} ERROR bulletin(s)")
+        results["health"] = "errors"
+        results["health_reason"] = "; ".join(reasons)
+    elif has_degraded:
+        results["health"] = "degraded"
+        results["health_reason"] = "Stopped components or elevated queue backpressure"
+    else:
+        results["health"] = "healthy"
+        results["health_reason"] = None
+    local_logger.info("Process group status overview fetch complete.")
+    return results
+
+
+async def _add_child_groups_recursive(
+    status_dict: Dict[str, Any],
+    nifi_client: NiFiClient,
+    include_bulletins: bool,
+    bulletin_limit: int,
+    user_request_id: str,
+    action_id: str,
+    depth_left: int,
+) -> Dict[str, Any]:
+    """Add child_groups to a status dict by recursing into child PGs up to depth_left."""
+    if depth_left <= 0:
+        return status_dict
+    pg_id = status_dict.get("process_group_id")
+    if not pg_id:
+        return status_dict
+    children = await nifi_client.get_process_groups(pg_id)
+    child_groups = []
+    for child_entity in (children or []):
+        child_id = child_entity.get("id")
+        if not child_id:
+            continue
+        child_status = await _get_single_pg_status(nifi_client, child_id, include_bulletins, bulletin_limit, user_request_id, action_id)
+        child_status = await _add_child_groups_recursive(child_status, nifi_client, include_bulletins, bulletin_limit, user_request_id, action_id, depth_left - 1)
+        child_groups.append(child_status)
+    status_dict["child_groups"] = child_groups
+    return status_dict
+
+
 @mcp.tool()
 @tool_phases(["Review", "Operate"])
 async def get_process_group_status(
     process_group_id: str | None = None,
     include_bulletins: bool = True,
     bulletin_limit: int = 20,
+    include_child_groups: bool = False,
+    max_depth: int = 10,
 ) -> Dict[str, Any]:
     """
     Provides a consolidated status overview of a process group.
@@ -1927,308 +2291,55 @@ async def get_process_group_status(
     a health verdict (healthy / errors / degraded), optional bulletin summary, and
     optionally recent bulletins for the group.
 
+    When include_child_groups is True, recurses into child process groups up to max_depth
+    and attaches child_groups (each with the same structure) and child_health_summary
+    (counts of healthy/errors/degraded across all descendants).
+
     Args:
         process_group_id: The ID of the target process group. Defaults to root if None.
         include_bulletins: Whether to fetch and include bulletins specific to this group.
         bulletin_limit: Max number of bulletins to fetch if include_bulletins is True.
+        include_child_groups: If True, include status for descendant process groups (child_groups).
+        max_depth: When include_child_groups is True, maximum depth of child groups to include (default 10).
 
     Returns:
         A dictionary with: process_group_id, process_group_name, component_summary,
-        invalid_components, queue_summary, bulletins (if requested), health
-        ("healthy" | "errors" | "degraded"), health_reason (str or None), and
-        bulletin_summary (when include_bulletins=True): count_by_level (ERROR/WARNING/INFO),
-        last_errors (up to 10 with message, source_id, source_name, timestamp, category).
+        invalid_components, queue_summary, bulletins (if requested), health,
+        health_reason, bulletin_summary; when include_child_groups is True also
+        child_groups (list of same structure) and child_health_summary (healthy/errors/degraded counts).
     """
-    # Get client, logger, and context IDs
     nifi_client: Optional[NiFiClient] = current_nifi_client.get()
     local_logger = current_request_logger.get() or logger
     user_request_id = current_user_request_id.get() or "-"
     action_id = current_action_id.get() or "-"
-
     if not nifi_client:
         raise ToolError("NiFi client not found in context.")
-
     local_logger = local_logger.bind(pg_id_param=process_group_id, include_bulletins=include_bulletins)
     local_logger.info("Getting process group status overview.")
-
-    results = {
-        "process_group_id": None,
-        "process_group_name": "Unknown",
-        "component_summary": {
-            "processors": {"total": 0, "running": 0, "stopped": 0, "invalid": 0, "disabled": 0},
-            "input_ports": {"total": 0, "running": 0, "stopped": 0, "invalid": 0, "disabled": 0},
-            "output_ports": {"total": 0, "running": 0, "stopped": 0, "invalid": 0, "disabled": 0},
-        },
-        "invalid_components": [],
-        "queue_summary": {
-             "total_queued_count": 0,
-             "total_queued_size_bytes": 0,
-             "total_queued_size_human": "0 B",
-             "connections_with_data": []
-        },
-        "bulletins": []
-    }
-
+    target_pg_id = process_group_id
+    if not target_pg_id:
+        local_logger.info("process_group_id not provided, resolving root.")
+        target_pg_id = await nifi_client.get_root_process_group_id(user_request_id=user_request_id, action_id=action_id)
+        local_logger.info(f"Resolved root process group ID: {target_pg_id}")
     try:
-        # --- Step 0: Resolve PG ID and Name ---
-        target_pg_id = process_group_id
-        if not target_pg_id:
-            local_logger.info("process_group_id not provided, resolving root.")
-            target_pg_id = await nifi_client.get_root_process_group_id(user_request_id=user_request_id, action_id=action_id)
-            local_logger.info(f"Resolved root process group ID: {target_pg_id}")
-        # Use same helper for root and non-root so name matches get_flow_outline (e.g. "NiFi Flow")
-        results["process_group_name"] = await _get_process_group_name(target_pg_id)
-        
-        results["process_group_id"] = target_pg_id
-        local_logger = local_logger.bind(process_group_id=target_pg_id) # Bind resolved ID
+        results = await _get_single_pg_status(nifi_client, target_pg_id, include_bulletins, bulletin_limit, user_request_id, action_id)
+        if include_child_groups and max_depth > 0:
+            results = await _add_child_groups_recursive(results, nifi_client, include_bulletins, bulletin_limit, user_request_id, action_id, max_depth)
+            summary = {"healthy": 0, "errors": 0, "degraded": 0}
 
-        # --- Step 1: Get Components (Processors, Connections, Ports) ---
-        local_logger.info("Fetching components (processors, connections, ports)...")
-        # Use asyncio.gather for concurrency
-        tasks = {
-            "processors": nifi_client.list_processors(target_pg_id, user_request_id=user_request_id, action_id=action_id),
-            "connections": nifi_client.list_connections(target_pg_id, user_request_id=user_request_id, action_id=action_id),
-            "input_ports": nifi_client.get_input_ports(target_pg_id),
-            "output_ports": nifi_client.get_output_ports(target_pg_id)
-        }
-        # Log the request details (simplified)
-        nifi_req = {"operation": "list_components", "process_group_id": target_pg_id}
-        local_logger.bind(interface="nifi", direction="request", data=nifi_req).debug("Calling NiFi API (multiple component lists)")
-        
-        component_responses = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        
-        processors_resp, connections_resp, input_ports_resp, output_ports_resp = component_responses
-        
-        # Log the response details (simplified)
-        nifi_resp = {
-            "processor_count": len(processors_resp) if isinstance(processors_resp, list) else -1,
-            "connection_count": len(connections_resp) if isinstance(connections_resp, list) else -1,
-            "input_port_count": len(input_ports_resp) if isinstance(input_ports_resp, list) else -1,
-            "output_port_count": len(output_ports_resp) if isinstance(output_ports_resp, list) else -1,
-        }
-        local_logger.bind(interface="nifi", direction="response", data=nifi_resp).debug("Received from NiFi API (multiple component lists)")
+            def count_health(d: Dict[str, Any]) -> None:
+                h = d.get("health", "healthy")
+                if h in summary:
+                    summary[h] += 1
+                for ch in d.get("child_groups", []):
+                    count_health(ch)
 
-        # Handle potential errors from gather
-        if isinstance(processors_resp, Exception): local_logger.error(f"Error listing processors: {processors_resp}"); processors_resp = []
-        if isinstance(connections_resp, Exception): 
-            error_msg = str(connections_resp) or repr(connections_resp) or "Unknown error"
-            local_logger.error(f"Error listing connections: {error_msg}")
-            connections_resp = []
-        if isinstance(input_ports_resp, Exception): local_logger.error(f"Error listing input ports: {input_ports_resp}"); input_ports_resp = []
-        if isinstance(output_ports_resp, Exception): local_logger.error(f"Error listing output ports: {output_ports_resp}"); output_ports_resp = []
-        
-        # --- Step 2: Process Components for Status and Validation ---
-        local_logger.info("Processing component statuses...")
-        comp_summary = results["component_summary"]
-        invalid_list = results["invalid_components"]
-
-        for proc in processors_resp:
-            comp = proc.get("component", {})
-            state = comp.get("state", "UNKNOWN").lower()
-            comp_summary["processors"]["total"] += 1
-            if state in comp_summary["processors"]: comp_summary["processors"][state] += 1
-            # --- Updated Condition ---
-            validation_status = comp.get("validationStatus", "UNKNOWN") # Get the status
-            if validation_status == "INVALID": # Check specifically for INVALID
-                invalid_list.append({
-                    "id": proc.get("id"),
-                    "name": comp.get("name"),
-                    "type": "processor",
-                    "validation_status": validation_status, # Include the status
-                    "validation_errors": comp.get("validationErrors", [])
-                })
-
-        for port in input_ports_resp:
-            comp = port.get("component", {})
-            state = comp.get("state", "UNKNOWN").lower()
-            comp_summary["input_ports"]["total"] += 1
-            if state in comp_summary["input_ports"]: comp_summary["input_ports"][state] += 1
-            # --- Updated Condition ---
-            validation_status = comp.get("validationStatus", "UNKNOWN") # Get the status
-            if validation_status == "INVALID": # Check specifically for INVALID
-                invalid_list.append({
-                    "id": port.get("id"),
-                    "name": comp.get("name"),
-                    "type": "input_port",
-                    "validation_status": validation_status, # Include the status
-                    "validation_errors": comp.get("validationErrors", [])
-                })
-
-        for port in output_ports_resp:
-            comp = port.get("component", {})
-            state = comp.get("state", "UNKNOWN").lower()
-            comp_summary["output_ports"]["total"] += 1
-            if state in comp_summary["output_ports"]: comp_summary["output_ports"][state] += 1
-            # --- Updated Condition ---
-            validation_status = comp.get("validationStatus", "UNKNOWN") # Get the status
-            if validation_status == "INVALID": # Check specifically for INVALID
-                invalid_list.append({
-                    "id": port.get("id"),
-                    "name": comp.get("name"),
-                    "type": "output_port",
-                    "validation_status": validation_status, # Include the status
-                    "validation_errors": comp.get("validationErrors", [])
-                })
-
-        # --- Step 3: Get Queue Status for Connections --- 
-        local_logger.info("Fetching connection queue statuses via process group snapshot...")
-        queue_summary = results["queue_summary"]
-        # Clear previous connection-specific details needed for old method
-        # connection_status_tasks = []
-        # connection_ids = [conn.get("id") for conn in connections_resp if conn.get("id")]
-        # connection_details_map = {conn.get("id"): filter_connection_data(conn) for conn in connections_resp}
-        
-        # Fetch the single status snapshot for the entire group
-        nifi_req_q = {"operation": "get_process_group_status_snapshot", "process_group_id": target_pg_id}
-        local_logger.bind(interface="nifi", direction="request", data=nifi_req_q).debug("Calling NiFi API")
-        group_status_snapshot = {}
-        try:
-            group_status_snapshot = await nifi_client.get_process_group_status_snapshot(target_pg_id)
-            nifi_resp_q = {"has_snapshot": bool(group_status_snapshot)}
-            local_logger.bind(interface="nifi", direction="response", data=nifi_resp_q).debug("Received from NiFi API")
-        except (ConnectionError, ValueError, NiFiAuthenticationError) as status_err:
-             local_logger.error(f"Failed to get process group status snapshot for queue summary: {status_err}")
-             # Log error but continue, queue summary will be empty/zero
-             nifi_resp_q = {"error": str(status_err)}
-             local_logger.bind(interface="nifi", direction="response", data=nifi_resp_q).debug("Received error from NiFi API")
-             # Explicitly set snapshot to empty dict to avoid errors below
-             group_status_snapshot = {}
-        except Exception as status_exc:
-             local_logger.error(f"Unexpected error getting process group status snapshot: {status_exc}", exc_info=True)
-             nifi_resp_q = {"error": str(status_exc)}
-             local_logger.bind(interface="nifi", direction="response", data=nifi_resp_q).debug("Received unexpected error from NiFi API")
-             # Explicitly set snapshot to empty dict to avoid errors below
-             group_status_snapshot = {}
-
-        # Process the snapshots from the single response
-        connection_snapshots = group_status_snapshot.get("aggregateSnapshot", {}).get("connectionStatusSnapshots", [])
-        local_logger.debug(f"Processing {len(connection_snapshots)} connection snapshots from group status.")
-
-        # We need connection details (like name) to enrich the summary.
-        # Reuse connections_resp obtained in Step 1
-        connections_map = {conn.get("id"): conn for conn in connections_resp if conn.get("id")}
-
-        for snapshot_entity in connection_snapshots:
-            # Extract the actual snapshot data
-            snapshot_data = snapshot_entity.get("connectionStatusSnapshot")
-            if not snapshot_data:
-                local_logger.warning(f"Skipping connection snapshot due to missing data: {snapshot_entity}")
-                continue
-                
-            conn_id = snapshot_data.get("id")
-            if not conn_id:
-                 local_logger.warning(f"Skipping connection snapshot due to missing ID: {snapshot_data}")
-                 continue
-                 
-            queued_count = int(snapshot_data.get("flowFilesQueued", 0))
-            queued_bytes = int(snapshot_data.get("bytesQueued", 0))
-            
-            # Get connection details from the map populated earlier
-            conn_info = connections_map.get(conn_id, {})
-            conn_component = conn_info.get("component", {})
-            conn_name = conn_component.get("name", "")
-            source_name = conn_component.get("source", {}).get("name", "Unknown Source")
-            dest_name = conn_component.get("destination", {}).get("name", "Unknown Destination")
-
-            if queued_count > 0:
-                queue_summary["total_queued_count"] += queued_count
-                queue_summary["total_queued_size_bytes"] += queued_bytes
-                queue_summary["connections_with_data"].append({
-                    "id": conn_id,
-                    "name": conn_name,
-                    "sourceName": source_name,
-                    "destName": dest_name,
-                    "queued_count": queued_count,
-                    "queued_size_bytes": queued_bytes,
-                    "queued_size_human": snapshot_data.get("queuedSize", "0 B") # Use pre-formatted string
-                })
-                
-        # Format total size (logic remains the same)
-        total_bytes = queue_summary["total_queued_size_bytes"]
-        if total_bytes < 1024:
-            queue_summary["total_queued_size_human"] = f"{total_bytes} B"
-        elif total_bytes < 1024**2:
-            queue_summary["total_queued_size_human"] = f"{total_bytes/1024:.1f} KB"
-        elif total_bytes < 1024**3:
-             queue_summary["total_queued_size_human"] = f"{total_bytes/(1024**2):.1f} MB"
-        else:
-             queue_summary["total_queued_size_human"] = f"{total_bytes/(1024**3):.1f} GB"
-
-        # --- Step 4: Get Bulletins (if requested) ---
-        if include_bulletins:
-            local_logger.info(f"Fetching bulletins (limit {bulletin_limit})...")
-            try:
-                nifi_req_b = {"operation": "get_bulletin_board", "group_id": target_pg_id, "limit": bulletin_limit}
-                local_logger.bind(interface="nifi", direction="request", data=nifi_req_b).debug("Calling NiFi API")
-                bulletins = await nifi_client.get_bulletin_board(group_id=target_pg_id, limit=bulletin_limit)
-                nifi_resp_b = {"bulletin_count": len(bulletins)}
-                local_logger.bind(interface="nifi", direction="response", data=nifi_resp_b).debug("Received from NiFi API")
-                results["bulletins"] = bulletins
-            except Exception as e:
-                local_logger.error(f"Failed to fetch bulletins: {e}")
-                # Continue without bulletins, maybe add an error marker?
-                results["bulletins"] = [{"error": f"Failed to fetch bulletins: {e}"}]
-        else:
-            local_logger.info("Skipping bulletin fetch as per request.")
-            results["bulletins"] = None # Explicitly set to None if not included
-
-        # --- Step 5: Health verdict and bulletin summary ---
-        invalid_list = results["invalid_components"]
-        bulletins_list = results["bulletins"] if isinstance(results["bulletins"], list) else []
-        # Normalize bulletin items (NiFi may return { "bulletin": { ... } } or flat object)
-        count_by_level = {"ERROR": 0, "WARNING": 0, "INFO": 0}
-        last_errors = []
-        for item in bulletins_list:
-            if isinstance(item, dict) and "error" in item:
-                continue  # Skip fetch-error placeholder
-            b_data = item.get("bulletin", item) if isinstance(item, dict) else {}
-            level = (b_data.get("level") or "").upper()
-            if level in count_by_level:
-                count_by_level[level] += 1
-            if level == "ERROR":
-                last_errors.append({
-                    "message": b_data.get("message", ""),
-                    "source_id": b_data.get("sourceId"),
-                    "source_name": b_data.get("sourceName"),
-                    "timestamp": b_data.get("timestamp"),
-                    "category": b_data.get("category"),
-                })
-        # Keep last 10 errors
-        last_errors = last_errors[:10]
-        results["bulletin_summary"] = {
-            "count_by_level": count_by_level,
-            "last_errors": last_errors,
-        } if include_bulletins and not any(isinstance(x, dict) and x.get("error") for x in bulletins_list) else None
-
-        has_invalid = len(invalid_list) > 0
-        has_error_bulletins = count_by_level["ERROR"] > 0
-        comp_summary = results["component_summary"]
-        stopped_processors = comp_summary["processors"].get("stopped", 0)
-        stopped_ports = comp_summary["input_ports"].get("stopped", 0) + comp_summary["output_ports"].get("stopped", 0)
-        conns_with_data = len(queue_summary["connections_with_data"])
-        has_degraded = (stopped_processors + stopped_ports > 0 or (queue_summary["total_queued_count"] > 0 and conns_with_data > 5)) and not has_invalid and not has_error_bulletins
-
-        if has_invalid or has_error_bulletins:
-            reasons = []
-            if has_invalid:
-                reasons.append(f"{len(invalid_list)} invalid component(s)")
-            if has_error_bulletins:
-                reasons.append(f"{count_by_level['ERROR']} ERROR bulletin(s)")
-            results["health"] = "errors"
-            results["health_reason"] = "; ".join(reasons)
-        elif has_degraded:
-            results["health"] = "degraded"
-            results["health_reason"] = "Stopped components or elevated queue backpressure"
-        else:
-            results["health"] = "healthy"
-            results["health_reason"] = None
-
-        local_logger.info("Process group status overview fetch complete.")
+            count_health(results)
+            results["child_health_summary"] = summary
         return results
-
     except NiFiAuthenticationError as e:
-         local_logger.error(f"Authentication error getting status for PG {target_pg_id}: {e}", exc_info=False)
-         raise ToolError(f"Authentication error accessing NiFi: {e}") from e
+        local_logger.error(f"Authentication error getting status for PG {target_pg_id}: {e}", exc_info=False)
+        raise ToolError(f"Authentication error accessing NiFi: {e}") from e
     except (ValueError, ConnectionError, ToolError) as e:
         local_logger.error(f"Error getting status for PG {target_pg_id}: {e}", exc_info=False)
         raise ToolError(f"Error getting status for PG {target_pg_id}: {e}") from e
@@ -2236,37 +2347,200 @@ async def get_process_group_status(
         local_logger.error(f"Unexpected error getting status for PG {target_pg_id}: {e}", exc_info=True)
         raise ToolError(f"An unexpected error occurred: {e}") from e
 
+
+async def _fetch_provenance_events_by_uuid(
+    nifi_client: NiFiClient,
+    flowfile_uuid: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    polling_interval: float = 0.5,
+    polling_timeout: float = 30.0,
+    max_results: int = 1000,
+) -> List[Dict[str, Any]]:
+    """Submit provenance query by FlowFile UUID, poll until finished, return events sorted by eventTime."""
+    local_logger = current_request_logger.get() or logger
+    payload: Dict[str, Any] = {
+        "flowfile_uuid": flowfile_uuid,
+        "max_results": max_results,
+    }
+    if start_date:
+        payload["start_date"] = start_date
+    if end_date:
+        payload["end_date"] = end_date
+    query_response = await nifi_client.submit_provenance_query(payload)
+    query_id = query_response.get("id")
+    if not query_id:
+        raise ToolError("Failed to get query ID from NiFi for provenance search by UUID.")
+    try:
+        start_time = asyncio.get_event_loop().time()
+        while True:
+            if (asyncio.get_event_loop().time() - start_time) > polling_timeout:
+                raise TimeoutError(f"Timed out waiting for provenance query {query_id} to complete.")
+            query_status = await nifi_client.get_provenance_query(query_id)
+            if query_status.get("finished"):
+                events = query_status.get("provenanceEvents", [])
+                if not events:
+                    try:
+                        events = await nifi_client.get_provenance_results(query_id)
+                    except Exception as e:
+                        local_logger.warning(f"Could not get provenance results from /results: {e}")
+                        events = query_status.get("results", {}).get("provenanceEvents", [])
+                events = sorted(events, key=lambda e: (e.get("eventTime") or ""))
+                return events
+            await asyncio.sleep(polling_interval)
+    finally:
+        try:
+            await nifi_client.delete_provenance_query(query_id)
+        except Exception as e:
+            local_logger.warning(f"Failed to delete provenance query {query_id}: {e}")
+
+
+@mcp.tool()
+@tool_phases(["Review", "Operate"])
+async def trace_flowfile(
+    flowfile_uuid: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    max_events: int = 50,
+    continuation_token: Optional[str] = None,
+    bottlenecks_only: bool = False,
+    polling_interval: float = 0.5,
+    polling_timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """
+    Traces a FlowFile by UUID through the flow: returns provenance events (steps) with timing and optional bottleneck summary.
+
+    Use this to see which processors handled the flowfile, duration at each step, and parent/child UUIDs (splits/forks).
+    Results are paged; use continuation_token to fetch the next page. Default cap is 50 events per call to limit token usage.
+
+    Args:
+        flowfile_uuid: The FlowFile UUID to trace (required).
+        start_date: Optional start of time window (NiFi format e.g. "MM/DD/YYYY HH:MM:SS EST").
+        end_date: Optional end of time window (same format).
+        max_events: Maximum events to return per call (default 50). Use continuation_token to get more.
+        continuation_token: Opaque token from a previous response to get the next page. Pass same flowfile_uuid (and dates) when paging.
+        bottlenecks_only: If True, return only steps with long duration or long gap to next event (heuristic).
+        polling_interval: Seconds between polling for provenance query completion.
+        polling_timeout: Max seconds to wait for query completion.
+
+    Returns:
+        summary: total_events, time_range, total_duration_ms, bottlenecks (top steps by duration).
+        events: List of steps (event_id, event_type, event_time, event_duration_ms, component_name, flowfile_uuid, parent_uuids, child_uuids).
+        has_more: True if more events are available.
+        continuation_token: Set when has_more is True; pass back on next call to get the next page.
+    """
+    nifi_client = current_nifi_client.get()
+    local_logger = current_request_logger.get() or logger
+    if not nifi_client:
+        raise ToolError("NiFi client not found in context.")
+    offset = 0
+    if continuation_token:
+        if continuation_token.startswith("offset:"):
+            try:
+                offset = int(continuation_token.split(":", 1)[1])
+            except (ValueError, IndexError):
+                offset = 0
+    try:
+        events = await _fetch_provenance_events_by_uuid(
+            nifi_client, flowfile_uuid,
+            start_date=start_date, end_date=end_date,
+            polling_interval=polling_interval, polling_timeout=polling_timeout,
+            max_results=5000,
+        )
+    except (TimeoutError, ToolError, ConnectionError, ValueError) as e:
+        local_logger.error(f"Provenance fetch failed: {e}")
+        raise ToolError(f"Failed to trace flowfile: {e}") from e
+    all_events = events
+    total = len(all_events)
+    total_duration_ms = sum((e.get("eventDuration") or 0) for e in all_events)
+    bottlenecks = []
+    if all_events:
+        by_duration = sorted(enumerate(all_events), key=lambda x: -((x[1].get("eventDuration")) or 0))
+        for _, ev in by_duration[:5]:
+            bottlenecks.append({
+                "event_id": ev.get("eventId"),
+                "component_name": ev.get("componentName"),
+                "event_duration_ms": ev.get("eventDuration"),
+            })
+    summary = {
+        "total_events": total,
+        "time_range": {"earliest": all_events[0].get("eventTime") if all_events else None, "latest": all_events[-1].get("eventTime") if all_events else None},
+        "total_duration_ms": total_duration_ms,
+        "bottlenecks": bottlenecks,
+    }
+    if bottlenecks_only:
+        durations = [(i, (e.get("eventDuration") or 0)) for i, e in enumerate(all_events)]
+        durations.sort(key=lambda x: -x[1])
+        top_indices = {x[0] for x in durations[:15]}
+        events = [e for i, e in enumerate(all_events) if i in top_indices]
+        events = sorted(events, key=lambda e: (e.get("eventTime") or ""))
+        offset = 0
+    page = events[offset : offset + max_events]
+    has_more = (offset + len(page)) < len(events)
+    next_token = f"offset:{offset + len(page)}" if has_more else None
+    event_list = []
+    for e in page:
+        event_list.append({
+            "event_id": e.get("eventId"),
+            "event_type": e.get("eventType"),
+            "event_time": e.get("eventTime"),
+            "event_duration_ms": e.get("eventDuration"),
+            "component_id": e.get("componentId"),
+            "component_name": e.get("componentName"),
+            "flowfile_uuid": e.get("flowFileUuid"),
+            "parent_uuids": e.get("parentUuids") or [],
+            "child_uuids": e.get("childUuids") or [],
+        })
+    return {
+        "flowfile_uuid": flowfile_uuid,
+        "summary": summary,
+        "events": event_list,
+        "has_more": has_more,
+        "continuation_token": next_token,
+        "events_returned": len(event_list),
+    }
+
+
 @mcp.tool()
 @tool_phases(["Review", "Operate"])
 async def list_flowfiles(
     target_id: str,
     target_type: Literal["connection", "processor"],
     max_results: int = 100,
+    continuation_token: Optional[str] = None,
     polling_interval: float = 0.5,
-    polling_timeout: float = 30.0 # Increased default timeout to 30s
+    polling_timeout: float = 30.0,
 ) -> Dict[str, Any]:
     """
     Lists FlowFile summaries from a connection queue or processor provenance.
 
-    For connections, lists FlowFiles currently queued.
-    For processors, lists FlowFiles recently processed via provenance events.
+    For connections, lists FlowFiles currently queued. For processors, lists FlowFiles
+    recently processed via provenance events. Results are paged; use continuation_token
+    to fetch the next page (pass same target_id and target_type).
 
     Args:
         target_id: The ID of the connection or processor.
         target_type: Whether the target_id refers to a 'connection' or 'processor'.
-        max_results: Maximum number of FlowFile summaries to return.
+        max_results: Maximum number of FlowFile summaries to return per call (default 100).
+        continuation_token: Opaque token from a previous response to get the next page.
         polling_interval: Seconds between polling for async request completion (queue/provenance).
         polling_timeout: Maximum seconds to wait for async request completion.
 
     Returns:
-        A dictionary containing the list of FlowFile summaries and metadata.
+        flowfile_summaries: List of summaries for the current page.
+        has_more: True if more results are available.
+        continuation_token: Set when has_more is True; pass back on next call.
     """
-    # Get client and logger
-    nifi_client: Optional[NiFiClient] = current_nifi_client.get()
+    nifi_client = current_nifi_client.get()
     local_logger = current_request_logger.get() or logger
     if not nifi_client:
         raise ToolError("NiFi client context is not set.")
-
+    offset = 0
+    if continuation_token and continuation_token.startswith("offset:"):
+        try:
+            offset = int(continuation_token.split(":", 1)[1])
+        except (ValueError, IndexError):
+            offset = 0
     local_logger = local_logger.bind(target_id=target_id, target_type=target_type, max_results=max_results)
     local_logger.info(f"Listing flowfiles for {target_type} {target_id}")
 
@@ -2275,7 +2549,9 @@ async def list_flowfiles(
         "target_type": target_type,
         "listing_source": "unknown",
         "flowfile_summaries": [],
-        "error": None
+        "has_more": False,
+        "continuation_token": None,
+        "error": None,
     }
 
     try:
@@ -2307,22 +2583,23 @@ async def list_flowfiles(
                     nifi_resp_get = {"finished": request_status.get("finished"), "percentCompleted": request_status.get("percentCompleted")}
                     local_logger.bind(interface="nifi", direction="response", data=nifi_resp_get).debug("Received from NiFi API (polling)")
                     
-                    if request_status.get("finished"): 
+                    if request_status.get("finished"):
                         local_logger.info(f"Queue listing request {request_id} finished.")
-                        # 3. Extract results (already in the final status response)
                         summaries_raw = request_status.get("flowFileSummaries", [])
-                        # Limit results here if necessary, though API might have internal limit
+                        page = summaries_raw[offset : offset + max_results]
                         results["flowfile_summaries"] = [
                             {
                                 "uuid": ff.get("uuid"),
                                 "filename": ff.get("filename"),
                                 "size": ff.get("size"),
                                 "queued_duration": ff.get("queuedDuration"),
-                                "attributes": ff.get("attributes", {}), # Queue listing includes attributes
-                                "position": ff.get("position")
+                                "attributes": ff.get("attributes", {}),
+                                "position": ff.get("position"),
                             }
-                            for ff in summaries_raw[:max_results]
+                            for ff in page
                         ]
+                        results["has_more"] = len(summaries_raw) > offset + max_results
+                        results["continuation_token"] = f"offset:{offset + max_results}" if results["has_more"] else None
                         break
                     await asyncio.sleep(polling_interval)
 
@@ -2344,10 +2621,10 @@ async def list_flowfiles(
             local_logger.info("Listing via processor provenance...")
             query_id = None
             try:
-                # 1. Submit query
+                # 1. Submit query (request larger batch from NiFi so we can page)
                 provenance_payload = {
                     "processor_id": target_id,
-                    "max_results": max_results  # Pass max_results to the client method
+                    "max_results": min(5000, max(1000, max_results * 20)),
                 }
                 nifi_req_create = {"operation": "submit_provenance_query", "payload": provenance_payload}
                 local_logger.bind(interface="nifi", direction="request", data=nifi_req_create).debug("Calling NiFi API")
@@ -2398,23 +2675,25 @@ async def list_flowfiles(
                         #      local_logger.trace(f"First raw event details: {events[0]}") # Log first event details
                         # ------------------------------------
 
-                        # Format events into summaries
-                        # Note: Provenance events might show multiple stages for the same FlowFile.
-                        # We will return one entry per event for simplicity, ordered by event time (default). 
+                        # Sort newest first (descending eventTime) so first page = most recent flowfiles (matches NiFi UI)
+                        events_sorted = sorted(events, key=lambda e: (e.get("eventTime") or ""), reverse=True)
+                        total_events = len(events_sorted)
+                        page_events = events_sorted[offset : offset + max_results]
                         results["flowfile_summaries"] = [
                             {
                                 "uuid": event.get("flowFileUuid"),
-                                "filename": event.get("previousAttributes", {}).get("filename") or event.get("updatedAttributes", {}).get("filename"), # Try both
-                                # "size": event.get("fileSize"), # Use bytes value instead
-                                "size_bytes": event.get("fileSizeBytes"), # Corrected field
+                                "filename": event.get("previousAttributes", {}).get("filename") or event.get("updatedAttributes", {}).get("filename"),
+                                "size_bytes": event.get("fileSizeBytes"),
                                 "event_id": event.get("eventId"),
                                 "event_type": event.get("eventType"),
                                 "event_time": event.get("eventTime"),
                                 "component_name": event.get("componentName"),
-                                "attributes": event.get("updatedAttributes", {}), # Use updated attributes for the event
+                                "attributes": event.get("updatedAttributes", {}),
                             }
-                            for event in events # Use the retrieved list
+                            for event in page_events
                         ]
+                        results["has_more"] = total_events > offset + max_results
+                        results["continuation_token"] = f"offset:{offset + max_results}" if results["has_more"] else None
                         break
                     await asyncio.sleep(polling_interval)
 
@@ -2449,26 +2728,41 @@ async def list_flowfiles(
 
 @mcp.tool()
 @tool_phases(["Review", "Operate"])
+def _attribute_changes(prev: Dict[str, Any], updated: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Return added, modified, removed key names between previous and updated attribute dicts."""
+    prev_keys = set(prev) if isinstance(prev, dict) else set()
+    up_keys = set(updated) if isinstance(updated, dict) else set()
+    added = list(up_keys - prev_keys)
+    removed = list(prev_keys - up_keys)
+    modified = [k for k in (prev_keys & up_keys) if prev.get(k) != updated.get(k)]
+    return {"added": added, "modified": modified, "removed": removed}
+
+
+MAX_ATTRIBUTES_RETURNED = 30
+
 async def get_flowfile_event_details(
     event_id: int,
-    max_content_bytes: int = 4096  # Reasonable default to avoid overwhelming LLM
+    max_content_bytes: int = 4096,
+    max_attributes: int = MAX_ATTRIBUTES_RETURNED,
 ) -> Dict[str, Any]:
     """
     Retrieves detailed attributes and content for a specific FlowFile provenance event.
 
     Fetches the event details and intelligently retrieves content based on size limits.
-    If input and output content are identical, only returns one copy to avoid duplication.
+    Attributes are capped to max_attributes; use attributes_truncated and total_attributes
+    to see if more exist. When previous/updated attributes are available, attribute_changes
+    summarizes what changed at this processor (added/modified/removed keys).
 
     Args:
         event_id: The specific numeric ID of the provenance event.
-        max_content_bytes: Max bytes of content to return. If content is larger, 
-                          returns size info instead of actual content.
+        max_content_bytes: Max bytes of content to return (default 4096). If larger, returns size info only.
+        max_attributes: Max attribute entries to return (default 30). Use continuation or accept truncation.
 
     Returns:
-        A dictionary containing the event and content details.
+        Event and content details; attributes_truncated, total_attributes; optional previous_attributes,
+        updated_attributes, attribute_changes.
     """
-    # Get client and logger
-    nifi_client: Optional[NiFiClient] = current_nifi_client.get()
+    nifi_client = current_nifi_client.get()
     local_logger = current_request_logger.get() or logger
     if not nifi_client:
         raise ToolError("NiFi client context is not set.")
@@ -2476,49 +2770,73 @@ async def get_flowfile_event_details(
     local_logger = local_logger.bind(event_id=event_id, max_content_bytes=max_content_bytes)
     local_logger.info("Getting FlowFile event details.")
 
-    # Initialize results structure
     results = {
         "status": "error",
         "message": "",
         "event_id": event_id,
-        # Essential event info (filtered to avoid overwhelming LLM)
         "event_type": None,
         "event_time": None,
         "component_name": None,
         "flowfile_uuid": None,
         "attributes": [],
-        # Content size info
+        "attributes_truncated": False,
+        "total_attributes": 0,
+        "previous_attributes": None,
+        "updated_attributes": None,
+        "attribute_changes": None,
         "input_content_size_bytes": 0,
         "output_content_size_bytes": 0,
         "content_identical": False,
-        # Content data (only if reasonably sized)
         "content_included": False,
         "content_too_large": False,
-        "content": None,  # Will contain actual content if included
-        "content_type": None  # "input", "output", or "both" if different
+        "content": None,
+        "content_type": None,
     }
 
     try:
-        # Step 1: Get Event Details
         local_logger.info(f"Fetching details for provenance event {event_id}...")
         event_details = await nifi_client.get_provenance_event(event_id)
 
         if not event_details:
             raise ValueError(f"No details returned for event {event_id}.")
 
-        # Extract essential event information (filtered for LLM consumption)
         results["event_type"] = event_details.get("eventType")
-        results["event_time"] = event_details.get("eventTime")  
+        results["event_time"] = event_details.get("eventTime")
         results["component_name"] = event_details.get("componentName")
         results["flowfile_uuid"] = event_details.get("flowFileUuid")
-        
-        # Get attributes list (limit to avoid overwhelming LLM)
+
+        prev_attrs = event_details.get("previousAttributes") or event_details.get("previousAttributesMap") or {}
+        up_attrs = event_details.get("updatedAttributes") or event_details.get("updatedAttributesMap") or event_details.get("attributes") or {}
+        if isinstance(up_attrs, list):
+            up_attrs = {a.get("name"): a.get("value") for a in up_attrs if isinstance(a, dict) and a.get("name") is not None}
+        if isinstance(prev_attrs, list):
+            prev_attrs = {a.get("name"): a.get("value") for a in prev_attrs if isinstance(a, dict) and a.get("name") is not None}
+        if prev_attrs or up_attrs:
+            results["attribute_changes"] = _attribute_changes(prev_attrs, up_attrs)
+        if prev_attrs:
+            keys_prev = list(prev_attrs)[:max_attributes]
+            results["previous_attributes"] = {k: prev_attrs[k] for k in keys_prev}
+            results["attributes_truncated"] = len(prev_attrs) > max_attributes
+            results["total_attributes"] = max(results["total_attributes"], len(prev_attrs))
+        if up_attrs:
+            keys_up = list(up_attrs)[:max_attributes]
+            results["updated_attributes"] = {k: up_attrs[k] for k in keys_up}
+            results["attributes_truncated"] = results["attributes_truncated"] or len(up_attrs) > max_attributes
+            results["total_attributes"] = max(results["total_attributes"], len(up_attrs))
         attributes = event_details.get("attributes", [])
-        if len(attributes) > 20:  # Limit to most important attributes
-            results["attributes"] = attributes[:20]
-            local_logger.warning(f"Event has {len(attributes)} attributes, truncated to 20 for LLM")
+        if isinstance(attributes, dict):
+            keys = list(attributes)[:max_attributes]
+            results["attributes"] = [{"name": k, "value": attributes[k]} for k in keys]
+            results["attributes_truncated"] = results["attributes_truncated"] or len(attributes) > max_attributes
+            results["total_attributes"] = max(results["total_attributes"], len(attributes))
         else:
-            results["attributes"] = attributes
+            attributes = list(attributes) if attributes else []
+            results["total_attributes"] = max(results["total_attributes"], len(attributes))
+            if len(attributes) > max_attributes:
+                results["attributes"] = attributes[:max_attributes]
+                results["attributes_truncated"] = True
+            else:
+                results["attributes"] = attributes
 
         # Get content size information
         input_size = event_details.get("inputContentClaimFileSizeBytes", 0) or 0
@@ -2642,3 +2960,108 @@ async def get_flowfile_event_details(
         results["status"] = "error"
         results["message"] = f"An unexpected error occurred: {e}"
         return results
+
+
+@mcp.tool()
+@tool_phases(["Review", "Operate"])
+async def get_processor_event_diff(
+    flowfile_uuid: str,
+    processor_id: str,
+    choose_event: Literal["first", "last"] = "last",
+    max_content_bytes: int = 4096,
+    max_attributes: int = MAX_ATTRIBUTES_RETURNED,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    polling_interval: float = 0.5,
+    polling_timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """
+    Returns a focused before/after view of what changed for a FlowFile at a specific processor.
+
+    This is a convenience wrapper around provenance-by-UUID + get_flowfile_event_details:
+    - Finds the first/last provenance event for (flowfile_uuid, processor_id).
+    - Fetches event details including input/output content (subject to max_content_bytes)
+      and attribute_changes (added/modified/removed keys).
+
+    Args:
+        flowfile_uuid: The FlowFile UUID to inspect.
+        processor_id: The NiFi componentId (processor ID) to focus on.
+        choose_event: Whether to use the 'first' or 'last' matching event for that processor.
+        max_content_bytes: Max bytes of content to return for this event (default 4096).
+        max_attributes: Max attribute entries to return (default 30).
+        start_date: Optional start of time window (NiFi format, e.g. "MM/DD/YYYY HH:MM:SS EST").
+        end_date: Optional end of time window (same format).
+        polling_interval: Seconds between polling for provenance query completion.
+        polling_timeout: Max seconds to wait for provenance query completion.
+
+    Returns:
+        {
+          "flowfile_uuid": str,
+          "processor_id": str,
+          "event_id": int | None,
+          "event_type": str | None,
+          "event_time": str | None,
+          "component_name": str | None,
+          "event_details": get_flowfile_event_details(...) result (including content and attribute_changes),
+        }
+        If no matching event is found, event_id will be None and status will describe the reason.
+    """
+    nifi_client = current_nifi_client.get()
+    local_logger = current_request_logger.get() or logger
+    if not nifi_client:
+        raise ToolError("NiFi client context is not set.")
+
+    if choose_event not in ("first", "last"):
+        raise ToolError("choose_event must be 'first' or 'last'.")
+
+    try:
+        events = await _fetch_provenance_events_by_uuid(
+            nifi_client=nifi_client,
+            flowfile_uuid=flowfile_uuid,
+            start_date=start_date,
+            end_date=end_date,
+            polling_interval=polling_interval,
+            polling_timeout=polling_timeout,
+            max_results=5000,
+        )
+    except (TimeoutError, ToolError, ConnectionError, ValueError) as e:
+        local_logger.error(f"Provenance fetch for get_processor_event_diff failed: {e}")
+        raise ToolError(f"Failed to fetch provenance events for FlowFile {flowfile_uuid}: {e}") from e
+
+    matching = [e for e in events if e.get("componentId") == processor_id]
+    if not matching:
+        return {
+            "flowfile_uuid": flowfile_uuid,
+            "processor_id": processor_id,
+            "event_id": None,
+            "status": "not_found",
+            "message": "No provenance events found for this FlowFile at the specified processor.",
+        }
+
+    chosen_event = matching[0] if choose_event == "first" else matching[-1]
+    event_id = chosen_event.get("eventId")
+    if event_id is None:
+        return {
+            "flowfile_uuid": flowfile_uuid,
+            "processor_id": processor_id,
+            "event_id": None,
+            "status": "error",
+            "message": "Chosen event has no eventId field.",
+        }
+
+    # Delegate to get_flowfile_event_details for content and attribute diffs
+    event_details = await get_flowfile_event_details(
+        event_id=event_id,
+        max_content_bytes=max_content_bytes,
+        max_attributes=max_attributes,
+    )
+
+    return {
+        "flowfile_uuid": flowfile_uuid,
+        "processor_id": processor_id,
+        "event_id": event_id,
+        "event_type": chosen_event.get("eventType"),
+        "event_time": chosen_event.get("eventTime"),
+        "component_name": chosen_event.get("componentName"),
+        "event_details": event_details,
+    }

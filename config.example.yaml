@@ -32,9 +32,13 @@ llm:
     model: "sonar-pro" # Must be one of the models listed above for the chosen provider
 
 mcp_features:
-  auto_stop_enabled: true
   auto_delete_enabled: true
-  auto_purge_enabled: true
+
+# Optional: timeouts for Auto-Stop verify and controller-service disable (seconds)
+# Env overrides: NIFI_AUTO_STOP_VERIFY_SECONDS, NIFI_AUTO_STOP_VERIFY_CONNECTION_SECONDS
+operation_timeouts:
+  auto_stop_verify_seconds: 15
+  auto_stop_verify_connection_seconds: 5
 
 # Logging configuration
 logging:

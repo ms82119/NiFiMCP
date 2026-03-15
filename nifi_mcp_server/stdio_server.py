@@ -26,6 +26,7 @@ if __name__ == "__main__" or (__package__ or "").startswith("nifi_mcp_server"):
     if _root not in sys.path:
         sys.path.insert(0, _root)
 
+import time
 import anyio
 from loguru import logger
 
@@ -46,12 +47,17 @@ from nifi_mcp_server.api_tools import creation  # noqa: F401
 from nifi_mcp_server.api_tools import modification  # noqa: F401
 from nifi_mcp_server.api_tools import operation  # noqa: F401
 from nifi_mcp_server.api_tools import helpers  # noqa: F401
+from nifi_mcp_server.api_tools import control  # noqa: F401 - MCP-only server/phase tools
 
 from nifi_mcp_server.request_context import (
     current_action_id,
     current_nifi_client,
+    current_nifi_server_id,
     current_request_logger,
     current_user_request_id,
+    mcp_session_started_at,
+    session_total_tokens_in,
+    session_total_tokens_out,
 )
 from config.settings import get_nifi_servers
 
@@ -82,6 +88,10 @@ async def run_stdio_with_context() -> None:
     try:
         nifi_client = await get_nifi_client(server_id, bound_logger=logger)
         current_nifi_client.set(nifi_client)
+        current_nifi_server_id.set(server_id)
+        mcp_session_started_at.set(time.time())
+        session_total_tokens_in.set(0)
+        session_total_tokens_out.set(0)
         current_request_logger.set(logger)
         current_user_request_id.set("-")
         current_action_id.set("-")

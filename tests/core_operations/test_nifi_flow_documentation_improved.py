@@ -283,6 +283,8 @@ async def test_document_flow_include_flow_summary(
     assert "decision_branches" in flow_summary, "flow_summary should have decision_branches"
     assert "flow_paths" in flow_summary, "flow_summary should have flow_paths"
     assert "boundary_ports" in flow_summary, "flow_summary should have boundary_ports"
+    assert "cross_pg_connections" in flow_summary, "flow_summary should have cross_pg_connections (cross-PG port resolution)"
+    assert "cross_pg_flow_map" in flow_summary, "flow_summary should have cross_pg_flow_map"
     assert isinstance(flow_summary["entry_points"], list), "entry_points should be a list"
     assert isinstance(flow_summary["boundary_ports"], dict), "boundary_ports should be a dict"
     assert "input_ports" in flow_summary["boundary_ports"], "boundary_ports should have input_ports"

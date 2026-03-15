@@ -478,6 +478,8 @@ async def resolve_port_connections(
         
         enriched = {
             **conn,
+            "source": source,
+            "destination": dest,
             "cross_pg": False,
             "source_pg_name": None,
             "dest_pg_name": None

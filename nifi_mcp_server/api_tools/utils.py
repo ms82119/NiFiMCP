@@ -1,4 +1,6 @@
 import asyncio
+import functools
+import json
 from typing import List, Dict, Optional, Any, Union, Literal
 from loguru import logger as _logger # Use _logger to avoid potential conflict
 
@@ -12,17 +14,113 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 # --- Phase Tagging Decorator --- 
 PHASE_TAGS_ATTR = "_tool_phases"
-_tool_phase_registry = {} # Module-level registry
+_tool_phase_registry: Dict[str, List[str]] = {} # Module-level registry
+_mcp_only_tool_names: set = set()
 
-def tool_phases(phases: List[str]):
-    """Decorator to tag MCP tools with applicable operational phases."""
+# Tools that are always allowed regardless of current_nifi_phase (control tools)
+CONTROL_TOOL_NAMES = {"get_nifi_session_info", "set_nifi_server", "set_nifi_phase"}
+
+VALID_PHASES = ["Review", "Build", "Modify", "Operate", "All"]
+
+
+def is_mcp_only_tool(name: str) -> bool:
+    """Return True if the tool is MCP-only (hidden from web UI)."""
+    return name in _mcp_only_tool_names
+
+
+def _estimate_tokens(obj: Any) -> int:
+    """Rough token estimate: len(json.dumps(...))/4. Uses default=str for non-serializable values."""
+    try:
+        return len(json.dumps(obj, default=str)) // 4
+    except Exception:
+        return 0
+
+
+def _accumulate_session_tokens(args: tuple, kwargs: dict, result: Any) -> None:
+    """Update session_total_tokens_in and session_total_tokens_out from this tool call."""
+    from ..request_context import session_total_tokens_in, session_total_tokens_out
+    tokens_in = _estimate_tokens({"args": args, "kwargs": kwargs})
+    tokens_out = _estimate_tokens(result)
+    session_total_tokens_in.set(session_total_tokens_in.get() + tokens_in)
+    session_total_tokens_out.set(session_total_tokens_out.get() + tokens_out)
+
+
+def _check_phase_and_call(tool_name: str, tool_phases_list: List[str], func: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run phase check then call func. Used by sync wrapper."""
+    from ..request_context import current_nifi_phase
+    phase = current_nifi_phase.get()
+    if not phase or (phase and str(phase).strip().lower() == "all"):
+        result = func(*args, **kwargs)
+        _accumulate_session_tokens(args, kwargs, result)
+        return result
+    if tool_name in CONTROL_TOOL_NAMES:
+        result = func(*args, **kwargs)
+        _accumulate_session_tokens(args, kwargs, result)
+        return result
+    if not tool_phases_list:
+        result = func(*args, **kwargs)
+        _accumulate_session_tokens(args, kwargs, result)
+        return result
+    allowed = [p.lower() for p in tool_phases_list]
+    if phase.strip().lower() not in allowed:
+        raise ToolError(
+            f"Phase is set to '{phase}'. This tool is not allowed in this phase. "
+            f"Allowed phases for this tool: {', '.join(tool_phases_list)}."
+        )
+    result = func(*args, **kwargs)
+    _accumulate_session_tokens(args, kwargs, result)
+    return result
+
+
+async def _check_phase_and_call_async(tool_name: str, tool_phases_list: List[str], func: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run phase check then await func. Used by async wrapper."""
+    from ..request_context import current_nifi_phase
+    phase = current_nifi_phase.get()
+    if not phase or (phase and str(phase).strip().lower() == "all"):
+        result = await func(*args, **kwargs)
+        _accumulate_session_tokens(args, kwargs, result)
+        return result
+    if tool_name in CONTROL_TOOL_NAMES:
+        result = await func(*args, **kwargs)
+        _accumulate_session_tokens(args, kwargs, result)
+        return result
+    if not tool_phases_list:
+        result = await func(*args, **kwargs)
+        _accumulate_session_tokens(args, kwargs, result)
+        return result
+    allowed = [p.lower() for p in tool_phases_list]
+    if phase.strip().lower() not in allowed:
+        raise ToolError(
+            f"Phase is set to '{phase}'. This tool is not allowed in this phase. "
+            f"Allowed phases for this tool: {', '.join(tool_phases_list)}."
+        )
+    result = await func(*args, **kwargs)
+    _accumulate_session_tokens(args, kwargs, result)
+    return result
+
+
+def tool_phases(phases: List[str], mcp_only: bool = False):
+    """Decorator to tag MCP tools with applicable operational phases. When mcp_only=True, tool is hidden from REST GET /tools (web UI). Enforces current_nifi_phase before running (control tools are always allowed)."""
     def decorator(func):
-        # Attach attribute (might still be useful)
         setattr(func, PHASE_TAGS_ATTR, phases)
-        # Add to registry
         _tool_phase_registry[func.__name__] = phases
-        _logger.trace(f"Registered phases {phases} for tool {func.__name__}")
-        return func
+        if mcp_only:
+            _mcp_only_tool_names.add(func.__name__)
+        _logger.trace(f"Registered phases {phases} for tool {func.__name__} mcp_only={mcp_only}")
+
+        tool_phases_list = phases
+        tool_name = func.__name__
+
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                return await _check_phase_and_call_async(tool_name, tool_phases_list, func, *args, **kwargs)
+            return async_wrapper
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                return _check_phase_and_call(tool_name, tool_phases_list, func, *args, **kwargs)
+            return sync_wrapper
     return decorator
 # -----------------------------
 

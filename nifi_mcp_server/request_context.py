@@ -13,6 +13,13 @@ current_user_request_id: ContextVar[Optional[str]] = ContextVar("current_user_re
 current_action_id: ContextVar[Optional[str]] = ContextVar("current_action_id", default=None)
 current_workflow_id: ContextVar[Optional[str]] = ContextVar("current_workflow_id", default=None)
 current_step_id: ContextVar[Optional[str]] = ContextVar("current_step_id", default=None)
+# MCP-only control: current NiFi server (stdio) and phase restriction
+current_nifi_server_id: ContextVar[Optional[str]] = ContextVar("current_nifi_server_id", default=None)
+current_nifi_phase: ContextVar[Optional[str]] = ContextVar("current_nifi_phase", default=None)
+# Session info: start time and rough token estimates (len(json.dumps(...))/4 per tool call)
+mcp_session_started_at: ContextVar[Optional[float]] = ContextVar("mcp_session_started_at", default=None)
+session_total_tokens_in: ContextVar[int] = ContextVar("session_total_tokens_in", default=0)
+session_total_tokens_out: ContextVar[int] = ContextVar("session_total_tokens_out", default=0)
 
 # Usage example (in tool functions):
 # from .request_context import current_nifi_client, current_request_logger, current_user_request_id, current_action_id
