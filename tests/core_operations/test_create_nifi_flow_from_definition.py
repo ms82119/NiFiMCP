@@ -1,5 +1,5 @@
 """
-Test suite for create_complete_nifi_flow tool - Phase 1.2 Implementation
+Test suite for create_nifi_flow_from_definition tool - Phase 1.2 Implementation
 
 Tests the enhanced flow creation tool with:
 - Controller services with auto-enabling
@@ -16,7 +16,7 @@ import httpx
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_simple(async_client, base_url, mcp_headers, test_pg):
+async def test_create_nifi_flow_from_definition_simple(async_client, base_url, mcp_headers, test_pg):
     """Tests creating a simple complete flow with just processors and connections."""
     
     nifi_objects = [
@@ -51,7 +51,7 @@ async def test_create_complete_nifi_flow_simple(async_client, base_url, mcp_head
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": nifi_objects,
             "process_group_id": test_pg["id"]  # Use test process group
@@ -78,7 +78,7 @@ async def test_create_complete_nifi_flow_simple(async_client, base_url, mcp_head
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_with_services(async_client, base_url, mcp_headers, test_pg):
+async def test_create_nifi_flow_from_definition_with_services(async_client, base_url, mcp_headers, test_pg):
     """Tests creating a complete flow with controller services and @ServiceName references."""
     
     nifi_objects = [
@@ -122,7 +122,7 @@ async def test_create_complete_nifi_flow_with_services(async_client, base_url, m
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": nifi_objects,
             "process_group_id": test_pg["id"]  # Use test process group
@@ -158,7 +158,7 @@ async def test_create_complete_nifi_flow_with_services(async_client, base_url, m
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_validation_errors(async_client, base_url, mcp_headers, test_pg):
+async def test_create_nifi_flow_from_definition_validation_errors(async_client, base_url, mcp_headers, test_pg):
     """Tests validation error handling in complete flow creation."""
     
     # Test with missing required fields
@@ -181,7 +181,7 @@ async def test_create_complete_nifi_flow_validation_errors(async_client, base_ur
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": invalid_objects,
             "process_group_id": test_pg["id"]  # Use test process group
@@ -202,7 +202,7 @@ async def test_create_complete_nifi_flow_validation_errors(async_client, base_ur
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_with_process_group(async_client, base_url, mcp_headers):
+async def test_create_nifi_flow_from_definition_with_process_group(async_client, base_url, mcp_headers):
     """Tests creating a complete flow in a new process group."""
     
     nifi_objects = [
@@ -225,7 +225,7 @@ async def test_create_complete_nifi_flow_with_process_group(async_client, base_u
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": nifi_objects,
             "create_process_group": create_process_group
@@ -318,7 +318,7 @@ async def test_create_complete_nifi_flow_with_process_group(async_client, base_u
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_duplicate_names(async_client, base_url, mcp_headers, test_pg):
+async def test_create_nifi_flow_from_definition_duplicate_names(async_client, base_url, mcp_headers, test_pg):
     """Tests handling of duplicate component names."""
     
     nifi_objects = [
@@ -342,7 +342,7 @@ async def test_create_complete_nifi_flow_duplicate_names(async_client, base_url,
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": nifi_objects,
             "process_group_id": test_pg["id"]  # Use test process group
@@ -370,7 +370,7 @@ async def test_create_complete_nifi_flow_duplicate_names(async_client, base_url,
 
 
 @pytest.mark.anyio  
-async def test_create_complete_nifi_flow_unresolved_service_references(async_client, base_url, mcp_headers, test_pg):
+async def test_create_nifi_flow_from_definition_unresolved_service_references(async_client, base_url, mcp_headers, test_pg):
     """Tests handling of unresolved @ServiceName references."""
     
     nifi_objects = [
@@ -390,7 +390,7 @@ async def test_create_complete_nifi_flow_unresolved_service_references(async_cli
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": nifi_objects,
             "process_group_id": test_pg["id"]  # Use test process group
@@ -425,7 +425,7 @@ async def test_create_complete_nifi_flow_unresolved_service_references(async_cli
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_comprehensive(
+async def test_create_nifi_flow_from_definition_comprehensive(
     test_pg: Dict[str, Any],
     async_client: httpx.AsyncClient,
     base_url: str,
@@ -490,7 +490,7 @@ async def test_create_complete_nifi_flow_comprehensive(
     result_list = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "process_group_id": pg_id,
             "nifi_objects": comprehensive_flow
@@ -513,7 +513,7 @@ async def test_create_complete_nifi_flow_comprehensive(
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_with_el_auto_correction(
+async def test_create_nifi_flow_from_definition_with_el_auto_correction(
     test_pg: Dict[str, Any],
     async_client: httpx.AsyncClient,
     base_url: str,
@@ -619,7 +619,7 @@ async def test_create_complete_nifi_flow_with_el_auto_correction(
     result_list = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "process_group_id": pg_id,
             "nifi_objects": flow_with_el_issues
@@ -681,7 +681,7 @@ async def test_create_complete_nifi_flow_with_el_auto_correction(
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_efficiency_comparison(async_client, base_url, mcp_headers, test_pg_with_processors):
+async def test_create_nifi_flow_from_definition_efficiency_comparison(async_client, base_url, mcp_headers, test_pg_with_processors):
     """Tests efficiency improvement over individual tool calls."""
     
     import time
@@ -732,7 +732,7 @@ async def test_create_complete_nifi_flow_efficiency_comparison(async_client, bas
     batch_result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": batch_objects,
             "process_group_id": test_pg_id
@@ -762,7 +762,7 @@ async def test_create_complete_nifi_flow_efficiency_comparison(async_client, bas
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_with_invalid_properties(async_client, base_url, mcp_headers, test_pg):
+async def test_create_nifi_flow_from_definition_with_invalid_properties(async_client, base_url, mcp_headers, test_pg):
     """Test that Phase 2B property validation removes invalid properties"""
     process_group_id = test_pg["id"]
     
@@ -786,7 +786,7 @@ async def test_create_complete_nifi_flow_with_invalid_properties(async_client, b
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": nifi_objects,
             "process_group_id": process_group_id
@@ -830,7 +830,7 @@ async def test_create_complete_nifi_flow_with_invalid_properties(async_client, b
 
 
 @pytest.mark.anyio
-async def test_create_complete_nifi_flow_separate_connections(async_client, base_url, mcp_headers, test_pg):
+async def test_create_nifi_flow_from_definition_separate_connections(async_client, base_url, mcp_headers, test_pg):
     """Test Phase 2B connection logic with separate connections parameter"""
     process_group_id = test_pg["id"]
     
@@ -871,7 +871,7 @@ async def test_create_complete_nifi_flow_separate_connections(async_client, base
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="create_complete_nifi_flow",
+        tool_name="create_nifi_flow_from_definition",
         arguments={
             "nifi_objects": nifi_objects,
             "process_group_id": process_group_id,

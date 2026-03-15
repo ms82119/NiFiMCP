@@ -72,7 +72,7 @@ class TestDiscoveryNode:
         """Test that discovery builds PG tree structure."""
         # Mock tool responses
         async def mock_tool(tool_name, arguments, prep_res):
-            if tool_name == "list_nifi_objects_with_streaming":
+            if tool_name == "list_nifi_objects_recursive":
                 return {
                     "results": [{"objects": [], "process_group_id": "root"}],
                     "completed": True

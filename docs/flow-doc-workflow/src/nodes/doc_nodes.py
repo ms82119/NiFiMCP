@@ -214,7 +214,7 @@ class DiscoveryNode(AsyncNiFiWorkflowNode):
         # 1. Fetch processors with streaming
         try:
             result = await self.call_nifi_tool(
-                "list_nifi_objects_with_streaming",
+                "list_nifi_objects_recursive",
                 {
                     "object_type": "processors",
                     "process_group_id": pg_id,

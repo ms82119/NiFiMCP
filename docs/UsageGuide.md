@@ -58,6 +58,12 @@ You can enable or disable these features globally by changing these settings. Th
 3. **Monitor token usage** - Use Auto-prune History when it gets too large.  Use Clear Chat History when you want a new conversation 
 4. **Test incrementally** - Build and test your flow in stages
 
+### Flow documentation and health tools
+1. **Flow summary** – Use `document_nifi_flow` with `include_flow_summary=True` (default) to get entry points, controller services, decision branches, flow paths, and boundary ports in one call. This gives the LLM enough structure to describe the flow or suggest changes.
+2. **Health verdict** – Use `get_process_group_status` to get a single `health` field (`healthy` / `errors` / `degraded`) and an optional `bulletin_summary` (counts by level, last errors) so the agent can decide whether to change the flow or investigate first.
+3. **Outline-first exploration** – For large, deep flows, use `get_flow_outline` to get a lightweight process group tree with counts and boundary ports. Then call `document_nifi_flow` or `get_process_group_status` on the PGs you care about.
+4. **PG-level error analysis** – Use `analyze_nifi_processor_errors` with `process_group_id` to analyze errors across all processors in a group (or use `processor_id` for a single processor).
+
 ### Automated Handling Of Flow Design Errors
 1. **Check processor status** - The LLM will look for INVALID processors and fix configuration issues
 2. **Review bulletins** - The LLM will check for error messages in the NiFi UI
@@ -67,6 +73,7 @@ You can enable or disable these features globally by changing these settings. Th
 1. **Manage conversation history** - Large histories can slow down responses
 2. **Use specific process group IDs** - This helps the LLM focus on relevant components
 3. **Leverage automatic features** - Let the system handle cleanup operations
+4. **Use get_flow_outline first for big flows** - One outline call then targeted documentation keeps token usage down
 
 ## Troubleshooting
 

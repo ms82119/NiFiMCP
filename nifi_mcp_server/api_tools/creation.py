@@ -839,7 +839,7 @@ async def _create_nifi_connections_legacy(
     Creates one or more NiFi connections in batch.
 
     IMPORTANT: This tool requires component UUIDs, not names. Use list_nifi_objects 
-    to get UUIDs first, or use create_complete_nifi_flow for name-based connections.
+    to get UUIDs first, or use create_nifi_flow_from_definition for name-based connections.
 
     Args:
         connections: List of connection definitions. Each dictionary must contain:
@@ -852,7 +852,7 @@ async def _create_nifi_connections_legacy(
     connections = [\n        {\n            \"source_id\": \"93865bc5-0197-1000-1b2c-1865bbf13903\",  # UUID from list_nifi_objects\n            \"target_id\": \"93865be3-0197-1000-9448-9091b9911330\",  # UUID from list_nifi_objects\n            \"relationships\": [\"success\"]\n        }\n    ]\n    ```
     
     Common Mistakes to Avoid:\n    ❌ Using component names: {\"source\": \"HandleHttpRequest\", \"target\": \"LogAttribute\"}\n    ❌ Wrong parameter names: {\"source_id\": \"...\", \"destination_id\": \"...\"}  \n    ❌ Wrong parameter names: {\"objects\": [...]}  # This is for delete_nifi_objects\n    
-    \n    For name-based connections, use create_complete_nifi_flow instead.
+    \n    For name-based connections, use create_nifi_flow_from_definition instead.
 
     Returns:
         List of result dictionaries, one per connection creation attempt.
@@ -1141,12 +1141,12 @@ async def create_nifi_process_group(
         return {"status": "error", "message": f"An unexpected error occurred creating process group '{name}': {e}", "entity": None}
 
 
-# REMOVED: create_nifi_flow tool - replaced by create_complete_nifi_flow
-# The enhanced create_complete_nifi_flow tool provides all functionality of this tool
+# REMOVED: create_nifi_flow tool - replaced by create_nifi_flow_from_definition
+# The enhanced create_nifi_flow_from_definition tool provides all functionality of this tool
 # plus controller services, @ServiceName resolution, and automatic flow validation
 #
 # DEPRECATED: This function has been removed from MCP tool registration.
-# Use create_complete_nifi_flow instead, which supports:
+# Use create_nifi_flow_from_definition instead, which supports:
 # - Controller services with automatic enabling
 # - Processors with @ServiceName reference resolution  
 # - Connections with name-based mapping
@@ -1159,7 +1159,7 @@ async def create_nifi_flow(
     """
     DEPRECATED: Creates a NiFi flow based on a list of processors and connections.
     
-    This function has been replaced by create_complete_nifi_flow which provides
+    This function has been replaced by create_nifi_flow_from_definition which provides
     enhanced functionality including controller services and flow validation.
     
     This function is kept for backward compatibility in tests but is no longer
@@ -1379,7 +1379,7 @@ async def create_nifi_flow(
 
 @mcp.tool()
 @tool_phases(["Build"])
-async def create_complete_nifi_flow(
+async def create_nifi_flow_from_definition(
     nifi_objects: List[Dict[str, Any]],
     process_group_id: str | None = None,
     create_process_group: Optional[Dict[str, Any]] = None,

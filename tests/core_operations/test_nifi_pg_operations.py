@@ -81,7 +81,37 @@ async def test_get_process_group_status(
     assert status_info.get("process_group_name") == pg_name, f"PG status name should be {pg_name}"
     # Check for some basic status fields
     assert "component_summary" in status_info, "PG status should have component_summary"
-    
+    # Health verdict and bulletin summary (from documentation/health tools plan)
+    assert "health" in status_info, "PG status should have health verdict"
+    assert status_info["health"] in ("healthy", "errors", "degraded"), "health should be one of healthy, errors, degraded"
     global_logger.info(f"Test: Successfully retrieved status for PG {pg_id}. Name: {status_info.get('process_group_name')}, Component Summary: {status_info.get('component_summary')}")
+
+
+@pytest.mark.anyio
+async def test_get_process_group_status_includes_bulletin_summary(
+    async_client: httpx.AsyncClient,
+    base_url: str,
+    mcp_headers: Dict[str, str],
+    global_logger: Any,
+    test_pg: Dict[str, Any],
+):
+    """Test that get_process_group_status with include_bulletins=True returns bulletin_summary."""
+    pg_id = test_pg["id"]
+    status_results_list = await call_tool(
+        client=async_client,
+        base_url=base_url,
+        tool_name="get_process_group_status",
+        arguments={"process_group_id": pg_id, "include_bulletins": True},
+        headers=mcp_headers,
+        custom_logger=global_logger
+    )
+    assert isinstance(status_results_list, list) and len(status_results_list) > 0
+    status_info = status_results_list[0]
+    assert status_info.get("process_group_id") == pg_id
+    assert "bulletin_summary" in status_info, "Status should include bulletin_summary when include_bulletins=True"
+    summary = status_info.get("bulletin_summary")
+    if summary is not None:
+        assert "count_by_level" in summary, "bulletin_summary should have count_by_level"
+        assert "last_errors" in summary, "bulletin_summary should have last_errors"
 
 # Add other PG related tests here, e.g., test_get_process_group_status, test_operate_process_group 

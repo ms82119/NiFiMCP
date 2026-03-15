@@ -73,7 +73,7 @@ async def _validate_and_resolve_update_properties(
     """
     Validates and resolves service references in processor property updates.
     
-    This function mirrors the validation and resolution logic from create_complete_nifi_flow
+    This function mirrors the validation and resolution logic from create_nifi_flow_from_definition
     but is specifically optimized for property updates.
     
     Args:

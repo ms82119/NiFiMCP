@@ -323,10 +323,12 @@ async def get_controller_service_types(
 
 @mcp.tool()
 @tool_phases(["Build", "Modify", "Review", "Query"])
-async def get_expert_help(question: str) -> str:
+async def ask_nifi_expert(question: str) -> str:
     """
     Gets expert help from a configured LLM for complex questions or problems.
-    
+
+    Uses a configured LLM (separate from the main chat) to answer NiFi-related questions.
+
     Use this when you need additional expertise or a different perspective on a challenging
     NiFi configuration, debugging, or design question. The expert model can provide insights
     without access to the current conversation history.

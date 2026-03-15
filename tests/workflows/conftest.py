@@ -314,7 +314,7 @@ def mock_call_nifi_tool():
     Returns empty results by default - tests can override as needed.
     """
     async def _mock_call_tool(tool_name, arguments, prep_res):
-        if tool_name == "list_nifi_objects_with_streaming":
+        if tool_name == "list_nifi_objects_recursive":
             return {
                 "results": [{"objects": [], "process_group_id": arguments.get("process_group_id", "root")}],
                 "completed": True,

@@ -379,7 +379,7 @@ class TestWorkflowEndToEndImproved:
             {
                 "type": "function",
                 "function": {
-                    "name": "create_complete_nifi_flow",
+                    "name": "create_nifi_flow_from_definition",
                     "description": "Create a complete NiFi flow",
                     "parameters": {
                         "type": "object",
@@ -403,7 +403,7 @@ class TestWorkflowEndToEndImproved:
                             "id": "call_create_flow",
                             "type": "function",
                             "function": {
-                                "name": "create_complete_nifi_flow",
+                                "name": "create_nifi_flow_from_definition",
                                 "arguments": '{"nifi_objects": [{"type": "processor", "processor_type": "org.apache.nifi.processors.standard.GenerateFlowFile", "name": "GenerateFlowFile", "position": {"x": 100, "y": 100}}], "process_group_id": "root"}'
                             }
                         }]
@@ -458,7 +458,7 @@ class TestWorkflowEndToEndImproved:
         assert shared_state["total_tokens_out"] > 0
         assert shared_state["loop_count"] >= 2
         assert shared_state["tool_calls_executed"] > 0
-        assert "create_complete_nifi_flow" in shared_state.get("executed_tools", [])
+        assert "create_nifi_flow_from_definition" in shared_state.get("executed_tools", [])
 
 
 if __name__ == "__main__":

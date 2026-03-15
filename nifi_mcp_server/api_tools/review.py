@@ -26,7 +26,10 @@ from mcp.server.fastmcp.exceptions import ToolError
 # Import flow documentation tools specifically needed by document_nifi_flow
 from nifi_mcp_server.flow_documenter_improved import (
     document_nifi_flow_simplified,
-    extract_important_properties
+    extract_important_properties,
+    build_graph_structure,
+    find_decision_branches,
+    identify_flow_paths,
 )
 
 # Import context variables
@@ -644,6 +647,8 @@ async def list_nifi_objects(
     Returns
     -------
     Union[List[Dict], Dict]
+        When search_scope='current_group' a flat list is returned; when search_scope='recursive'
+        a dict with 'results', 'completed', and 'continuation_token' is returned.
         - For object_type 'processors', 'connections', 'ports', 'controller_services':
             - If search_scope='current_group': A list of simplified object summaries.
             - If search_scope='recursive': A dictionary containing:
@@ -656,6 +661,9 @@ async def list_nifi_objects(
             - If search_scope='current_group': A list of child process group summaries (id, name, counts).
             - If search_scope='recursive': A nested dictionary representing the process group hierarchy
               with additional fields: 'completed', 'timeout_occurred', 'continuation_token' if timeout occurred.
+
+    For recursive listing with timeouts and continuation tokens in a streaming-friendly form,
+    use list_nifi_objects_recursive.
     """
     # Get client and logger from context variables
     nifi_client: Optional[NiFiClient] = current_nifi_client.get()
@@ -783,7 +791,7 @@ async def list_nifi_objects(
 
 @mcp.tool()
 @tool_phases(["Review", "Build", "Modify", "Operate"])
-async def list_nifi_objects_with_streaming(
+async def list_nifi_objects_recursive(
     object_type: Literal["processors", "connections", "ports", "process_groups"],
     process_group_id: str | None = None,
     timeout_seconds: float = 30.0,
@@ -793,7 +801,10 @@ async def list_nifi_objects_with_streaming(
 ) -> Dict[str, Any]:
     """
     Lists NiFi objects recursively with streaming support for large hierarchies.
-    
+
+    Use this for recursive listing with timeouts and continuation; for single-level
+    or simple recursive listing use list_nifi_objects.
+
     This tool is optimized for deep process group hierarchies and provides:
     - Configurable timeouts with partial results
     - Continuation tokens for resuming interrupted operations
@@ -1472,12 +1483,15 @@ async def document_nifi_flow(
     max_depth: int = 10,
     include_properties: bool = True,
     include_descriptions: bool = True,
+    include_flow_summary: bool = True,
 ) -> Dict[str, Any]:
     """
     Analyzes and documents a NiFi flow starting from a given process group or processor.
 
     This tool extracts processor information with embedded connection details, providing
-    a simplified and token-efficient representation of the flow structure.
+    a simplified and token-efficient representation of the flow structure. When
+    include_flow_summary is True, also adds flow_summary with entry_points, controller_services,
+    decision_branches, flow_paths, and boundary_ports.
 
     Parameters
     ----------
@@ -1491,6 +1505,9 @@ async def document_nifi_flow(
         Whether to include important processor properties in the documentation. Defaults to True.
     include_descriptions : bool, optional
         Whether to include processor and connection descriptions/comments (if available). Defaults to True.
+    include_flow_summary : bool, optional
+        When True (default), adds documentation.flow_summary with entry_points, controller_services,
+        decision_branches, flow_paths, and boundary_ports for LLM-friendly flow structure.
 
     Returns
     -------
@@ -1499,6 +1516,8 @@ async def document_nifi_flow(
         - 'components': Dictionary containing:
             - 'processors': Dict of processors with embedded incoming/outgoing connection info
             - 'ports': Dict of input/output ports
+        - 'flow_summary' (when include_flow_summary=True): entry_points, controller_services,
+          decision_branches, flow_paths, boundary_ports
         Each processor includes:
         - Basic info (id, name, type, state, properties, description)
         - 'outgoing_connections': List of connections where this processor is the source
@@ -1575,7 +1594,87 @@ async def document_nifi_flow(
             user_request_id=user_request_id,
             action_id=action_id
         )
-        
+
+        if include_flow_summary:
+            processors_list = processors_list or []
+            connections_list = connections_list or []
+            input_ports_list = input_ports_list or []
+            output_ports_list = output_ports_list or []
+            # Build set of component ids that have incoming connections
+            has_incoming: Set[str] = set()
+            for conn in connections_list:
+                comp = conn.get("component", {})
+                dest = comp.get("destination", {})
+                dest_id = dest.get("id")
+                if dest_id:
+                    has_incoming.add(dest_id)
+            # Entry points: processors and input ports with no incoming connections
+            entry_points: List[Dict[str, Any]] = []
+            for proc in processors_list:
+                pid = proc.get("id")
+                if not pid or pid in has_incoming:
+                    continue
+                comp = proc.get("component", {})
+                ptype = comp.get("type", "") or ""
+                name = comp.get("name", "Unknown")
+                if "HandleHttpRequest" in ptype or "ListenHTTP" in ptype or "InvokeHTTP" in ptype:
+                    kind = "HTTP_ENTRY"
+                else:
+                    kind = "PROCESSOR"
+                entry_points.append({"id": pid, "name": name, "type": "PROCESSOR", "kind": kind})
+            for port in input_ports_list:
+                pid = port.get("id")
+                if not pid or pid in has_incoming:
+                    continue
+                comp = port.get("component", {})
+                entry_points.append({"id": pid, "name": comp.get("name", "Unknown"), "type": "INPUT_PORT", "kind": "INPUT_PORT"})
+            # Controller services
+            controller_services: List[Dict[str, Any]] = []
+            try:
+                cs_list = await nifi_client.list_controller_services(pg_id, user_request_id=user_request_id, action_id=action_id)
+                for cs in (cs_list or []):
+                    ccomp = cs.get("component", {})
+                    controller_services.append({"id": cs.get("id"), "name": ccomp.get("name", ""), "state": ccomp.get("state", "")})
+            except Exception as e:
+                local_logger.warning(f"Could not list controller services for flow summary: {e}")
+            # all_components: id -> full entity (for find_decision_branches)
+            all_components: Dict[str, Any] = {}
+            for p in processors_list:
+                if p.get("id"):
+                    all_components[p["id"]] = p
+            for port in input_ports_list + output_ports_list:
+                if port.get("id"):
+                    all_components[port["id"]] = port
+            # components: id -> { type, name } for identify_flow_paths
+            components_for_paths: Dict[str, Dict[str, Any]] = {}
+            for p in processors_list:
+                c = p.get("component", {})
+                if p.get("id"):
+                    components_for_paths[p["id"]] = {"type": c.get("type", "PROCESSOR"), "name": c.get("name", "Unknown")}
+            for port in input_ports_list:
+                c = port.get("component", {})
+                if port.get("id"):
+                    components_for_paths[port["id"]] = {"type": "INPUT_PORT", "name": c.get("name", "Unknown")}
+            for port in output_ports_list:
+                c = port.get("component", {})
+                if port.get("id"):
+                    components_for_paths[port["id"]] = {"type": "OUTPUT_PORT", "name": c.get("name", "Unknown")}
+            source_components = [{"id": ep["id"], "name": ep["name"], "type": ep["type"]} for ep in entry_points]
+            graph_data = build_graph_structure(processors_list, connections_list, input_ports_list, output_ports_list)
+            decision_branches = find_decision_branches(all_components, graph_data)
+            flow_paths = identify_flow_paths(components_for_paths, graph_data, source_components)
+            boundary_ports = {
+                "input_ports": [{"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")} for p in input_ports_list if p.get("id")],
+                "output_ports": [{"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")} for p in output_ports_list if p.get("id")],
+            }
+            documentation["flow_summary"] = {
+                "entry_points": entry_points,
+                "controller_services": controller_services,
+                "decision_branches": decision_branches,
+                "flow_paths": flow_paths,
+                "boundary_ports": boundary_ports,
+            }
+
         local_logger.info("Flow documentation analysis complete.")
         return {
             "status": "success",
@@ -1706,6 +1805,114 @@ async def search_nifi_flow(
         local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received unexpected error from NiFi API")
         raise ToolError(f"An unexpected error occurred: {e}") from e
 
+
+async def _enrich_outline_node(
+    node: Dict[str, Any],
+    depth: int,
+    nifi_client: NiFiClient,
+    include_boundary_ports: bool,
+    user_request_id: str,
+    action_id: str,
+    max_depth_for_ports: int = 2,
+) -> Dict[str, Any]:
+    """Enrich a hierarchy node with depth, counts, and optionally boundary ports. Recurses into children."""
+    node_id = node.get("id")
+    node_name = node.get("name", "Unknown")
+    children_raw = node.get("children", node.get("child_process_groups", []))
+    out: Dict[str, Any] = {
+        "id": node_id,
+        "name": node_name,
+        "depth": depth,
+        "child_process_groups": [],
+    }
+    try:
+        counts = await _get_process_group_contents_counts(node_id)
+        out["counts"] = counts
+    except Exception:
+        out["counts"] = {}
+    if include_boundary_ports and depth <= max_depth_for_ports:
+        try:
+            input_ports = await nifi_client.get_input_ports(node_id)
+            output_ports = await nifi_client.get_output_ports(node_id)
+            out["input_ports"] = [{"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")} for p in (input_ports or []) if p.get("id")]
+            out["output_ports"] = [{"id": p.get("id"), "name": (p.get("component") or {}).get("name", "")} for p in (output_ports or []) if p.get("id")]
+        except Exception:
+            out["input_ports"] = []
+            out["output_ports"] = []
+    else:
+        out["input_ports"] = []
+        out["output_ports"] = []
+    for child in children_raw:
+        enriched_child = await _enrich_outline_node(
+            child, depth + 1, nifi_client, include_boundary_ports,
+            user_request_id, action_id, max_depth_for_ports
+        )
+        out["child_process_groups"].append(enriched_child)
+    return out
+
+
+@mcp.tool()
+@tool_phases(["Review", "Build", "Modify", "Operate"])
+async def get_flow_outline(
+    process_group_id: str | None = None,
+    max_depth: int = 10,
+    timeout_seconds: float | None = None,
+    include_boundary_ports: bool = True,
+) -> Dict[str, Any]:
+    """
+    Returns a lightweight process group tree (outline) with counts and optional boundary ports.
+
+    Use this for outline-first exploration of large, deep flows: one call returns the PG hierarchy
+    with component counts (and optionally input/output port names for the first levels). The LLM
+    can then choose which PGs to document in detail via document_nifi_flow or get_process_group_status.
+
+    Args:
+        process_group_id: The root process group ID. Defaults to root if None.
+        max_depth: Not used in current implementation (hierarchy is fully recursive subject to timeout).
+        timeout_seconds: Max seconds for hierarchy fetch. If exceeded, returns partial outline with
+            completed=False and continuation_token.
+        include_boundary_ports: When True, adds input_ports and output_ports to each node for
+            depth <= 2 to avoid excessive API calls on large trees.
+
+    Returns:
+        process_group_id, process_group_name, outline (id, name, depth, counts, input_ports,
+        output_ports, child_process_groups), completed, timeout_occurred, continuation_token.
+    """
+    nifi_client: Optional[NiFiClient] = current_nifi_client.get()
+    local_logger = current_request_logger.get() or logger
+    user_request_id = current_user_request_id.get() or "-"
+    action_id = current_action_id.get() or "-"
+    if not nifi_client:
+        raise ToolError("NiFi client not found in context.")
+    try:
+        target_pg_id = process_group_id
+        if not target_pg_id:
+            target_pg_id = await nifi_client.get_root_process_group_id(user_request_id=user_request_id, action_id=action_id)
+            if not target_pg_id:
+                raise ToolError("Could not retrieve root process group ID.")
+        pg_name = await _get_process_group_name(target_pg_id)
+        hierarchy = await _get_process_group_hierarchy_with_timeout(
+            target_pg_id, recursive_search=True, timeout_seconds=timeout_seconds
+        )
+        outline = await _enrich_outline_node(
+            hierarchy, 0, nifi_client, include_boundary_ports, user_request_id, action_id
+        )
+        return {
+            "process_group_id": target_pg_id,
+            "process_group_name": pg_name,
+            "outline": outline,
+            "completed": hierarchy.get("completed", True),
+            "timeout_occurred": hierarchy.get("timeout_occurred", False),
+            "continuation_token": hierarchy.get("continuation_token"),
+        }
+    except (ValueError, ConnectionError, NiFiAuthenticationError) as e:
+        local_logger.error(f"Error getting flow outline: {e}", exc_info=False)
+        raise ToolError(f"Error getting flow outline: {e}") from e
+    except Exception as e:
+        local_logger.error(f"Unexpected error getting flow outline: {e}", exc_info=True)
+        raise ToolError(f"An unexpected error occurred: {e}") from e
+
+
 @mcp.tool()
 @tool_phases(["Review", "Operate"])
 async def get_process_group_status(
@@ -1717,7 +1924,8 @@ async def get_process_group_status(
     Provides a consolidated status overview of a process group.
 
     Includes component state summaries, validation issues, connection queue sizes,
-    and optionally, recent bulletins for the group.
+    a health verdict (healthy / errors / degraded), optional bulletin summary, and
+    optionally recent bulletins for the group.
 
     Args:
         process_group_id: The ID of the target process group. Defaults to root if None.
@@ -1725,7 +1933,11 @@ async def get_process_group_status(
         bulletin_limit: Max number of bulletins to fetch if include_bulletins is True.
 
     Returns:
-        A dictionary summarizing the status as defined in the plan.
+        A dictionary with: process_group_id, process_group_name, component_summary,
+        invalid_components, queue_summary, bulletins (if requested), health
+        ("healthy" | "errors" | "degraded"), health_reason (str or None), and
+        bulletin_summary (when include_bulletins=True): count_by_level (ERROR/WARNING/INFO),
+        last_errors (up to 10 with message, source_id, source_name, timestamp, category).
     """
     # Get client, logger, and context IDs
     nifi_client: Optional[NiFiClient] = current_nifi_client.get()
@@ -1764,10 +1976,8 @@ async def get_process_group_status(
             local_logger.info("process_group_id not provided, resolving root.")
             target_pg_id = await nifi_client.get_root_process_group_id(user_request_id=user_request_id, action_id=action_id)
             local_logger.info(f"Resolved root process group ID: {target_pg_id}")
-            results["process_group_name"] = "Root"
-        else:
-            # Use helper to get name, handles errors internally
-            results["process_group_name"] = await _get_process_group_name(target_pg_id)
+        # Use same helper for root and non-root so name matches get_flow_outline (e.g. "NiFi Flow")
+        results["process_group_name"] = await _get_process_group_name(target_pg_id)
         
         results["process_group_id"] = target_pg_id
         local_logger = local_logger.bind(process_group_id=target_pg_id) # Bind resolved ID
@@ -1961,6 +2171,57 @@ async def get_process_group_status(
         else:
             local_logger.info("Skipping bulletin fetch as per request.")
             results["bulletins"] = None # Explicitly set to None if not included
+
+        # --- Step 5: Health verdict and bulletin summary ---
+        invalid_list = results["invalid_components"]
+        bulletins_list = results["bulletins"] if isinstance(results["bulletins"], list) else []
+        # Normalize bulletin items (NiFi may return { "bulletin": { ... } } or flat object)
+        count_by_level = {"ERROR": 0, "WARNING": 0, "INFO": 0}
+        last_errors = []
+        for item in bulletins_list:
+            if isinstance(item, dict) and "error" in item:
+                continue  # Skip fetch-error placeholder
+            b_data = item.get("bulletin", item) if isinstance(item, dict) else {}
+            level = (b_data.get("level") or "").upper()
+            if level in count_by_level:
+                count_by_level[level] += 1
+            if level == "ERROR":
+                last_errors.append({
+                    "message": b_data.get("message", ""),
+                    "source_id": b_data.get("sourceId"),
+                    "source_name": b_data.get("sourceName"),
+                    "timestamp": b_data.get("timestamp"),
+                    "category": b_data.get("category"),
+                })
+        # Keep last 10 errors
+        last_errors = last_errors[:10]
+        results["bulletin_summary"] = {
+            "count_by_level": count_by_level,
+            "last_errors": last_errors,
+        } if include_bulletins and not any(isinstance(x, dict) and x.get("error") for x in bulletins_list) else None
+
+        has_invalid = len(invalid_list) > 0
+        has_error_bulletins = count_by_level["ERROR"] > 0
+        comp_summary = results["component_summary"]
+        stopped_processors = comp_summary["processors"].get("stopped", 0)
+        stopped_ports = comp_summary["input_ports"].get("stopped", 0) + comp_summary["output_ports"].get("stopped", 0)
+        conns_with_data = len(queue_summary["connections_with_data"])
+        has_degraded = (stopped_processors + stopped_ports > 0 or (queue_summary["total_queued_count"] > 0 and conns_with_data > 5)) and not has_invalid and not has_error_bulletins
+
+        if has_invalid or has_error_bulletins:
+            reasons = []
+            if has_invalid:
+                reasons.append(f"{len(invalid_list)} invalid component(s)")
+            if has_error_bulletins:
+                reasons.append(f"{count_by_level['ERROR']} ERROR bulletin(s)")
+            results["health"] = "errors"
+            results["health_reason"] = "; ".join(reasons)
+        elif has_degraded:
+            results["health"] = "degraded"
+            results["health_reason"] = "Stopped components or elevated queue backpressure"
+        else:
+            results["health"] = "healthy"
+            results["health_reason"] = None
 
         local_logger.info("Process group status overview fetch complete.")
         return results

@@ -14,3 +14,5 @@ docs/libdocs/
 chat_history.db
 nifi_tokens.json
 nifi_chat_ui/system_prompt copy 2.md
+.cursor/plans/
+.pytest_cache/

@@ -14,8 +14,8 @@ from typing import List, Dict, Any
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Use MCP_SERVER_URL if set (e.g. http://localhost:8001), else default 8000
-BASE_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000")
+# Use MCP_SERVER_URL if set, else MCP_SERVER_PORT (default 8000)
+BASE_URL = os.environ.get("MCP_SERVER_URL") or f"http://localhost:{os.environ.get('MCP_SERVER_PORT', '8000')}"
 HEADERS = {'X-Nifi-Server-Id': 'nifi-local-example'}
 
 # Test process group name patterns to identify and clean up

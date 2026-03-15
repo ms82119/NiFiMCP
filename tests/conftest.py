@@ -16,7 +16,11 @@ pytest_plugins = ("anyio",)
 
 @pytest.fixture(scope="session")
 def base_url() -> str:
-    return os.environ.get("MCP_SERVER_URL", "http://localhost:8000")
+    url = os.environ.get("MCP_SERVER_URL")
+    if url:
+        return url
+    port = os.environ.get("MCP_SERVER_PORT", "8001")
+    return f"http://localhost:{port}"
 
 @pytest.fixture(scope="session")
 def target_nifi_server_id(global_logger: Any) -> str:
