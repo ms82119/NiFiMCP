@@ -51,47 +51,37 @@ Return ONLY the JSON array, no other text."""
 
 # =============================================================================
 # PROCESS GROUP SUMMARY (for leaf PGs or virtual groups)
+# Temporarily Removed: {pg_purpose}, {categories_json}, {io_endpoints_json},
+# {business_logic_json}
 # =============================================================================
 
-PG_SUMMARY_PROMPT = """Write a comprehensive technical analysis of this NiFi Process Group for documentation.
+PG_SUMMARY_PROMPT = """Write a technical analysis of this NiFi Process Group for documentation purposes.
 
 Process Group: {pg_name}
-{pg_purpose}
 
-Processors ({processor_count} total) by category (includes state: RUNNING, STOPPED, DISABLED, etc.):
-{categories_json}
+Processors ({processor_count} total):
+{processors_json}
 
 Data Flow (connections between processors):
 {connections_json}
 
-IO Endpoints (CRITICAL - external interactions):
-{io_endpoints_json}
-
-Business Logic (CRITICAL - routing rules, field extractions, transformations):
-{business_logic_json}
-
 Child summaries (if any):
-{child_summaries_json}
+{children_digest}
 
-Write a comprehensive technical analysis that covers all of the following sections. Use as many paragraphs as needed to be clear and complete, but ensure you include all important details. Be clear and concise, but no simpler - include all technical details that developers need.
+Write a technical analysis of this part of a NiFi flow that is used in an Anti Money Laundering (AML) system.  Accuracy and extreme brevity are top priority.
 
-1. **Purpose and Overview** (1-2 paragraphs):
-   - What this process group does and why it exists
-   - Its role in the overall data flow
+1. **Purpose and Overview**:
+   - What this process group does
    - The type of data it processes
 
-2. **Data Flow Sequence** (2-4 paragraphs):
-   - Trace the EXACT path data takes through processors in sequence
-   - Use the connections_json to understand processor relationships
-   - Explain the flow: Processor A → Processor B → Processor C
-   - For each step, explain:
-     * What processor receives the data
-     * What transformation or operation occurs
-     * What output is produced
-     * Where the data goes next
-   - Show how processors work together to create the overall behavior
+2. **Data Flow Sequence**:
+   - Use the connections and processors information supplied
+   - Find what looks to be the starting points (there could be multiple), and trace each through to their ends
+   - Note their current state (RUNNING, STOPPED, DISABLED, etc.) as that could indicate if this flow is currently active or not
+   - Trace the EXACT path data takes through processors in sequence and describe what it is doing
+   - It's not necessary to list every processor, and it's OK to combine steps/processors into a single description, but do make a reference to important business or technical details that will be covered in more detail in the Business Logic Analysis section below
 
-3. **Business Logic Analysis** (2-4 paragraphs):
+3. **Business Logic Analysis**:
    - For EACH routing rule: Quote the EXACT expression verbatim and explain what it does
      Example: "RouteOnAttribute processor implements routing condition `${{messageType:startsWith("MT7")}}` which routes messages where the messageType attribute begins with the string 'MT7'"
    - For EACH field extraction: Quote the EXACT JSONPath or Expression Language and explain what field is extracted
@@ -101,19 +91,6 @@ Write a comprehensive technical analysis that covers all of the following sectio
    - Explain how these logic elements work together to create the overall business behavior
    - Show how data flows through the logic chain: extraction → routing → transformation
 
-4. **External Interactions** (1-2 paragraphs):
-   - List ALL external systems, URLs, file paths, databases, or message queues
-   - For each IO endpoint, specify:
-     * The exact URL, path, topic, or connection string
-     * What data is sent/received
-     * The protocol or method used
-     * Any authentication or configuration details
-
-5. **Error Handling** (1 paragraph):
-   - Explain how errors are handled (or not handled)
-   - Note any unhandled error relationships
-   - Explain what happens when processors fail
-   - Note if any processors are in STOPPED, DISABLED, or INVALID state and what that means
 
 CRITICAL REQUIREMENTS:
 - Quote ALL expressions verbatim: routing conditions, JSONPath expressions, Expression Language, attribute names
@@ -121,16 +98,16 @@ CRITICAL REQUIREMENTS:
 - Be technical and precise: This documentation is for developers who need exact details
 - Include specific processor names, expressions, and technical details
 - Do NOT include processor IDs or UUIDs in the text
-- Use as many paragraphs as needed to be complete - quality and completeness are more important than brevity
+- Accuracy and extreme brevity are top priority.
 
-The analysis should be clear and concise, but no simpler - include all important technical details that developers need to understand the flow."""
+"""
 
 
 # =============================================================================
 # PROCESS GROUP WITH CHILDREN (for parent PGs using child summaries)
 # =============================================================================
 
-PG_WITH_CHILDREN_PROMPT = """Write a comprehensive technical analysis of this parent Process Group based on its children.
+PG_WITH_CHILDREN_PROMPT = """Write a technical analysis of this NiFi Process Group for documentation purposes.
 
 Process Group: {pg_name}
 Contains {child_count} sub-components:
@@ -185,74 +162,45 @@ This process group contains:
 Sub-components:
 {children_digest}
 
-Own processors ({processor_count} total) by category:
-{categories_json}
+Own processors ({processor_count} total):
+{processors_json}
 
 Data Flow (connections between own processors):
 {connections_json}
 
-IO Endpoints from own processors (CRITICAL - external interactions):
-{io_endpoints_json}
+Write a technical analysis of this part of a NiFi flow that is used in an Anti Money Laundering (AML) system.  Accuracy and extreme brevity are top priority.
 
-Business Logic from own processors (CRITICAL - routing rules, field extractions, transformations):
-{business_logic_json}
+1. **Purpose and Overview**:
+   - What this process group does
+   - The type of data it processes
 
-Write a comprehensive technical analysis that covers all of the following sections. Use as many paragraphs as needed to be clear and complete, but ensure you include all important details. Be clear and concise, but no simpler - include all technical details that developers need.
+2. **Data Flow Sequence**:
+   - Use the connections and processors information supplied, as well as the sub-components information supplied
+   - Find what looks to be the starting points (there could be multiple), and trace each through to their ends
+   - Note their current state (RUNNING, STOPPED, DISABLED, etc.) as that could indicate if this flow is currently active or not
+   - Trace the EXACT path data takes through processors in sequence and describe what it is doing
+   - It's not necessary to list every processor, and it's OK to combine steps/processors into a single description, but do make a reference to important business or technical details that will be covered in more detail in the Business Logic Analysis section below
 
-1. **Overall Purpose** (1-2 paragraphs):
-   - What this process group does overall and why it exists
-   - Its role in the larger data flow architecture
-   - How it coordinates between its own processors and sub-components
-
-2. **Own Processors Analysis** (2-4 paragraphs):
-   - Trace the EXACT path data takes through the own processors
-   - Use connections_json to understand processor relationships
-   - For each processor, explain:
-     * What it does
-     * What input it receives
-     * What transformation or operation occurs
-     * What output it produces
-   - Show how the own processors work together
-
-3. **Business Logic from Own Processors** (2-4 paragraphs):
+3. **Business Logic Analysis**:
    - For EACH routing rule: Quote the EXACT expression verbatim and explain what it does
      Example: "RouteOnAttribute processor implements routing condition `${{messageType:startsWith("MT7")}}` which routes messages where the messageType attribute begins with the string 'MT7'"
    - For EACH field extraction: Quote the EXACT JSONPath or Expression Language and explain what field is extracted
      Example: "EvaluateJsonPath extracts the messageType field using JSONPath expression `$["MessageType"]` which reads the MessageType field from the JSON payload root"
    - For EACH transformation: Explain what transformation occurs, how it works, and why it's needed
    - For EACH attribute update: Quote the EXACT expression and explain what attribute is set/modified
-   - Explain how these logic elements work together
+   - Explain how these logic elements work together to create the overall business behavior
+   - Show how data flows through the logic chain: extraction → routing → transformation
 
-4. **Integration with Sub-Components** (2-3 paragraphs):
-   - Explain how the own processors integrate with sub-components
-   - Show the data flow: own processors → sub-components OR sub-components → own processors
-   - Explain how results from own processors feed into children (or vice versa)
-   - Describe the coordination and orchestration between own processors and children
-
-5. **External Interactions from Own Processors** (1-2 paragraphs):
-   - List ALL external systems, URLs, file paths, databases, or message queues accessed by own processors
-   - For each IO endpoint, specify:
-     * The exact URL, path, topic, or connection string
-     * What data is sent/received
-     * The protocol or method used
-     * Any authentication or configuration details
-
-6. **Error Handling** (1 paragraph):
-   - Explain how errors are handled in own processors
-   - Note any unhandled error relationships
-   - Explain how errors propagate between own processors and sub-components
-   - Note if any processors are in STOPPED, DISABLED, or INVALID state
 
 CRITICAL REQUIREMENTS:
 - Quote ALL expressions verbatim: routing conditions, JSONPath expressions, Expression Language, attribute names
-- Explain logic chains: Show how data flows through own processors and how they integrate with sub-components
+- Explain logic chains: Show how data flows from one processor to the next and how each step builds on the previous
 - Be technical and precise: This documentation is for developers who need exact details
 - Include specific processor names, expressions, and technical details
 - Do NOT include processor IDs or UUIDs in the text
-- Use as many paragraphs as needed to be complete - quality and completeness are more important than brevity
+- Accuracy and extreme brevity are top priority.
 
-The analysis should be clear and concise, but no simpler - include all important technical details that developers need to understand the flow."""
-
+"""
 
 # =============================================================================
 # HIERARCHICAL EXECUTIVE SUMMARY (for final documentation)

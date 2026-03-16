@@ -63,104 +63,30 @@ async def extract_io_endpoints_detailed(
     if not proc_ids:
         return []
     
-    # Use cached details if available, otherwise fetch
+    # No longer need to fetch from API - flow_graph.processors has all properties
+    # proc_details_map is only used for structure, but we get properties from flow_graph
     proc_details_map = {}
-    if cached_proc_details:
-        proc_details_map = {pid: cached_proc_details.get(pid, {}) for pid in proc_ids}
-        # Check if we have all the data we need (must have component.config.properties)
-        missing_ids = [
-            pid for pid in proc_ids 
-            if not proc_details_map.get(pid, {}).get("component", {}).get("config", {}).get("properties")
-        ]
-        if missing_ids:
-            # Fetch missing ones
-            try:
-                result = await nifi_tool_caller(
-                    "get_nifi_object_details",
-                    {
-                        "object_type": "processor",
-                        "object_ids": missing_ids,
-                        "output_format": "doc_optimized",
-                        "include_properties": True
-                    },
-                    prep_res
-                )
-                if isinstance(result, str):
-                    result = json.loads(result)
-                if not isinstance(result, list):
-                    result = [result] if isinstance(result, dict) else []
-                for item in result:
-                    if isinstance(item, dict) and item.get("status") == "success":
-                        proc_details_map[item.get("id")] = item.get("data", {})
-            except Exception as e:
-                if logger:
-                    logger.warning(f"Failed to fetch missing processor details: {e}")
-    else:
-        # No cache, fetch all
-        try:
-            result = await nifi_tool_caller(
-                "get_nifi_object_details",
-                {
-                    "object_type": "processor",
-                    "object_ids": proc_ids,
-                    "output_format": "doc_optimized",  # Gets business_properties
-                    "include_properties": True
-                },
-                prep_res
-            )
-            
-            if isinstance(result, str):
-                result = json.loads(result)
-            
-            # DEFENSIVE: Ensure result is iterable (list)
-            if not isinstance(result, list):
-                if logger:
-                    logger.warning(f"IO tool result is not a list: {type(result)}")
-                result = [result] if isinstance(result, dict) else []
-            
-            # Map results by ID
-            for item in result:
-                # DEFENSIVE: Ensure item is a dict before calling .get()
-                if isinstance(item, dict) and item.get("status") == "success":
-                    proc_details_map[item.get("id")] = item.get("data", {})
-        
-        except Exception as e:
-            if logger:
-                logger.warning(f"Failed to fetch detailed IO endpoints: {e}")
-            # Fallback to basic extraction
-            return extract_io_basic(processors, categorizer)
     
     # Build detailed endpoint info
     endpoints = []
     
+    # Build a map of processors from flow_graph (which have all properties from discovery)
+    flow_graph_processors = {}
+    for proc in processors:
+        proc_id = proc.get("id")
+        if proc_id:
+            flow_graph_processors[proc_id] = proc
+    
     # Extract endpoint details for each IO processor
     for io_proc in io_processors:
         proc_id = io_proc["id"]
-        details = proc_details_map.get(proc_id, {})
-        # DEFENSIVE: Ensure details is a dict
-        if not isinstance(details, dict):
-            if logger:
-                logger.warning(f"Details for {proc_id} is not a dict: {type(details)}")
-            continue
-        component = details.get("component", details)
-        # DEFENSIVE: Ensure component is a dict
-        if not isinstance(component, dict):
-            if logger:
-                logger.warning(f"Component for {proc_id} is not a dict: {type(component)}")
-            component = {}
-        config = component.get("config", {})
-        # DEFENSIVE: Ensure config is a dict
-        if not isinstance(config, dict):
-            if logger:
-                logger.warning(f"Config for {proc_id} is not a dict: {type(config)}")
-            config = {}
-        properties = config.get("properties", {})
-        # DEFENSIVE: Ensure properties is a dict (critical - this is where the error likely occurs)
-        if not isinstance(properties, dict):
-            if logger:
-                logger.error(f"Properties for {proc_id} is not a dict: {type(properties)}, value: {properties}")
-            properties = {}
-        business_props = details.get("business_properties", {})
+        
+        # Get properties from flow_graph.processors (discovery data - has all properties)
+        flow_graph_proc = flow_graph_processors.get(proc_id, {})
+        properties = flow_graph_proc.get("properties", {})
+        
+        # business_properties not needed - we have full properties from flow_graph
+        business_props = {}
         # DEFENSIVE: Ensure business_props is a dict
         if not isinstance(business_props, dict):
             if logger:
@@ -168,28 +94,24 @@ async def extract_io_endpoints_detailed(
             business_props = {}
         
         # Format processor reference with name, type, ID
-        # Ensure we have the right structure for format_processor_reference
-        proc_for_formatting = {"id": proc_id}
-        if "component" in details:
-            proc_for_formatting["component"] = details["component"]
-        elif component and component != details:
-            # component is already extracted, wrap it
-            proc_for_formatting["component"] = component
-        else:
-            # Fallback: use what we have from io_proc
-            proc_for_formatting["component"] = {
-                "name": io_proc["name"],
-                "type": io_proc["type"],
+        # Use flow_graph processor data directly
+        flow_graph_proc = flow_graph_processors.get(proc_id, {})
+        proc_for_formatting = {
+            "id": proc_id,
+            "component": {
+                "name": flow_graph_proc.get("name", io_proc["name"]),
+                "type": flow_graph_proc.get("type", io_proc["type"]),
                 "id": proc_id
             }
+        }
         
         proc_formatted = format_processor_reference(proc_for_formatting)
         
         endpoint = {
             "processor": io_proc["name"],
             "processor_type": io_proc["type"].split(".")[-1],
-            "processor_id": proc_id[:8] if proc_id else "N/A",
-            "processor_reference": proc_formatted,  # Full formatted reference
+            "processor_id": proc_id if proc_id else "N/A",  # Full UUID
+            "processor_reference": proc_formatted,  # Full formatted reference (uses short ID in format)
             "type": io_proc["type"].split(".")[-1],  # Keep for backward compat
             "direction": "INPUT" if io_proc["category"] == "IO_READ" else "OUTPUT",
             "endpoint_details": {}
@@ -202,8 +124,8 @@ async def extract_io_endpoints_detailed(
         if proc_type_simple in ["GetFile", "PutFile", "ListFile"]:
             endpoint["endpoint_details"] = {
                 "type": "file_system",
-                "directory": properties.get("Directory", business_props.get("directory", "")),
-                "file_filter": properties.get("File Filter", business_props.get("file_filter", "")),
+                "directory": properties.get("Directory", ""),
+                "file_filter": properties.get("File Filter", ""),
                 "path": properties.get("Directory", "")
             }
         
@@ -221,8 +143,8 @@ async def extract_io_endpoints_detailed(
         elif proc_type_simple in ["InvokeHTTP", "GetHTTP", "PostHTTP"]:
             endpoint["endpoint_details"] = {
                 "type": "http",
-                "url": properties.get("Remote URL", business_props.get("url", "")),
-                "method": properties.get("HTTP Method", business_props.get("method", "GET")),
+                "url": properties.get("Remote URL", ""),
+                "method": properties.get("HTTP Method", "GET"),
                 "ssl_context": properties.get("SSL Context Service", "")
             }
         
@@ -296,8 +218,8 @@ async def extract_io_endpoints_detailed(
         elif "Kafka" in proc_type_simple or proc_type_simple in ["ConsumeKafka", "PublishKafka"]:
             endpoint["endpoint_details"] = {
                 "type": "kafka",
-                "topic": properties.get("topic", properties.get("Topic Name(s)", business_props.get("topic", ""))),
-                "bootstrap_servers": properties.get("bootstrap.servers", business_props.get("bootstrap_servers", "")),
+                "topic": properties.get("topic", properties.get("Topic Name(s)", "")),
+                "bootstrap_servers": properties.get("bootstrap.servers", ""),
                 "consumer_group": properties.get("Group ID", "")
             }
         
@@ -382,8 +304,8 @@ def extract_io_basic(
             endpoints.append({
                 "processor": proc_name,
                 "processor_type": proc_type.split(".")[-1],
-                "processor_id": proc_id[:8] if proc_id else "N/A",
-                "processor_reference": proc_formatted,
+                "processor_id": proc_id if proc_id else "N/A",  # Full UUID
+                "processor_reference": proc_formatted,  # Uses short ID in format
                 "type": proc_type.split(".")[-1],  # Keep for backward compat
                 "direction": "INPUT" if category == "IO_READ" else "OUTPUT",
                 "endpoint_details": {"type": "unknown", "note": "Details not available"}

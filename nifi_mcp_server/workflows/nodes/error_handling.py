@@ -102,82 +102,13 @@ async def extract_error_handling(
     # Build connection map
     connection_map = _build_connection_map(connections)
     
-    # Get detailed processor info to access relationships
-    proc_ids = [p.get("id") for p in processors]
-    
-    # Skip API call if no processors
-    if not proc_ids:
-        return []
-    
-    # Use cached details if available, otherwise fetch
+    # Build processor map from flow_graph.processors (has all data from discovery)
     proc_details_map = {}
-    if cached_proc_details:
-        proc_details_map = {pid: cached_proc_details.get(pid, {}) for pid in proc_ids}
-        # Check if we have relationships data
-        missing_ids = [
-            pid for pid in proc_ids 
-            if not proc_details_map.get(pid, {}).get("component", {}).get("relationships")
-        ]
-        if missing_ids:
-            # Fetch missing ones with summary format (lightweight - just need relationships)
-            try:
-                result = await nifi_tool_caller(
-                    "get_nifi_object_details",
-                    {
-                        "object_type": "processor",
-                        "object_ids": missing_ids,
-                        "output_format": "summary",
-                        "include_properties": False
-                    },
-                    prep_res
-                )
-                if isinstance(result, str):
-                    result = json.loads(result)
-                if not isinstance(result, list):
-                    result = [result] if isinstance(result, dict) else []
-                for item in result:
-                    if isinstance(item, dict) and item.get("status") == "success":
-                        proc_details_map[item.get("id")] = item.get("data", {})
-            except Exception as e:
-                if logger:
-                    logger.warning(f"Failed to fetch missing processor details for error analysis: {e}")
-    else:
-        # No cache, fetch all with summary format (lightweight - just need relationships)
-        try:
-            result = await nifi_tool_caller(
-                "get_nifi_object_details",
-                {
-                    "object_type": "processor",
-                    "object_ids": proc_ids,
-                    "output_format": "summary",  # Lightweight - just need relationships
-                    "include_properties": False
-                },
-                prep_res
-            )
-            
-            if isinstance(result, str):
-                result = json.loads(result)
-            
-            # DEFENSIVE: Ensure result is iterable (list)
-            if not isinstance(result, list):
-                if logger:
-                    logger.warning(f"Tool result is not a list: {type(result)}")
-                result = [result] if isinstance(result, dict) else []
-            
-            # Map processor details by ID
-            for item in result:
-                # DEFENSIVE: Ensure item is a dict before calling .get()
-                if isinstance(item, dict) and item.get("status") == "success":
-                    proc_details_map[item.get("id")] = item.get("data", {})
-        
-        except Exception as e:
-            if logger:
-                logger.warning(f"Failed to fetch processor details for error analysis: {e}")
-            # Fallback to basic processor data
-            proc_details_map = {
-                p.get("id"): p.get("component", p)
-                for p in processors
-            }
+    for proc in processors:
+        proc_id = proc.get("id")
+        if proc_id:
+            # flow_graph.processors already has relationships, state, name, etc.
+            proc_details_map[proc_id] = proc
     
     # Analyze each processor for error handling
     for proc in processors:
@@ -281,12 +212,12 @@ async def extract_error_handling(
             error_handling.append({
                 "processor": proc_name,
                 "processor_type": proc_type.split(".")[-1],
-                "processor_id": proc_id[:8] if proc_id else "N/A",
-                "processor_reference": proc_formatted,  # Full formatted reference
+                "processor_id": proc_id if proc_id else "N/A",  # Full UUID
+                "processor_reference": proc_formatted,  # Full formatted reference (uses short ID in format)
                 "error_relationship": rel_name,
                 "handled": is_handled,
                 "destination": destination_formatted,  # Formatted with name, type, ID
-                "destination_id": destination_id[:8] if destination_id else None,
+                "destination_id": destination_id if destination_id else None,  # Full UUID
                 "auto_terminated": auto_terminated
             })
     

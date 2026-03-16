@@ -26,6 +26,130 @@ def get_pg_processors(
     ]
 
 
+def get_pg_connections_for_processors(
+    processor_ids: set,
+    prep_res: Dict[str, Any]
+) -> List[Dict]:
+    """Get connections where sourceId or destinationId matches any processor in the set."""
+    all_connections = prep_res["flow_graph"].get("connections", [])
+    matching_connections = []
+    
+    for conn in all_connections:
+        # Try nested structure first
+        comp = conn.get("component", {})
+        source = comp.get("source", {})
+        dest = comp.get("destination", {})
+        
+        if source or dest:
+            source_id = source.get("id")
+            dest_id = dest.get("id")
+        else:
+            # Use flat structure
+            source_id = conn.get("sourceId")
+            dest_id = conn.get("destinationId")
+        
+        # Include connection if either source or destination matches our processors
+        if source_id in processor_ids or dest_id in processor_ids:
+            matching_connections.append(conn)
+    
+    return matching_connections
+
+
+def format_processors_for_prompt(
+    processors: List[Dict]
+) -> List[Dict]:
+    """Format processors with all data from flow_graph for prompt.
+    
+    Includes all fields stored during discovery:
+    - id, name, type, state
+    - properties (full dict from discovery)
+    - relationships
+    - position, validationStatus, validationErrors
+    - Any other fields captured during discovery
+    """
+    formatted = []
+    for proc in processors:
+        # Get processor data - handle both nested (component) and flat structures
+        proc_id = proc.get("id", "")
+        proc_component = proc.get("component", {})
+        
+        # Build processor dict with all available data
+        proc_data = {
+            "id": proc_id if proc_id else "?",
+            "name": proc_component.get("name", proc.get("name", "?")),
+            "type": proc_component.get("type", proc.get("type", "?")),
+            "state": proc_component.get("state", proc.get("state", "UNKNOWN")),
+        }
+        
+        # Include properties if available (from discovery phase)
+        if "properties" in proc:
+            proc_data["properties"] = proc.get("properties", {})
+        elif proc_component.get("config", {}).get("properties"):
+            proc_data["properties"] = proc_component.get("config", {}).get("properties", {})
+        
+        # Include relationships if available
+        if "relationships" in proc:
+            proc_data["relationships"] = proc.get("relationships", [])
+        elif proc_component.get("relationships"):
+            proc_data["relationships"] = proc_component.get("relationships", [])
+        
+        # Include validation info if available
+        if "validationStatus" in proc:
+            proc_data["validationStatus"] = proc.get("validationStatus")
+        if "validationErrors" in proc:
+            proc_data["validationErrors"] = proc.get("validationErrors", [])
+        
+        # Include position if available
+        if "position" in proc:
+            proc_data["position"] = proc.get("position")
+        
+        # Include any other fields that might be useful
+        if "runStatus" in proc:
+            proc_data["runStatus"] = proc.get("runStatus")
+        if "comments" in proc_component:
+            proc_data["comments"] = proc_component.get("comments", "")
+        
+        formatted.append(proc_data)
+    
+    return formatted
+
+
+def format_connections_simple(
+    connections: List[Dict]
+) -> List[Dict]:
+    """Format connections as simple JSON for prompt."""
+    formatted = []
+    for conn in connections:
+        # Try nested structure first
+        comp = conn.get("component", {})
+        source = comp.get("source", {})
+        dest = comp.get("destination", {})
+        
+        if source or dest:
+            source_id = source.get("id", "")
+            dest_id = dest.get("id", "")
+            source_name = source.get("name", "?")
+            dest_name = dest.get("name", "?")
+            relationships = comp.get("selectedRelationships", [])
+        else:
+            # Use flat structure
+            source_id = conn.get("sourceId", "")
+            dest_id = conn.get("destinationId", "")
+            source_name = conn.get("sourceName", "?")
+            dest_name = conn.get("destinationName", "?")
+            relationships = conn.get("selectedRelationships", []) or []
+        
+        formatted.append({
+            "from": source_name,
+            "from_id": source_id if source_id else "?",
+            "to": dest_name,
+            "to_id": dest_id if dest_id else "?",
+            "relationships": relationships if relationships else ["success"]
+        })
+    
+    return formatted
+
+
 async def create_virtual_groups(
     pg_id: str,
     processors: List[Dict],
@@ -122,83 +246,36 @@ async def analyze_virtual_group(
         if p.get("id") in group_proc_ids
     ]
     
-    # Fetch processor details first (needed for states in categorization)
-    proc_ids = [p.get("id") for p in group_processors if p.get("id")]
-    cached_proc_details = {}
-    if proc_ids:
-        try:
-            result = await nifi_tool_caller(
-                "get_nifi_object_details",
-                {
-                    "object_type": "processor",
-                    "object_ids": proc_ids,
-                    "output_format": "doc_optimized",
-                    "include_properties": True
-                },
-                prep_res
-            )
-            if isinstance(result, str):
-                result = json.loads(result)
-            if not isinstance(result, list):
-                result = [result] if isinstance(result, dict) else []
-            for item in result:
-                if isinstance(item, dict) and item.get("status") == "success":
-                    proc_id = item.get("id")
-                    proc_data = item.get("data", {})
-                    # DEFENSIVE: Ensure data is a dict before storing
-                    if isinstance(proc_data, dict):
-                        cached_proc_details[proc_id] = proc_data
-                    else:
-                        if logger:
-                            logger.warning(f"Processor data for {proc_id} is not a dict: {type(proc_data)}")
-                        cached_proc_details[proc_id] = {}
-        except Exception as e:
-            if logger:
-                logger.warning(f"Failed to fetch processor details for virtual group: {e}")
-            cached_proc_details = {}
+    # Format processors for prompt (simple format from flow_graph)
+    processors_json = format_processors_for_prompt(group_processors)
     
-    # Categorize with states (using cached details)
-    categorized = categorize_processors(group_processors, categorizer, include_states=True, cached_proc_details=cached_proc_details)
+    # Get connections for these processors
+    vg_connections = get_pg_connections_for_processors(group_proc_ids, prep_res)
+    connections_json = format_connections_simple(vg_connections)
     
+    # Extract IO endpoints and categorize (for aggregation, not prompt)
+    # No longer need to fetch cached_proc_details - flow_graph.processors has all data
+    # No longer need cached_proc_details - use flow_graph.processors directly
     io_endpoints = await io_extractor(
-        group_processors,
-        nifi_tool_caller,
-        prep_res,
-        categorizer,
-        cached_proc_details,
-        logger
+        group_processors, nifi_tool_caller, prep_res, categorizer, None, logger
     )
+    categorized = categorize_processors(group_processors, categorizer, include_states=True)
     
-    # Extract business properties (routing rules, JSONPath expressions, etc.)
-    business_logic = []
-    for proc_id, proc_data in cached_proc_details.items():
-        # DEFENSIVE: Ensure proc_data is a dict
-        if not isinstance(proc_data, dict):
-            if logger:
-                logger.warning(f"proc_data for {proc_id} is not a dict: {type(proc_data)}")
-            continue
-        proc_name = proc_data.get("name", "Unknown")
-        proc_type = proc_data.get("type", "")
-        if proc_type:
-            proc_type = proc_type.split(".")[-1]
-        business_props = proc_data.get("business_properties", {})
-        
-        # DEFENSIVE: Ensure business_props is a dict
-        if business_props and isinstance(business_props, dict):
-            business_logic.append({
-                "processor": proc_name,
-                "type": proc_type,
-                "properties": business_props
-            })
+    # Build prompt data for debugging
+    prompt_data = {
+        "pg_name": virtual_group.get("name", "Virtual Group"),
+        "processor_count": len(group_processors),
+        "processors_json": processors_json,
+        "connections_json": connections_json,
+        "children_digest": []
+    }
     
     prompt = PG_SUMMARY_PROMPT.format(
-        pg_name=virtual_group.get("name", "Virtual Group"),
-        pg_purpose=virtual_group.get("purpose", ""),
-        processor_count=len(group_processors),
-        categories_json=json.dumps(categorized, indent=2),
-        io_endpoints_json=json.dumps(io_endpoints, indent=2, default=str),
-        business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]",
-        child_summaries_json="[]"
+        pg_name=prompt_data["pg_name"],
+        processor_count=prompt_data["processor_count"],
+        processors_json=json.dumps(prompt_data["processors_json"], indent=2),
+        connections_json=json.dumps(prompt_data["connections_json"], indent=2),
+        children_digest=json.dumps(prompt_data["children_digest"], indent=2)
     )
     
     response = await llm_caller(
@@ -208,30 +285,10 @@ async def analyze_virtual_group(
         action_id=f"vg-summary-{virtual_group.get('name', 'vg')}"
     )
     
-    # Extract error handling for virtual group (connections within parent PG)
-    # Note: Virtual groups are within a parent PG, so we need connections from that PG
-    # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
-    vg_connections = []
-    for c in prep_res["flow_graph"].get("connections", []):
-        parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
-        if parent_id == parent_pg_id:
-            vg_connections.append(c)
-    
-    # Filter to only connections involving processors in this virtual group
-    vg_proc_ids = set(virtual_group.get("processor_ids", []))
-    vg_connections_filtered = []
-    for c in vg_connections:
-        # Handle both nested and flat connection structures
-        comp = c.get("component", {})
-        source = comp.get("source", {})
-        dest = comp.get("destination", {})
-        source_id = source.get("id") if source else c.get("sourceId")
-        dest_id = dest.get("id") if dest else c.get("destinationId")
-        if source_id in vg_proc_ids or dest_id in vg_proc_ids:
-            vg_connections_filtered.append(c)
-    
+    # Extract error handling for virtual group (reuse connections already fetched)
+    # No longer need cached_proc_details - use flow_graph.processors directly
     error_handling = await error_extractor(
-        group_processors, vg_connections_filtered, nifi_tool_caller, prep_res, cached_proc_details, logger
+        group_processors, vg_connections, nifi_tool_caller, prep_res, None, logger
     )
     
     return {
@@ -242,7 +299,8 @@ async def analyze_virtual_group(
         "processor_count": len(group_processors),
         "categories": categorized,
         "io_endpoints": io_endpoints,
-        "error_handling": error_handling
+        "error_handling": error_handling,
+        "prompt_data": prompt_data  # Store prompt data for debugging
     }
 
 
@@ -277,74 +335,41 @@ async def analyze_pg_with_summaries(
     
     if has_parent_processors:
         # Parent has both children AND its own processors - use enhanced prompt
-        # Fetch processor details first (needed for states in categorization)
-        proc_ids = [p.get("id") for p in direct_processors if p.get("id")]
-        cached_proc_details = {}
-        if proc_ids:
-            try:
-                result = await nifi_tool_caller(
-                    "get_nifi_object_details",
-                    {
-                        "object_type": "processor",
-                        "object_ids": proc_ids,
-                        "output_format": "doc_optimized",
-                        "include_properties": True
-                    },
-                    prep_res
-                )
-                if isinstance(result, str):
-                    result = json.loads(result)
-                if not isinstance(result, list):
-                    result = [result] if isinstance(result, dict) else []
-                for item in result:
-                    if isinstance(item, dict) and item.get("status") == "success":
-                        cached_proc_details[item.get("id")] = item.get("data", {})
-            except Exception as e:
-                if logger:
-                    logger.warning(f"Failed to fetch parent processor details: {e}")
-                cached_proc_details = {}
+        # Format processors for prompt (simple format from flow_graph)
+        processors_json = format_processors_for_prompt(direct_processors)
         
-        # Extract IO endpoints from parent's processors
+        # Get connections for parent's own processors
+        parent_proc_ids = {p.get("id") for p in direct_processors if p.get("id")}
+        pg_connections = get_pg_connections_for_processors(parent_proc_ids, prep_res)
+        connections_json = format_connections_simple(pg_connections)
+        
+        # Extract IO endpoints from parent's processors (for aggregation, not prompt)
+        # No longer need to fetch cached_proc_details - flow_graph.processors has all data
+        # No longer need cached_proc_details - use flow_graph.processors directly
         parent_io_endpoints = await io_extractor(
-            direct_processors, nifi_tool_caller, prep_res, categorizer, cached_proc_details, logger
+            direct_processors, nifi_tool_caller, prep_res, categorizer, None, logger
         )
         
-        # Categorize parent's processors with states
-        categorized = categorize_processors(direct_processors, categorizer, include_states=True, cached_proc_details=cached_proc_details)
+        # Categorize parent's processors (for aggregation, not prompt)
+        categorized = categorize_processors(direct_processors, categorizer, include_states=True)
         
-        # Extract business properties from parent's processors
-        business_logic = []
-        for proc_id, proc_data in cached_proc_details.items():
-            proc_name = proc_data.get("name", "Unknown")
-            proc_type = proc_data.get("type", "").split(".")[-1]
-            business_props = proc_data.get("business_properties", {})
-            
-            if business_props:
-                business_logic.append({
-                    "processor": proc_name,
-                    "type": proc_type,
-                    "properties": business_props
-                })
-        
-        # Format connections for parent's own processors
-        # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
-        pg_connections = []
-        for c in prep_res["flow_graph"].get("connections", []):
-            # Check both possible structures
-            parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
-            if parent_id == pg.get("id"):
-                pg_connections.append(c)
-        connection_summary = format_connections_for_prompt(pg_connections, cached_proc_details)
+        # Build prompt data for debugging
+        prompt_data = {
+            "pg_name": pg.get("name", pg.get("id", "")[:8]),
+            "child_count": len(child_summaries),
+            "children_digest": children_digest,
+            "processor_count": len(direct_processors),
+            "processors_json": processors_json,
+            "connections_json": connections_json
+        }
         
         prompt = PG_WITH_CHILDREN_AND_PROCESSORS_PROMPT.format(
-            pg_name=pg.get("name", pg.get("id", "")[:8]),
-            child_count=len(child_summaries),
-            children_digest=json.dumps(children_digest, indent=2),
-            processor_count=len(direct_processors),
-            categories_json=json.dumps(categorized, indent=2),
-            connections_json=json.dumps(connection_summary, indent=2, default=str),
-            io_endpoints_json=json.dumps(parent_io_endpoints, indent=2, default=str),
-            business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]"
+            pg_name=prompt_data["pg_name"],
+            child_count=prompt_data["child_count"],
+            children_digest=json.dumps(prompt_data["children_digest"], indent=2),
+            processor_count=prompt_data["processor_count"],
+            processors_json=json.dumps(prompt_data["processors_json"], indent=2),
+            connections_json=json.dumps(prompt_data["connections_json"], indent=2)
         )
         
         # Aggregate IO endpoints from both parent and children
@@ -352,10 +377,17 @@ async def analyze_pg_with_summaries(
         parent_categories = categorized
     else:
         # Parent only has children, no own processors - use original prompt
+        # Build prompt data for debugging
+        prompt_data = {
+            "pg_name": pg.get("name", pg.get("id", "")[:8]),
+            "child_count": len(child_summaries),
+            "children_digest": children_digest
+        }
+        
         prompt = PG_WITH_CHILDREN_PROMPT.format(
-            pg_name=pg.get("name", pg.get("id", "")[:8]),
-            child_count=len(child_summaries),
-            children_digest=json.dumps(children_digest, indent=2)
+            pg_name=prompt_data["pg_name"],
+            child_count=prompt_data["child_count"],
+            children_digest=json.dumps(prompt_data["children_digest"], indent=2)
         )
         
         all_io = []
@@ -388,6 +420,14 @@ async def analyze_pg_with_summaries(
             if logger:
                 logger.warning(f"child_summary is not a dict in analyze_pg_with_summaries: {type(cs)}")
     
+        # Extract error handling for parent PG's own processors (if any)
+        if has_parent_processors:
+            # No longer need cached_proc_details - use flow_graph.processors directly
+            parent_errors = await error_extractor(
+                direct_processors, pg_connections, nifi_tool_caller, prep_res, None, logger
+            )
+            all_errors.extend(parent_errors)
+    
     # DEFENSIVE: Build children list safely
     children_names = []
     for cs in child_summaries:
@@ -406,7 +446,8 @@ async def analyze_pg_with_summaries(
         "processor_count": len(direct_processors) if direct_processors else 0,
         "categories": parent_categories,
         "io_endpoints": all_io,
-        "error_handling": all_errors
+        "error_handling": all_errors,
+        "prompt_data": prompt_data  # Store prompt data for debugging
     }
 
 
@@ -424,90 +465,37 @@ async def analyze_pg_direct(
     """Analyze a small leaf PG directly."""
     from ..prompts.documentation import PG_SUMMARY_PROMPT
     
-    # Fetch processor details once with doc_optimized format (includes relationships and properties)
-    # This data will be reused by both IO extraction and error handling
-    proc_ids = [p.get("id") for p in processors if p.get("id")]
-    cached_proc_details = {}
-    if proc_ids:
-        try:
-            result = await nifi_tool_caller(
-                "get_nifi_object_details",
-                {
-                    "object_type": "processor",
-                    "object_ids": proc_ids,
-                    "output_format": "doc_optimized",
-                    "include_properties": True
-                },
-                prep_res
-            )
-            if isinstance(result, str):
-                result = json.loads(result)
-            if not isinstance(result, list):
-                result = [result] if isinstance(result, dict) else []
-            for item in result:
-                if isinstance(item, dict) and item.get("status") == "success":
-                    proc_id = item.get("id")
-                    proc_data = item.get("data", {})
-                    # DEFENSIVE: Ensure data is a dict before storing
-                    if isinstance(proc_data, dict):
-                        cached_proc_details[proc_id] = proc_data
-                    else:
-                        if logger:
-                            logger.warning(f"Processor data for {proc_id} is not a dict: {type(proc_data)}")
-                        cached_proc_details[proc_id] = {}
-        except Exception as e:
-            if logger:
-                logger.warning(f"Failed to fetch processor details for analysis: {e}")
-            cached_proc_details = {}
+    # Format processors for prompt (simple format from flow_graph)
+    processors_json = format_processors_for_prompt(processors)
     
-    # Categorize processors with states (using cached details for accurate states)
-    categorized = categorize_processors(processors, categorizer, include_states=True, cached_proc_details=cached_proc_details)
+    # Get connections for these processors
+    proc_ids = {p.get("id") for p in processors if p.get("id")}
+    pg_connections = get_pg_connections_for_processors(proc_ids, prep_res)
+    connections_json = format_connections_simple(pg_connections)
     
-    # Use cached details for IO extraction
+    # Extract IO endpoints and categorize (for aggregation, not prompt)
+    # No longer need to fetch cached_proc_details - flow_graph.processors has all data
+    # No longer need cached_proc_details - use flow_graph.processors directly
     io_endpoints = await io_extractor(
-        processors, nifi_tool_caller, prep_res, categorizer, cached_proc_details, logger
+        processors, nifi_tool_caller, prep_res, categorizer, None, logger
     )
+    categorized = categorize_processors(processors, categorizer, include_states=True)
     
-    # Extract business properties (routing rules, JSONPath expressions, etc.) from cached details
-    business_logic = []
-    for proc_id, proc_data in cached_proc_details.items():
-        # DEFENSIVE: Ensure proc_data is a dict
-        if not isinstance(proc_data, dict):
-            if logger:
-                logger.warning(f"proc_data for {proc_id} is not a dict: {type(proc_data)}")
-            continue
-        proc_name = proc_data.get("name", "Unknown")
-        proc_type = proc_data.get("type", "")
-        if proc_type:
-            proc_type = proc_type.split(".")[-1]
-        business_props = proc_data.get("business_properties", {})
-        
-        # DEFENSIVE: Ensure business_props is a dict
-        if business_props and isinstance(business_props, dict):
-            business_logic.append({
-                "processor": proc_name,
-                "type": proc_type,
-                "properties": business_props
-            })
-    
-    # Format connections for this PG
-    # Connections can have parentGroupId in component.parentGroupId OR sourceGroupId at top level
-    pg_connections = []
-    for c in prep_res["flow_graph"].get("connections", []):
-        parent_id = c.get("component", {}).get("parentGroupId") or c.get("sourceGroupId")
-        if parent_id == pg.get("id"):
-            pg_connections.append(c)
-    connection_summary = format_connections_for_prompt(pg_connections, cached_proc_details)
+    # Build prompt data for debugging
+    prompt_data = {
+        "pg_name": pg.get("name", pg.get("id", "")[:8]),
+        "processor_count": len(processors),
+        "processors_json": processors_json,
+        "connections_json": connections_json,
+        "children_digest": []
+    }
     
     prompt = PG_SUMMARY_PROMPT.format(
-        pg_name=pg.get("name", pg.get("id", "")[:8]),
-        pg_purpose="",
-        processor_count=len(processors),
-        categories_json=json.dumps(categorized, indent=2),
-        io_endpoints_json=json.dumps(io_endpoints, indent=2, default=str),
-        business_logic_json=json.dumps(business_logic, indent=2, default=str) if business_logic else "[]",
-        connections_json=json.dumps(connection_summary, indent=2, default=str),
-        child_summaries_json="[]"
+        pg_name=prompt_data["pg_name"],
+        processor_count=prompt_data["processor_count"],
+        processors_json=json.dumps(prompt_data["processors_json"], indent=2),
+        connections_json=json.dumps(prompt_data["connections_json"], indent=2),
+        children_digest=json.dumps(prompt_data["children_digest"], indent=2)
     )
     
     # Use full name for action_id (no truncation) - helps with event correlation
@@ -520,10 +508,10 @@ async def analyze_pg_direct(
         action_id=action_id
     )
     
-    # Extract error handling for leaf PG (reuse cached details)
-    # Note: pg_connections already fetched above for prompt
+    # Extract error handling for leaf PG
+    # No longer need cached_proc_details - use flow_graph.processors directly
     error_handling = await error_extractor(
-        processors, pg_connections, nifi_tool_caller, prep_res, cached_proc_details, logger
+        processors, pg_connections, nifi_tool_caller, prep_res, None, logger
     )
     
     return {
@@ -532,6 +520,7 @@ async def analyze_pg_direct(
         "virtual": False,
         "summary": response.get("content", ""),
         "processor_count": len(processors),
+        "prompt_data": prompt_data,  # Store prompt data for debugging
         "categories": categorized,
         "io_endpoints": io_endpoints,
         "error_handling": error_handling
@@ -542,7 +531,7 @@ def categorize_processors(
     processors: List[Dict],
     categorizer,
     include_states: bool = True,
-    cached_proc_details: Optional[Dict[str, Dict]] = None
+    cached_proc_details: Optional[Dict[str, Dict]] = None  # Deprecated - kept for backward compat but not used
 ) -> Dict[str, List[Dict]]:
     """Categorize processors and return category -> processor info mapping.
     
@@ -562,13 +551,8 @@ def categorize_processors(
         proc_type = proc.get("component", {}).get("type", proc.get("type", ""))
         proc_name = proc.get("component", {}).get("name", proc.get("name", "?"))
         
-        # Get state from cached details if available, otherwise from proc dict
-        proc_state = "UNKNOWN"
-        if cached_proc_details and proc_id:
-            proc_state = cached_proc_details.get(proc_id, {}).get("state", 
-                proc.get("component", {}).get("state", proc.get("state", "UNKNOWN")))
-        else:
-            proc_state = proc.get("component", {}).get("state", proc.get("state", "UNKNOWN"))
+        # Get state from processor (flow_graph.processors has state at top level)
+        proc_state = proc.get("state", proc.get("component", {}).get("state", "UNKNOWN"))
         
         category = categorizer.categorize(proc_type).value
         
@@ -586,7 +570,8 @@ def categorize_processors(
 
 def format_connections_for_prompt(
     connections: List[Dict],
-    cached_proc_details: Optional[Dict[str, Dict]] = None
+    cached_proc_details: Optional[Dict[str, Dict]] = None,  # Deprecated - kept for backward compat but not used
+    flow_graph_processors: Optional[Dict[str, Dict]] = None  # Use flow_graph.processors for names
 ) -> List[Dict]:
     """Format connections for LLM prompt.
     
@@ -619,8 +604,13 @@ def format_connections_for_prompt(
             dest_name = conn.get("destinationName", "?")
             relationships = conn.get("selectedRelationships", []) or []
         
-        # Get processor names from cached details if available
-        if cached_proc_details:
+        # Get processor names from flow_graph.processors if available
+        if flow_graph_processors:
+            if source_id in flow_graph_processors:
+                source_name = flow_graph_processors[source_id].get("name", source_name)
+            if dest_id in flow_graph_processors:
+                dest_name = flow_graph_processors[dest_id].get("name", dest_name)
+        elif cached_proc_details:  # Fallback for backward compat
             if source_id in cached_proc_details:
                 source_name = cached_proc_details[source_id].get("name", source_name)
             if dest_id in cached_proc_details:
