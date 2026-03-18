@@ -30,7 +30,8 @@ class NiFiClient:
     """A simple asynchronous client for the NiFi REST API."""
 
     def __init__(self, base_url: str, username: Optional[str] = None, password: Optional[str] = None, 
-                 tls_verify: bool = True, credential_callback: Optional[Callable[[str], Awaitable[Tuple[str, str]]]] = None):
+                 tls_verify: bool = True, credential_callback: Optional[Callable[[str], Awaitable[Tuple[str, str]]]] = None,
+                 server_id: Optional[str] = None):
         """Initializes the NiFiClient.
 
         Args:
@@ -51,6 +52,7 @@ class NiFiClient:
         self._client = None
         self._token = None
         self._auth_config = None  # Cache auth configuration
+        self._server_id = server_id
         # True when token came from OIDC token store; False when from /access/token (username/password).
         # Cookie is only sent for OIDC so NiFi 1.x username/password auth is not confused by __Secure-* cookie.
         self._token_from_oidc = False
@@ -62,6 +64,16 @@ class NiFiClient:
     def is_authenticated(self) -> bool:
         """Checks if the client currently holds an authentication token."""
         return self._token is not None
+
+    async def _ensure_authenticated(self) -> None:
+        """Authenticate on-demand when the token is missing.
+
+        This allows the MCP stdio server to start without making any network calls,
+        and only connect/authenticate on the first actual NiFi API operation.
+        """
+        if self._token is not None:
+            return
+        await self.authenticate(server_id=self._server_id)
 
     async def _get_client(self):
         """Returns an httpx client instance, configuring auth if token exists."""
@@ -362,8 +374,7 @@ class NiFiClient:
         """Gets the ID of the root process group."""
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
         if not self._token:
-            local_logger.error("Authentication required before getting root process group ID.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = "/flow/process-groups/root"
@@ -396,7 +407,7 @@ class NiFiClient:
         """Downloads the flow definition for a process group as JSON (same as UI 'Download flow definition').
         include_referenced_services=False corresponds to 'without external services'."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/download"
         params = {"includeReferencedServices": str(include_referenced_services).lower()}
@@ -420,8 +431,7 @@ class NiFiClient:
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
         
         if not self._token:
-            local_logger.error("Authentication required before listing processors.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/processors"
@@ -455,7 +465,7 @@ class NiFiClient:
     ) -> dict:
         """Creates a new processor in the specified process group."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/processors"
@@ -508,7 +518,7 @@ class NiFiClient:
     ) -> dict:
         """Creates a connection between two components in a process group. For cross-PG port connections, pass source_group_id and target_group_id."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/connections"
@@ -560,7 +570,7 @@ class NiFiClient:
     async def get_processor_details(self, processor_id: str) -> dict:
         """Fetches the details and configuration of a specific processor."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/processors/{processor_id}"
@@ -591,7 +601,7 @@ class NiFiClient:
     async def delete_processor(self, processor_id: str, version: int) -> bool:
         """Deletes a processor given its ID and current revision version."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         # The version must be passed as a query parameter, along with the client ID
@@ -634,7 +644,7 @@ class NiFiClient:
     async def get_connection(self, connection_id: str) -> dict:
         """Fetches the details of a specific connection."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/connections/{connection_id}"
@@ -663,7 +673,7 @@ class NiFiClient:
     async def list_connections(self, process_group_id: Optional[str] = None, user_request_id: str = "-", action_id: str = "-") -> list[dict]:
         """Lists all connections in a process group or in the entire flow if no process_group_id is provided."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         
@@ -703,7 +713,7 @@ class NiFiClient:
         """Deletes a connection given its ID and optionally a revision version. 
            If version is not provided, it will fetch the current version."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         
@@ -753,7 +763,7 @@ class NiFiClient:
     async def update_connection(self, connection_id: str, update_payload: Dict[str, Any]) -> Dict:
         """Updates a specific connection using the provided payload (including revision and component)."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/connections/{connection_id}"
@@ -798,7 +808,7 @@ class NiFiClient:
     ) -> dict:
         """Updates specific parts of a processor's component configuration (properties or auto-terminated relationships)."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         # Validate update_type
         valid_update_types = ["properties", "auto-terminatedrelationships", "position"]
@@ -924,7 +934,7 @@ class NiFiClient:
     async def update_processor_state(self, processor_id: str, state: str) -> dict:
         """Starts or stops a specific processor."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         normalized_state = state.upper()
         if normalized_state not in ["RUNNING", "STOPPED"]:
@@ -983,7 +993,7 @@ class NiFiClient:
             A dictionary containing the process group status snapshot, typically under the 'processGroupStatus' key.
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flow/process-groups/{process_group_id}/status"
@@ -1022,7 +1032,7 @@ class NiFiClient:
             A list of bulletin dictionaries.
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = "/flow/bulletin-board"
@@ -1097,7 +1107,7 @@ class NiFiClient:
     async def get_input_ports(self, process_group_id: str) -> list[dict]:
         """Lists input ports within a specified process group."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/input-ports"
@@ -1123,7 +1133,7 @@ class NiFiClient:
     async def get_output_ports(self, process_group_id: str) -> list[dict]:
         """Lists output ports within a specified process group."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/output-ports"
@@ -1149,7 +1159,7 @@ class NiFiClient:
     async def get_process_groups(self, process_group_id: str) -> list[dict]:
         """Lists immediate child process groups within a specified process group."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/process-groups"
@@ -1191,8 +1201,7 @@ class NiFiClient:
         """Fetches the details of a specific process group."""
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
         if not self._token:
-            local_logger.error("Authentication required before getting process group details.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}"
@@ -1221,7 +1230,7 @@ class NiFiClient:
     async def update_process_group_position(self, process_group_id: str, x: float, y: float) -> dict:
         """Updates a process group's position on the canvas. GETs current entity then PUTs with new position."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
         try:
             current = await self.get_process_group_details(process_group_id)
         except (ValueError, ConnectionError) as e:
@@ -1249,7 +1258,7 @@ class NiFiClient:
             ui_only: If True, adds ?uiOnly=true parameter (useful when individual endpoints fail)
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flow/process-groups/{process_group_id}"
@@ -1280,7 +1289,7 @@ class NiFiClient:
     async def get_input_port_details(self, port_id: str) -> dict:
         """Fetches the details of a specific input port."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/input-ports/{port_id}"
@@ -1309,7 +1318,7 @@ class NiFiClient:
     async def get_output_port_details(self, port_id: str) -> dict:
         """Fetches the details of a specific output port."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/output-ports/{port_id}"
@@ -1338,7 +1347,7 @@ class NiFiClient:
     async def delete_input_port(self, port_id: str, version: int) -> bool:
         """Deletes an input port given its ID and current revision version."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/input-ports/{port_id}?version={version}&clientId={self._client_id}"
@@ -1375,7 +1384,7 @@ class NiFiClient:
     async def delete_output_port(self, port_id: str, version: int) -> bool:
         """Deletes an output port given its ID and current revision version."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/output-ports/{port_id}?version={version}&clientId={self._client_id}"
@@ -1412,7 +1421,7 @@ class NiFiClient:
     async def delete_process_group(self, pg_id: str, version: int) -> bool:
         """Deletes a process group given its ID and current revision version. Fails if not empty."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         # Recursive deletion isn't standard; this deletes only if empty
@@ -1451,7 +1460,7 @@ class NiFiClient:
     async def update_input_port_state(self, port_id: str, state: str) -> dict:
         """Starts or stops a specific input port."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         normalized_state = state.upper()
         if normalized_state not in ["RUNNING", "STOPPED", "DISABLED"]:
@@ -1500,7 +1509,7 @@ class NiFiClient:
     async def update_output_port_state(self, port_id: str, state: str) -> dict:
         """Starts or stops a specific output port."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         normalized_state = state.upper()
         if normalized_state not in ["RUNNING", "STOPPED", "DISABLED"]:
@@ -1549,7 +1558,7 @@ class NiFiClient:
     async def update_input_port_position(self, port_id: str, x: float, y: float) -> dict:
         """Updates an input port's position on the canvas. GETs current entity then PUTs with new position."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
         try:
             current = await self.get_input_port_details(port_id)
         except (ValueError, ConnectionError) as e:
@@ -1572,7 +1581,7 @@ class NiFiClient:
     async def update_output_port_position(self, port_id: str, x: float, y: float) -> dict:
         """Updates an output port's position on the canvas. GETs current entity then PUTs with new position."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
         try:
             current = await self.get_output_port_details(port_id)
         except (ValueError, ConnectionError) as e:
@@ -1595,7 +1604,7 @@ class NiFiClient:
     async def create_input_port(self, pg_id: str, name: str, position: Dict[str, float]) -> dict:
         """Creates a new input port in the specified process group."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{pg_id}/input-ports"
@@ -1629,7 +1638,7 @@ class NiFiClient:
     async def create_output_port(self, pg_id: str, name: str, position: Dict[str, float]) -> dict:
         """Creates a new output port in the specified process group."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{pg_id}/output-ports"
@@ -1662,7 +1671,7 @@ class NiFiClient:
     async def create_process_group(self, parent_pg_id: str, name: str, position: Dict[str, float]) -> dict:
         """Creates a new process group within the specified parent process group."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{parent_pg_id}/process-groups"
@@ -1696,7 +1705,7 @@ class NiFiClient:
     async def get_processor_types(self) -> List[Dict]:
         """Fetches the list of available processor types from the NiFi instance."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = "/flow/processor-types"
@@ -1724,7 +1733,7 @@ class NiFiClient:
     async def search_flow(self, query: str) -> Dict:
         """Performs a global search across the NiFi flow using the provided query string."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = "/flow/search-results"
@@ -1754,7 +1763,7 @@ class NiFiClient:
     async def update_process_group_state(self, pg_id: str, state: str) -> dict:
         """Starts or stops all eligible components within a specific process group."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         normalized_state = state.upper()
         if normalized_state not in ["RUNNING", "STOPPED"]:
@@ -1812,7 +1821,7 @@ class NiFiClient:
             Dict containing purge results with success status, message, and detailed results
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
         
         # First, get all connections in the process group
         connections = await self.list_connections(process_group_id)
@@ -1854,7 +1863,7 @@ class NiFiClient:
             Dict containing the drop request details with ID directly accessible
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flowfile-queues/{connection_id}/drop-requests"
@@ -1900,7 +1909,7 @@ class NiFiClient:
             Dict containing the drop request status
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flowfile-queues/{connection_id}/drop-requests/{request_id}"
@@ -1922,7 +1931,7 @@ class NiFiClient:
     async def delete_drop_request(self, connection_id: str, request_id: str) -> None:
         """Delete a drop request for a connection to clean up."""
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flowfile-queues/{connection_id}/drop-requests/{request_id}"
@@ -1956,7 +1965,7 @@ class NiFiClient:
             }
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
         
         # Return dictionary mapping connection ID -> result
         results = {}
@@ -2110,7 +2119,7 @@ class NiFiClient:
             Dict containing the listing request details with ID
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flowfile-queues/{connection_id}/listing-requests"
@@ -2155,7 +2164,7 @@ class NiFiClient:
             Dict containing the listing request status and flowfile summaries when completed
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flowfile-queues/{connection_id}/listing-requests/{request_id}"
@@ -2182,7 +2191,7 @@ class NiFiClient:
             request_id: The ID of the listing request
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flowfile-queues/{connection_id}/listing-requests/{request_id}"
@@ -2217,7 +2226,7 @@ class NiFiClient:
             Dict containing the provenance query details with ID
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         processor_id = query_payload.get('processor_id')
         flowfile_uuid = query_payload.get('flowfile_uuid')
@@ -2293,7 +2302,7 @@ class NiFiClient:
             Dict containing the query status
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/provenance/{query_id}"
@@ -2322,7 +2331,7 @@ class NiFiClient:
             List of provenance event dictionaries
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/provenance/{query_id}/results"
@@ -2353,7 +2362,7 @@ class NiFiClient:
             query_id: The ID of the provenance query
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/provenance/{query_id}"
@@ -2382,7 +2391,7 @@ class NiFiClient:
             Dict containing the event details
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/provenance-events/{event_id}"
@@ -2414,7 +2423,7 @@ class NiFiClient:
             httpx.Response object for streaming content
         """
         if not self._token:
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/provenance-events/{event_id}/content/{direction}"
@@ -2444,8 +2453,7 @@ class NiFiClient:
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
         
         if not self._token:
-            local_logger.error("Authentication required before listing controller services.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/flow/process-groups/{process_group_id}/controller-services"
@@ -2474,8 +2482,7 @@ class NiFiClient:
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
         
         if not self._token:
-            local_logger.error("Authentication required before getting controller service details.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/controller-services/{controller_service_id}"
@@ -2512,8 +2519,7 @@ class NiFiClient:
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
         
         if not self._token:
-            local_logger.error("Authentication required before creating controller service.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/controller-services"
@@ -2567,8 +2573,7 @@ class NiFiClient:
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
         
         if not self._token:
-            local_logger.error("Authentication required before updating controller service properties.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         # First, get current controller service to get revision info
         current_entity = await self.get_controller_service_details(controller_service_id, user_request_id, action_id)
@@ -2613,8 +2618,7 @@ class NiFiClient:
         local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
         
         if not self._token:
-            local_logger.error("Authentication required before deleting controller service.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = f"/controller-services/{controller_service_id}"
@@ -2652,7 +2656,7 @@ class NiFiClient:
         
         if not self._token:
             local_logger.error("Authentication required before enabling controller service.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         # First, get current controller service to get revision info
         current_entity = await self.get_controller_service_details(controller_service_id, user_request_id, action_id)
@@ -2710,7 +2714,7 @@ class NiFiClient:
         
         if not self._token:
             local_logger.error("Authentication required before disabling controller service.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         # First, get current controller service to get revision info
         current_entity = await self.get_controller_service_details(controller_service_id, user_request_id, action_id)
@@ -2753,7 +2757,7 @@ class NiFiClient:
         
         if not self._token:
             local_logger.error("Authentication required before getting controller service types.")
-            raise NiFiAuthenticationError("Client is not authenticated. Call authenticate() first.")
+            await self._ensure_authenticated()
 
         client = await self._get_client()
         endpoint = "/flow/controller-service-types"

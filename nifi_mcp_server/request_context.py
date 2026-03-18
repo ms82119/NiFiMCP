@@ -21,6 +21,23 @@ mcp_session_started_at: ContextVar[Optional[float]] = ContextVar("mcp_session_st
 session_total_tokens_in: ContextVar[int] = ContextVar("session_total_tokens_in", default=0)
 session_total_tokens_out: ContextVar[int] = ContextVar("session_total_tokens_out", default=0)
 
+# Selected NiFi server id for MCP sessions.
+#
+# Why this exists:
+# - ContextVars are scoped to the current async task/context and may not persist across
+#   separate tool invocations in some MCP transports.
+# - We still want `set_nifi_server()` to affect subsequent tool calls.
+_selected_nifi_server_id: Optional[str] = None
+
+
+def set_selected_nifi_server_id(server_id: Optional[str]) -> None:
+    global _selected_nifi_server_id
+    _selected_nifi_server_id = server_id
+
+
+def get_selected_nifi_server_id() -> Optional[str]:
+    return _selected_nifi_server_id
+
 # Usage example (in tool functions):
 # from .request_context import current_nifi_client, current_request_logger, current_user_request_id, current_action_id
 #

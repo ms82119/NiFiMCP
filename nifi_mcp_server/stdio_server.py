@@ -38,7 +38,7 @@ except Exception as e:
     logger.warning("Logging setup failed (using defaults): {0}", e)
 
 # Import core MCP and context so tools are registered and we can set context
-from nifi_mcp_server.core import get_nifi_client, mcp
+from nifi_mcp_server.core import create_nifi_client, mcp
 
 # Import tool modules so they register their tools with the shared mcp instance
 # (same as server.py does for the REST API)
@@ -58,6 +58,7 @@ from nifi_mcp_server.request_context import (
     mcp_session_started_at,
     session_total_tokens_in,
     session_total_tokens_out,
+    set_selected_nifi_server_id,
 )
 from config.settings import get_nifi_servers
 
@@ -86,9 +87,12 @@ async def run_stdio_with_context() -> None:
 
     nifi_client = None
     try:
-        nifi_client = await get_nifi_client(server_id, bound_logger=logger)
+        # Important: do not authenticate on startup. We only create an un-authenticated
+        # client; actual auth should happen lazily on the first API operation.
+        nifi_client = await create_nifi_client(server_id, bound_logger=logger)
         current_nifi_client.set(nifi_client)
         current_nifi_server_id.set(server_id)
+        set_selected_nifi_server_id(server_id)
         mcp_session_started_at.set(time.time())
         session_total_tokens_in.set(0)
         session_total_tokens_out.set(0)

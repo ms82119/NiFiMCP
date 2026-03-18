@@ -1,6 +1,6 @@
-# NiFi MCP Usage Guide
+# NiFi MCP Usage Guide - Built-in Chat Bot
 
-This guide provides detailed information about using the NiFi MCP system effectively.
+This guide provides detailed information about using the Built-In NiFi Chat Bot effectively.  It is a bit out of date (was pre version 2.0), but generally concepts are still applicable.
 
 ## UI Features and Tips
 

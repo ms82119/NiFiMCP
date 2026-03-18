@@ -1,41 +1,33 @@
 ## NiFi MCP (Model Context Protocol)
 
-This repository contains the NiFi MCP project. It provides a chat interface allowing users to interact with Apache NiFi instances using natural language queries. The system uses a Large Language Model (LLM) integrated with custom tools (MCP Tools) that can communicate with the NiFi API to retrieve information, document flows, and create and perform actions on NiFi components.
+This repository contains the NiFi MCP project. It can be used in two ways, either:
 
-It has been tested with Nifi versions 1.23 and 1.28, but could work on other versions assuming the Nifi REST Api stays consistent.  While it is quite functional, you will find that the type of LLM model you use will have a big effect on how well it follows your instructions.  I have found o4-mini and gpt-4.1 to be good.
+- As a plain MCP Server that tools like Cursor AI, Claude Code, Antigravity etc. can connect to via stdio
+- Or, with a built-in (contained in this repo) chat bot that you can connect to from your browser.
 
-It's ability to read and document existing flows is very good.  It's ability to create new and modify existing flows is OK, but often takes several iterations and some user help. My future plans are to refine the tools to improve this aspect.  I may also introduce some tools to help it debug flows itself.
+Either approach allows you to interact with Apache NiFi instances using natural language. There are currently around 30 tools available, covering building, updating, running, debugging, and documenting nifi flows.  This has been tested with Nifi versions 1.23 and 1.28, but should work on other versions like 2.x assuming the Nifi REST Api stays consistent. 
 
-## Version Information
+The built-in chat bot requires you to supply your own LLM API keys, better models give better results and selecting higher token context can help too.  I have however found that using Cursor AI in Auto mode gives the best performance and results.  It turned out to be a much better interface than I could build with my own chat bot.  So I only recommend the built-in chat bot if you have no other options.
 
-**Current Version: 2.0** - FastAPI/JavaScript Client
-
-This repository contains two different UI implementations:
-
-- **Version 2.0+ (Current)**: Modern FastAPI backend with JavaScript frontend
-- **Version 1.4 and earlier**: Streamlit-based interface
-
-Please follow the appropriate setup instructions below based on the version you're using.
-
-### Example Conversations
+ 
+### Example Conversations (Using built-in chat bot)
 - [Build A New Flow From A Spec](./docs/examples/ExampleConversation-Build-o4-mini.md) - See how the system creates a complete NiFi flow from requirements
 - [Debug An Existing Flow](./docs/examples/ExampleConversationForDebugging.md) - Watch the system diagnose and fix issues in an existing flow
 
 ## Recent Updates
 
 **Version 2.0 - Major UI Overhaul**
-- Migrated from Streamlit to FastAPI/JavaScript client for improved performance and user experience
-- Enhanced real-time WebSocket communication for better workflow status updates
-- Improved message handling and duplicate message prevention
-- Modern, responsive UI with better accessibility and mobile support
+- Added direct MCP server support for IDE's like Cursor AI (best option)
+- Enhanced the built in chatbot
+   - Migrated from Streamlit to FastAPI/JavaScript client for improved performance and user experience
+   - Enhanced real-time WebSocket communication for better workflow status updates
+   - Improved message handling and duplicate message prevention
+   - Modern, responsive UI with better accessibility and mobile support
+   - Added a new workflow "Flow Documentation" to help generate better documentation about a flow
 
 For the latest updates and release notes, see the [GitHub Releases page](https://github.com/ms82119/NiFiMCP/releases).
 
-## Roadmap
 
-My future plan is to work on improving the tool's accuracy and efficiency (reducing the number of tokens needed to acheive the goal).  To do this I will focus on introducing guided workflows which can provide more granular control over the steps and quality, which may also lead to the ability to use less powerful and cheaper LLM's while improving the results.  I feel creating new flows and documenting large flows will particularly benefit from this.
-
-After this I will consider looking into support for more models.  I will say that the Gemini support has been harder than expected due to its protobuf usage, and has slowed my progress along the roadmap, so for this reason I am going to hold off adding other models for now.
 
 ## Setup Instructions
 
@@ -71,10 +63,22 @@ After this I will consider looking into support for more models.  I will say tha
    uv sync
    ```
 
-5. **Update the config.yaml file with your Nifi details and LLM API keys**
+5. **Update the config.yaml file with your Nifi server details and LLM API keys**
    Use the config.example.yaml as your guide for format and structure
+   Note that the LLM API keys are only needed if you are using the built-in client
 
-6. **Run the MCP Server:**
+## Using the NiFi MCP Server in Cursor IDE or other MCP clients
+
+You can use the same NiFi MCP tools directly in Cursor (or other MCP clients) over **stdio**, without running the REST server or chat UI. The project includes a stdio entrypoint and a Cursor MCP config.
+
+- **Setup**: Open this project in Cursor; the `.cursor/mcp.json` config will start the NiFi MCP server when Cursor connects. Ensure at least one NiFi server is configured in `config.yaml`.
+- **Server selection**: Set the `NIFI_SERVER_ID` environment variable in the MCP config to a server id from `config.yaml`, or leave it unset to use the first configured server.
+- **Details**: See [Cursor MCP Setup](./docs/Cursor-MCP-Setup.md).  
+
+
+## Using the Built-In Chat Bot
+
+**Run the MCP Server:**
    Start the MCP server with:
    ```bash
    uvicorn nifi_mcp_server.server:app --reload --port 8000
@@ -84,9 +88,8 @@ After this I will consider looking into support for more models.  I will say tha
    MCP_SERVER_PORT=8001 uvicorn nifi_mcp_server.server:app --reload --port 8001
    ```
 
-### Version 2.0+ (Current) - FastAPI/JavaScript Client
 
-7. **Run the FastAPI Client:**
+**Run the FastAPI Client:**
    Start the FastAPI client with:
    ```bash
    uvicorn api.main:app --reload --port 3000
@@ -96,31 +99,15 @@ After this I will consider looking into support for more models.  I will say tha
    MCP_SERVER_PORT=8001 uvicorn api.main:app --reload --port 3000
    ```
 
-8. **Access the Application:**
+**Access the Application:**
    Open your browser and navigate to: `http://localhost:3000`
 
-### Version 1.4 and Earlier - Streamlit Client
-
-7. **Run the Streamlit Client:**
-   Start the Streamlit client with:
-   ```bash
-   python -m streamlit run nifi_chat_ui/app.py
-   ```
-
-8. **Access the Application:**
-   Open your browser and navigate to the URL shown in the terminal (typically `http://localhost:8501`)
 
 ## Usage Tips
 
 For detailed usage information, tips, and UI features, see the [Usage Guide](./docs/UsageGuide.md).
 
-## Using the NiFi MCP Server in Cursor IDE
 
-You can use the same NiFi MCP tools directly in Cursor (or other MCP clients) over **stdio**, without running the REST server or chat UI. The project includes a stdio entrypoint and a Cursor MCP config.
-
-- **Setup**: Open this project in Cursor; the `.cursor/mcp.json` config will start the NiFi MCP server when Cursor connects. Ensure at least one NiFi server is configured in `config.yaml`.
-- **Server selection**: Set the `NIFI_SERVER_ID` environment variable in the MCP config to a server id from `config.yaml`, or leave it unset to use the first configured server.
-- **Details**: See [Cursor MCP Setup](./docs/Cursor-MCP-Setup.md).
 
 ## Running Automated Tests
 

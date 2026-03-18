@@ -117,6 +117,33 @@ async def get_nifi_client(server_id: str, bound_logger = logger) -> NiFiClient:
         raise # Re-raise other exceptions
 
 
+async def create_nifi_client(server_id: str, bound_logger = logger) -> NiFiClient:
+    """Create a NiFi client without authenticating yet.
+
+    This is used to avoid connecting to a NiFi server during stdio server startup.
+    Actual authentication should happen lazily on the first API call.
+    """
+    bound_logger.info(f"Creating NiFi client (not authenticated yet) for server ID: {server_id}")
+
+    server_conf = get_nifi_server_config(server_id)
+    if not server_conf:
+        bound_logger.error(f"Configuration for NiFi server ID '{server_id}' not found.")
+        raise ValueError(f"NiFi server configuration not found for ID: {server_id}")
+
+    credential_callback = await _get_credential_callback(server_id)
+
+    client = NiFiClient(
+        base_url=server_conf.get("url"),
+        username=server_conf.get("username"),  # May be None
+        password=server_conf.get("password"),  # May be None
+        tls_verify=server_conf.get("tls_verify", True),
+        credential_callback=credential_callback,
+        server_id=server_id,
+    )
+    bound_logger.debug(f"Instantiated un-authenticated NiFiClient for {server_conf.get('url')}")
+    return client
+
+
 # Ensure at least one NiFi server is configured on startup (Optional check)
 try:
     if not get_nifi_servers():

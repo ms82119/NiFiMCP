@@ -26,6 +26,8 @@ from ..request_context import (
     mcp_session_started_at,
     session_total_tokens_in,
     session_total_tokens_out,
+    get_selected_nifi_server_id,
+    set_selected_nifi_server_id,
 )
 from .utils import tool_phases, VALID_PHASES
 from mcp.server.fastmcp.exceptions import ToolError
@@ -130,7 +132,9 @@ async def get_nifi_session_info() -> Dict[str, Any]:
     Token counts are cumulative rough estimates (len(json.dumps(...))/4) for tool input/output in this session.
     """
     local_logger = current_request_logger.get() or logger
-    server_id = current_nifi_server_id.get()
+    server_id = get_selected_nifi_server_id()
+    if not server_id:
+        server_id = current_nifi_server_id.get()
     if not server_id:
         server_id = _default_server_id()
     if not server_id:
@@ -192,6 +196,31 @@ async def get_nifi_session_info() -> Dict[str, Any]:
 
 @mcp.tool()
 @tool_phases(["Control"], mcp_only=True)
+async def list_nifi_servers() -> Dict[str, Any]:
+    """
+    List configured NiFi servers from config.yaml without connecting to any server.
+
+    Useful when you want to know which server IDs are available before calling set_nifi_server().
+    """
+    servers = get_nifi_servers()
+    # Intentionally exclude username/password.
+    result = []
+    for s in servers:
+        if not s:
+            continue
+        result.append(
+            {
+                "id": s.get("id"),
+                "name": s.get("name"),
+                "url": s.get("url"),
+                "tls_verify": s.get("tls_verify", True),
+            }
+        )
+    return {"servers": result}
+
+
+@mcp.tool()
+@tool_phases(["Control"], mcp_only=True)
 async def set_nifi_server(server_id: str) -> Dict[str, Any]:
     """
     Switch the NiFi server used for subsequent tool calls in this MCP session.
@@ -208,18 +237,40 @@ async def set_nifi_server(server_id: str) -> Dict[str, Any]:
         raise ToolError(
             f"Invalid server_id '{server_id}'. Valid server IDs from config: {', '.join(valid_ids)}."
         )
-    from ..core import get_nifi_client
 
+    from ..core import create_nifi_client
+
+    # Persist server selection across tool calls by updating shared state.
+    set_selected_nifi_server_id(server_id)
+    current_nifi_server_id.set(server_id)
+
+    # Reconfigure the existing NiFi client instance in-place so future tool calls
+    # (which may run in different async contexts) still use the updated server.
     old_client = current_nifi_client.get()
+    new_client = await create_nifi_client(server_id, bound_logger=local_logger)
+
     if old_client:
         try:
             await old_client.close()
         except Exception as e:
             local_logger.warning(f"Error closing previous NiFi client: {e}")
 
-    nifi_client = await get_nifi_client(server_id, bound_logger=local_logger)
-    current_nifi_client.set(nifi_client)
-    current_nifi_server_id.set(server_id)
+        old_client.base_url = new_client.base_url
+        old_client.username = new_client.username
+        old_client.password = new_client.password
+        old_client.tls_verify = new_client.tls_verify
+        old_client.credential_callback = new_client.credential_callback
+        old_client._server_id = server_id
+        old_client._token = None
+        old_client._token_from_oidc = False
+        old_client._auth_config = None
+        old_client._client = None
+    else:
+        # Fallback: if there's no client in the current context yet,
+        # set the new client here. Subsequent calls should still consult
+        # the same object reference most transports capture at startup.
+        current_nifi_client.set(new_client)
+
     conf = get_nifi_server_config(server_id)
     server_name = (conf or {}).get("name", server_id)
     local_logger.info(f"Switched NiFi server to {server_id} ({server_name})")
