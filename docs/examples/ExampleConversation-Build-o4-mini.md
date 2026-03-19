@@ -152,9 +152,9 @@ Here's the proposed plan for building the flow inside Process Group 6c0405d8-019
 Please confirm or suggest changes—once approved, I'll begin creating the processors and wiring up the flow.
 
 **User:**
-please validate this using the tool get_expert_help, then confirm which controllers you need me to set up
+please validate this using the tool ask_nifi_expert, then confirm which controllers you need me to set up
 
-**Assistant:** ⚙️ Calling tool(s): `get_expert_help`...
+**Assistant:** ⚙️ Calling tool(s): `ask_nifi_expert`...
 
 **Assistant:**
 I attempted to get external expert validation but ran into an internal error. In the meantime, here's my own expert review:
@@ -175,7 +175,7 @@ Please let me know which approach you'd like to take (script vs. record), and if
 **User:**
 I think the problem is fixed.  Could you run your design and the requirement past the expert again please
 
-**Assistant:** ⚙️ Calling tool(s): `get_expert_help`...
+**Assistant:** ⚙️ Calling tool(s): `ask_nifi_expert`...
 
 **Assistant:**
 The expert validates that your design meets requirements but highlights key best-practice concerns:
@@ -284,7 +284,7 @@ ok lets try and run a test
 
 **Assistant:** ⚙️ Calling tool(s): `operate_nifi_object`...
 
-**Assistant:** ⚙️ Calling tool(s): `invoke_nifi_http_endpoint`...
+**Assistant:** ⚙️ Calling tool(s): `invoke_http_endpoint`...
 
 **Assistant:**
 The flow started successfully and your test POST returned HTTP 200 with this JSON:
@@ -316,7 +316,7 @@ can you confirm the test really worked?  I see an error in the flow at the momen
 
 **Assistant:** ⚙️ Calling tool(s): `operate_nifi_object`...
 
-**Assistant:** ⚙️ Calling tool(s): `invoke_nifi_http_endpoint`...
+**Assistant:** ⚙️ Calling tool(s): `invoke_http_endpoint`...
 
 **Assistant:** ⚙️ Calling tool(s): `update_nifi_processor_properties`...
 
@@ -336,7 +336,7 @@ TASK COMPLETE
 **User:**
 can you try another test and see if you get a response please
 
-**Assistant:** ⚙️ Calling tool(s): `invoke_nifi_http_endpoint`...
+**Assistant:** ⚙️ Calling tool(s): `invoke_http_endpoint`...
 
 **Assistant:**
 Another POST test returned HTTP 200 with:

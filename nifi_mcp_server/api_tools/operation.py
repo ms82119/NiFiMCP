@@ -9,7 +9,7 @@ from loguru import logger
 from ..core import mcp, _handle_drop_request
 # Removed nifi_api_client import
 # Import context variables
-from ..request_context import current_nifi_client, current_request_logger # Added
+from ..request_context import current_nifi_client, current_request_logger, current_user_request_id, current_action_id
 # Import utils helper for filtering PG data
 from .utils import (
     tool_phases,
@@ -107,6 +107,34 @@ async def operate_nifi_object(
                     validation_errors = component.get("validationErrors", [])
                     name = component.get("name", object_id)
 
+                    # Idempotency: already RUNNING is success
+                    if current_state == "RUNNING":
+                        local_logger.info(f"Processor '{name}' is already RUNNING.")
+                        filtered = filter_created_processor_data(proc_details)
+                        return {"status": "success", "message": f"Processor '{name}' is already running.", "entity": filtered}
+
+                    # Enable controller services in the same process group before start
+                    pg_id = component.get("parentGroupId")
+                    if pg_id:
+                        try:
+                            from ..request_context import current_user_request_id, current_action_id
+                            user_request_id = current_user_request_id.get() or "-"
+                            action_id = current_action_id.get() or "-"
+                            cs_list = await nifi_client.list_controller_services(pg_id, user_request_id=user_request_id, action_id=action_id)
+                            for cs_entity in cs_list or []:
+                                cs_comp = cs_entity.get("component", {})
+                                cs_state = cs_comp.get("state")
+                                if cs_state == "DISABLED":
+                                    cs_id = cs_entity.get("id")
+                                    cs_name = cs_comp.get("name", cs_id)
+                                    try:
+                                        await nifi_client.enable_controller_service(cs_id)
+                                        local_logger.info(f"[Start flow] Enabled controller service '{cs_name}' ({cs_id})")
+                                    except Exception as e:
+                                        local_logger.warning(f"[Start flow] Could not enable controller service '{cs_name}': {e}")
+                        except Exception as e:
+                            local_logger.warning(f"[Start flow] Could not enable controller services in PG {pg_id}: {e}")
+
                     if validation_status != "VALID":
                         error_list_str = ", ".join(validation_errors) if validation_errors else "No specific errors listed."
                         error_msg = f"Processor '{name}' cannot be started. Validation status: {validation_status}. Errors: [{error_list_str}]"
@@ -128,6 +156,18 @@ async def operate_nifi_object(
                     local_logger.error(f"Error during start pre-check: {e}", exc_info=True)
                     local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API (pre-check)")
                     return {"status": "error", "message": f"Failed pre-start check: {e}", "entity": None}
+
+            if operation_type == "stop":
+                # Idempotency: already STOPPED is success
+                try:
+                    proc_details = await nifi_client.get_processor_details(object_id)
+                    current_state = (proc_details.get("component") or {}).get("state")
+                    if current_state == "STOPPED":
+                        local_logger.info("Processor is already STOPPED.")
+                        filtered = filter_created_processor_data(proc_details)
+                        return {"status": "success", "message": "Processor is already stopped.", "entity": filtered}
+                except Exception:
+                    pass  # Proceed with stop API call
             # --- End of Pre-check ---
 
             nifi_update_req = {"operation": operation_name_for_log, "processor_id": object_id, "state": target_state}
@@ -202,6 +242,12 @@ async def operate_nifi_object(
                         local_logger.warning(error_msg)
                         return {"status": "error", "message": error_msg, "entity": None}
 
+                    # Idempotency: already RUNNING is success
+                    if current_state == "RUNNING":
+                        local_logger.info(f"Port '{name}' is already RUNNING.")
+                        filtered = filter_created_processor_data(port_details_for_check)
+                        return {"status": "success", "message": f"Port '{name}' is already running.", "entity": filtered}
+
                     local_logger.info(f"Port pre-checks passed (Validation: {validation_status}, State: {current_state}). Proceeding with start.")
 
                 except ValueError as e:
@@ -213,6 +259,21 @@ async def operate_nifi_object(
                     local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API (pre-check)")
                     return {"status": "error", "message": f"Failed pre-start check for port {object_id}: {e}", "entity": None}
             # --- End of Port Pre-check ---
+
+            if operation_type == "stop":
+                # Idempotency: already STOPPED is success
+                try:
+                    try:
+                        port_details = await nifi_client.get_input_port_details(object_id)
+                    except ValueError:
+                        port_details = await nifi_client.get_output_port_details(object_id)
+                    current_state = (port_details.get("component") or {}).get("state")
+                    if current_state == "STOPPED":
+                        local_logger.info("Port is already STOPPED.")
+                        filtered = filter_created_processor_data(port_details)
+                        return {"status": "success", "message": "Port is already stopped.", "entity": filtered}
+                except Exception:
+                    pass  # Proceed with stop API call
 
             if port_type_found is None:
                 local_logger.info("Determining port type (input/output)...")
@@ -265,6 +326,26 @@ async def operate_nifi_object(
 
         # --- Process Group Logic ---
         elif object_type == "process_group":
+            if operation_type == "start":
+                # Enable controller services in this process group before start
+                try:
+                    from ..request_context import current_user_request_id, current_action_id
+                    user_request_id = current_user_request_id.get() or "-"
+                    action_id = current_action_id.get() or "-"
+                    cs_list = await nifi_client.list_controller_services(object_id, user_request_id=user_request_id, action_id=action_id)
+                    for cs_entity in cs_list or []:
+                        cs_comp = cs_entity.get("component", {})
+                        cs_state = cs_comp.get("state")
+                        if cs_state == "DISABLED":
+                            cs_id = cs_entity.get("id")
+                            cs_name = cs_comp.get("name", cs_id)
+                            try:
+                                await nifi_client.enable_controller_service(cs_id)
+                                local_logger.info(f"[Start flow] Enabled controller service '{cs_name}' ({cs_id})")
+                            except Exception as e:
+                                local_logger.warning(f"[Start flow] Could not enable controller service '{cs_name}': {e}")
+                except Exception as e:
+                    local_logger.warning(f"[Start flow] Could not enable controller services in PG {object_id}: {e}")
             operation_name_for_log = "update_process_group_state"
             nifi_update_req = {"operation": operation_name_for_log, "process_group_id": object_id, "state": target_state}
             local_logger.bind(interface="nifi", direction="request", data=nifi_update_req).debug("Calling NiFi API (Bulk Update)")
@@ -318,6 +399,13 @@ async def operate_nifi_object(
                         local_logger.warning(error_msg)
                         return {"status": "warning", "message": error_msg, "entity": None}
 
+                    # Idempotency: already ENABLED is success
+                    if current_state == "ENABLED":
+                        local_logger.info(f"Controller service '{name}' is already ENABLED.")
+                        from .utils import filter_controller_service_data
+                        filtered = filter_controller_service_data(cs_details)
+                        return {"status": "success", "message": f"Controller service '{name}' is already enabled.", "entity": filtered}
+
                     local_logger.info(f"Controller service pre-checks passed (Validation: {validation_status}, State: {current_state}). Proceeding with enable.")
 
                 except ValueError as e:
@@ -329,6 +417,19 @@ async def operate_nifi_object(
                     local_logger.bind(interface="nifi", direction="response", data={"error": str(e)}).debug("Received error from NiFi API (pre-check)")
                     return {"status": "error", "message": f"Failed pre-enable check: {e}", "entity": None}
             # --- End of Pre-check ---
+
+            if operation_type == "disable":
+                # Idempotency: already DISABLED is success
+                try:
+                    cs_details = await nifi_client.get_controller_service_details(object_id)
+                    current_state = (cs_details.get("component") or {}).get("state")
+                    if current_state == "DISABLED":
+                        local_logger.info("Controller service is already DISABLED.")
+                        from .utils import filter_controller_service_data
+                        filtered = filter_controller_service_data(cs_details)
+                        return {"status": "success", "message": "Controller service is already disabled.", "entity": filtered}
+                except Exception:
+                    pass  # Proceed with disable API call
 
             operation_name_for_log = f"{operation_type}_controller_service"
             nifi_update_req = {"operation": operation_name_for_log, "controller_service_id": object_id, "state": target_state}
@@ -581,7 +682,7 @@ async def operate_nifi_objects(
 
 @mcp.tool()
 @tool_phases(["Operate", "Verify"])
-async def invoke_nifi_http_endpoint(
+async def invoke_http_endpoint(
     url: str,
     process_group_id: str,
     method: Literal["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"] = "POST",
@@ -591,6 +692,7 @@ async def invoke_nifi_http_endpoint(
 ) -> Dict:
     """
     Sends an HTTP request to a specified URL, typically to test a NiFi flow endpoint (e.g., ListenHTTP).
+    Use to call any HTTP URL, e.g. a ListenHTTP or HandleHttpRequest in your flow, or another REST endpoint.
     Waits for a response or times out, then automatically checks the flow status for context.
 
     WARNING: Ensure the URL points to a trusted endpoint, ideally one hosted by your NiFi instance or related infrastructure.
@@ -598,12 +700,12 @@ async def invoke_nifi_http_endpoint(
     Examples:
     Call (POST JSON):
     ```tool_code
-    print(default_api.invoke_nifi_http_endpoint(url='http://localhost:9999/myflow', process_group_id='root', method='POST', payload={'key': 'value'}, headers={'Content-Type': 'application/json'}))
+    print(default_api.invoke_http_endpoint(url='http://localhost:9999/myflow', process_group_id='root', method='POST', payload={'key': 'value'}, headers={'Content-Type': 'application/json'}))
     ```
 
     Call (GET):
     ```tool_code
-    print(default_api.invoke_nifi_http_endpoint(url='http://localhost:9998/status', process_group_id='abc123', method='GET'))
+    print(default_api.invoke_http_endpoint(url='http://localhost:9998/status', process_group_id='abc123', method='GET'))
     ```
 
     Args:
@@ -881,83 +983,113 @@ async def purge_flowfiles(
 @mcp.tool()
 @tool_phases(["Debug"])
 async def analyze_nifi_processor_errors(
-    processor_id: str,
-    include_suggestions: bool = True
+    processor_id: Optional[str] = None,
+    process_group_id: Optional[str] = None,
+    include_suggestions: bool = True,
+    max_processors: int = 50,
 ) -> Dict[str, Any]:
     """
-    Analyze processor errors and provide debugging suggestions for faster resolution.
-    
-    EFFICIENCY IMPROVEMENT: Proactive error analysis to reduce debugging iterations.
-    
+    Analyze processor errors and provide debugging suggestions.
+
+    Supports two modes:
+    - Single processor: provide processor_id. Returns analysis for that processor.
+    - Process group: provide process_group_id. Lists processors in the PG, finds those with
+      ERROR bulletins, and returns analysis for each (processor_errors list). Limited to
+      max_processors to avoid slow runs on very large groups.
+
     Args:
-        processor_id: The ID of the processor to analyze
-        include_suggestions: Whether to include automated debugging suggestions
-        
+        processor_id: The ID of a single processor to analyze (use with process_group_id omitted).
+        process_group_id: The ID of a process group to scan for processors with errors (use with processor_id omitted).
+        include_suggestions: Whether to include automated debugging suggestions.
+        max_processors: When using process_group_id, max number of processors to check (default 50).
+
     Returns:
-        Analysis results including error patterns, suggestions, and potential fixes
+        Single-processor mode: status, message, analysis (processor_id, processor_name, errors, patterns, suggestions).
+        PG mode: status, process_group_id, processor_errors (list of same analysis shape), total_processors_with_errors.
     """
     nifi_client: Optional[NiFiClient] = current_nifi_client.get()
     local_logger = current_request_logger.get() or logger
     if not nifi_client:
         raise ToolError("NiFi client context is not set. This tool requires the X-Nifi-Server-Id header.")
+    if bool(processor_id) == bool(process_group_id):
+        raise ToolError("Provide exactly one of processor_id or process_group_id.")
 
-    # Context IDs for logging (not currently used in this tool)
-    # user_request_id = current_user_request_id.get() or "-"
-    # action_id = current_action_id.get() or "-"
+    user_request_id = current_user_request_id.get() or "-"
+    action_id = current_action_id.get() or "-"
 
-    try:
-        # Get processor details
-        processor_details = await nifi_client.get_processor_details(processor_id)
-        processor_name = processor_details.get("component", {}).get("name", "Unknown")
-        processor_type = processor_details.get("component", {}).get("type", "Unknown")
-        validation_status = processor_details.get("component", {}).get("validationStatus", "UNKNOWN")
-        
-        # Get bulletins (error messages)
-        bulletins = processor_details.get("bulletins", [])
-        
-        # Analyze errors
+    def _analyze_one(proc_id: str, proc_details: Dict) -> Dict[str, Any]:
+        comp = proc_details.get("component", {})
+        proc_name = comp.get("name", "Unknown")
+        proc_type = comp.get("type", "Unknown")
+        bulletins = proc_details.get("bulletins", [])
         analysis = {
-            "processor_id": processor_id,
-            "processor_name": processor_name,
-            "processor_type": processor_type,
-            "validation_status": validation_status,
-            "error_count": len(bulletins),
+            "processor_id": proc_id,
+            "processor_name": proc_name,
+            "processor_type": proc_type,
+            "validation_status": comp.get("validationStatus", "UNKNOWN"),
+            "error_count": 0,
             "errors": [],
             "patterns": [],
-            "suggestions": [] if include_suggestions else None
+            "suggestions": [] if include_suggestions else None,
         }
-        
-        # Process each bulletin
         for bulletin in bulletins:
             bulletin_data = bulletin.get("bulletin", {})
             if bulletin_data.get("level") == "ERROR":
-                error_info = {
+                analysis["error_count"] += 1
+                analysis["errors"].append({
                     "timestamp": bulletin_data.get("timestamp"),
                     "message": bulletin_data.get("message"),
-                    "category": bulletin_data.get("category")
-                }
-                analysis["errors"].append(error_info)
-                
-                # Analyze error patterns
+                    "category": bulletin_data.get("category"),
+                })
                 if include_suggestions:
-                    patterns = _analyze_error_patterns(bulletin_data.get("message", ""), processor_type)
+                    patterns = _analyze_error_patterns(bulletin_data.get("message", ""), proc_type)
                     analysis["patterns"].extend(patterns)
-        
-        # Generate suggestions based on patterns
         if include_suggestions and analysis["patterns"]:
-            analysis["suggestions"] = _generate_debugging_suggestions(analysis["patterns"], processor_type)
-        
-        local_logger.info(f"Analyzed {len(bulletins)} bulletins for processor {processor_name}")
-        
+            analysis["suggestions"] = _generate_debugging_suggestions(analysis["patterns"], proc_type)
+        return analysis
+
+    if processor_id:
+        try:
+            processor_details = await nifi_client.get_processor_details(processor_id)
+            analysis = _analyze_one(processor_id, processor_details)
+            local_logger.info(f"Analyzed {analysis['error_count']} bulletins for processor {analysis['processor_name']}")
+            return {
+                "status": "success",
+                "message": f"Analyzed processor '{analysis['processor_name']}' errors",
+                "analysis": analysis,
+            }
+        except Exception as e:
+            local_logger.error(f"Error analyzing processor {processor_id}: {e}", exc_info=True)
+            raise ToolError(f"Failed to analyze processor errors: {e}")
+
+    # PG mode
+    try:
+        processors_list = await nifi_client.list_processors(process_group_id, user_request_id=user_request_id, action_id=action_id)
+        processors_list = (processors_list or [])[:max_processors]
+        processor_errors: List[Dict[str, Any]] = []
+        for proc_entity in processors_list:
+            proc_id = proc_entity.get("id")
+            if not proc_id:
+                continue
+            try:
+                proc_details = await nifi_client.get_processor_details(proc_id)
+                bulletins = proc_details.get("bulletins", [])
+                has_error = any((b.get("bulletin", b) or b).get("level") == "ERROR" for b in (bulletins or []))
+                if has_error:
+                    analysis = _analyze_one(proc_id, proc_details)
+                    processor_errors.append(analysis)
+            except Exception as e:
+                local_logger.warning(f"Could not get details for processor {proc_id}: {e}")
+        local_logger.info(f"PG {process_group_id}: {len(processor_errors)} processor(s) with errors")
         return {
             "status": "success",
-            "message": f"Analyzed processor '{processor_name}' errors",
-            "analysis": analysis
+            "process_group_id": process_group_id,
+            "processor_errors": processor_errors,
+            "total_processors_with_errors": len(processor_errors),
         }
-        
     except Exception as e:
-        local_logger.error(f"Error analyzing processor {processor_id}: {e}", exc_info=True)
-        raise ToolError(f"Failed to analyze processor errors: {e}")
+        local_logger.error(f"Error analyzing process group {process_group_id}: {e}", exc_info=True)
+        raise ToolError(f"Failed to analyze process group errors: {e}")
 
 
 def _analyze_error_patterns(error_message: str, processor_type: str) -> List[str]:

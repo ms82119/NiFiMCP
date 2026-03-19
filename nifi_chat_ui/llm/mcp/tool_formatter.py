@@ -225,4 +225,45 @@ class ToolFormatter:
         if not cleaned.get("properties"):
             cleaned["properties"] = {}
         
+        # Ensure all properties have explicit type information
+        if "properties" in cleaned and isinstance(cleaned["properties"], dict):
+            for prop_name, prop_value in cleaned["properties"].items():
+                if isinstance(prop_value, dict):
+                    # If property has no type, infer it from other fields or set default
+                    if "type" not in prop_value:
+                        # Check if it has enum values (implies string type)
+                        if "enum" in prop_value:
+                            prop_value["type"] = "string"
+                        # Check if it has items (implies array type)
+                        elif "items" in prop_value:
+                            prop_value["type"] = "array"
+                        # Check if it has properties (implies object type)
+                        elif "properties" in prop_value:
+                            prop_value["type"] = "object"
+                        # Check description for hints
+                        elif prop_value.get("description", "").lower().find("boolean") != -1:
+                            prop_value["type"] = "boolean"
+                        elif prop_value.get("description", "").lower().find("number") != -1 or \
+                             prop_value.get("description", "").lower().find("integer") != -1:
+                            prop_value["type"] = "number"
+                        else:
+                            # Default to string for unknown types
+                            prop_value["type"] = "string"
+                            logger.debug(f"Added default 'string' type to property '{prop_name}' in schema")
+                    
+                    # Also ensure nested properties have types (recursive check)
+                    if "properties" in prop_value and isinstance(prop_value["properties"], dict):
+                        for nested_prop_name, nested_prop_value in prop_value["properties"].items():
+                            if isinstance(nested_prop_value, dict) and "type" not in nested_prop_value:
+                                # Apply same type inference logic to nested properties
+                                if "enum" in nested_prop_value:
+                                    nested_prop_value["type"] = "string"
+                                elif "items" in nested_prop_value:
+                                    nested_prop_value["type"] = "array"
+                                elif "properties" in nested_prop_value:
+                                    nested_prop_value["type"] = "object"
+                                else:
+                                    nested_prop_value["type"] = "string"
+                                    logger.debug(f"Added default 'string' type to nested property '{prop_name}.{nested_prop_name}' in schema")
+        
         return cleaned 

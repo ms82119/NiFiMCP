@@ -28,15 +28,15 @@ class TestContractValidation:
     
     def test_get_llm_response_contract(self):
         """Test that workflow calls get_llm_response with correct signature."""
-        from nifi_chat_ui.chat_manager_compat import get_llm_response
+        from nifi_chat_ui.llm.chat_manager import ChatManager
         import inspect
         
         # Get actual function signature
-        sig = inspect.signature(get_llm_response)
+        sig = inspect.signature(ChatManager.get_llm_response)
         param_names = list(sig.parameters.keys())
         
         # Verify workflow code matches expected parameters
-        expected_params = ['messages', 'system_prompt', 'tools', 'provider', 'model_name', 'user_request_id']
+        expected_params = ['messages', 'system_prompt', 'provider', 'model_name', 'user_request_id']
         for param in expected_params:
             assert param in param_names, f"get_llm_response missing expected parameter: {param}"
     
@@ -171,7 +171,7 @@ class TestParameterValidationWithAutospec:
         """Set up test fixtures."""
         self.node = InitializeExecutionNode()
     
-    @patch('nifi_chat_ui.chat_manager_compat.get_llm_response', autospec=True)
+    @patch('nifi_chat_ui.chat_manager.get_llm_response', autospec=True)
     @patch('nifi_chat_ui.mcp_handler.get_available_tools', autospec=True) 
     def test_function_called_with_correct_parameters(self, mock_get_tools, mock_llm_response):
         """Test that functions are called with correct parameter names and types."""

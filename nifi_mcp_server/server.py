@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import time
 from typing import List, Dict, Optional, Any, Union, Literal
 import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body, Request, Query, Header
@@ -39,7 +40,15 @@ from .core import mcp, get_nifi_client
 from config.logging_setup import request_context # Adjust import path if needed
 
 # --- Import ContextVars --- #
-from .request_context import current_nifi_client, current_request_logger, current_user_request_id, current_action_id # Added
+from .request_context import (
+    current_nifi_client,
+    current_request_logger,
+    current_user_request_id,
+    current_action_id,
+    mcp_session_started_at,
+    session_total_tokens_in,
+    session_total_tokens_out,
+)
 
 from mcp.shared.exceptions import McpError # Base error
 from mcp.server.fastmcp.exceptions import ToolError # Tool-specific errors
@@ -51,6 +60,8 @@ from mcp.server.fastmcp.exceptions import ToolError # Tool-specific errors
 # --- Import Utilities AFTER core components are imported ---
 from .api_tools.utils import (
     tool_phases,
+    is_mcp_only_tool,
+    CONTROL_TOOL_NAMES,
     _format_processor_summary,
     _format_connection_summary,
     _format_port_summary,
@@ -69,6 +80,7 @@ from .api_tools import creation
 from .api_tools import modification
 from .api_tools import operation
 from .api_tools import helpers
+from .api_tools import control  # MCP-only server/phase tools (hidden from web via get_tools filter)
 # Add other tool module imports here as they are created
 # from .api_tools import helpers
 # ---------------------------------------------------------------------
@@ -93,14 +105,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to configure server logging: {e}", exc_info=True)
     
-    # Configure LLM clients for workflow execution
-    try:
-        from nifi_chat_ui.chat_manager_compat import configure_llms
-        configure_llms()
-        logger.info("LLM clients configured for workflow execution")
-    except Exception as e:
-        logger.error(f"Failed to configure LLM clients: {e}", exc_info=True)
-        logger.warning("Workflows may not be able to call LLMs")
+    # LLM clients are now handled by the modular architecture
+    # No need to configure them here - they're initialized on-demand
+    logger.info("LLM clients will be initialized on-demand by the modular architecture")
     
     if not get_nifi_servers():
         logger.warning("*******************************************************")
@@ -194,8 +201,11 @@ async def get_tools(
         if tool_manager:
             tools_info = tool_manager.list_tools()
             
-            for tool_info in tools_info: 
+            for tool_info in tools_info:
                 tool_name = getattr(tool_info, 'name', 'unknown')
+                if is_mcp_only_tool(tool_name):
+                    bound_logger.trace(f"Skipping MCP-only tool '{tool_name}' (hidden from web UI).")
+                    continue
                 tool_phases_list = _tool_phase_registry.get(tool_name, [])
                 if not tool_phases_list:
                      bound_logger.warning(f"Could not find phase tags in registry for tool '{tool_name}'. Assuming it belongs to all phases for safety.")
@@ -376,11 +386,14 @@ async def execute_tool(
     tool_name: str,
     payload: ToolExecutionPayload,
     request: Request,
-    nifi_server_id: Optional[str] = Header(None, alias="X-Nifi-Server-Id")
+    nifi_server_id: Optional[str] = Header(None, alias="X-Nifi-Server-Id"),
+    nifi_phase: Optional[str] = Header(None, alias="X-Nifi-Phase")
 ) -> Any:
     """Execute a specific MCP tool by name.
 
     Requires the `X-Nifi-Server-Id` header to specify which configured NiFi server to target.
+    Optional `X-Nifi-Phase` header: when set (e.g. Review, Build, Modify, Operate), only tools
+    whose phases include that value may run; others receive 403. Control tools are always allowed.
     """
     user_request_id = request.state.user_request_id
     action_id = request.state.action_id
@@ -397,6 +410,18 @@ async def execute_tool(
         bound_logger.warning("Missing X-Nifi-Server-Id header.")
         raise HTTPException(status_code=400, detail="Missing required header: X-Nifi-Server-Id")
     # -------------------------- #
+
+    # --- Optional phase restriction (X-Nifi-Phase) --- #
+    if nifi_phase and str(nifi_phase).strip().lower() != "all" and tool_name not in CONTROL_TOOL_NAMES:
+        tool_phases_list = _tool_phase_registry.get(tool_name, [])
+        phase_lower = nifi_phase.strip().lower()
+        allowed_lower = [p.lower() for p in tool_phases_list]
+        if allowed_lower and phase_lower not in allowed_lower:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Phase is set to '{nifi_phase}'. This tool is not allowed in this phase. Allowed phases for this tool: {', '.join(tool_phases_list)}."
+            )
+    # ----------------------------------------------- #
 
     tool_input = payload.arguments
     bound_logger.debug(f"Tool arguments received: {tool_input}")
@@ -417,15 +442,24 @@ async def execute_tool(
         bound_logger.trace("Set NiFi client and logger in context variables.")
         # ----------------------- #
 
+        # --- Session start and token counters (for get_nifi_session_info) --- #
+        if mcp_session_started_at.get() is None:
+            mcp_session_started_at.set(time.time())
+            session_total_tokens_in.set(0)
+            session_total_tokens_out.set(0)
+        # -------------------------------------------------------------------- #
+
         # --- Execute the tool via MCP --- #
-        bound_logger.info(f"Executing tool '{tool_name}'...")
+        # Note: Detailed MCP request/response logging is handled by mcp_debug.log
+        # We only log high-level success here to avoid duplication
+        bound_logger.debug(f"Executing tool '{tool_name}'...")
         
         # Call the tool using the correct method on the FastMCP instance
         # ContextVars provide client/logger implicitly via the context mechanism within call_tool
         tool_result_mcp_format = await mcp.call_tool(tool_name, tool_input)
                 
-        bound_logger.info(f"Tool '{tool_name}' execution successful.")
-        bound_logger.debug(f"Raw MCP Tool result: {tool_result_mcp_format}") 
+        # Only log at debug level - detailed results are in mcp_debug.log
+        bound_logger.debug(f"Tool '{tool_name}' execution successful.") 
         
         # --- Extract serializable result from MCP format --- 
         final_result_to_serialize = None
@@ -723,11 +757,12 @@ async def validate_workflow(
 # Run with uvicorn if this module is run directly
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.environ.get("MCP_SERVER_PORT", "8000"))
     # Disable default access logs to potentially reduce noise/interleaving
     uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=8000, 
-        log_level="info", # Keep uvicorn's own level if desired
-        access_log=False # Disable standard access log lines
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",  # Keep uvicorn's own level if desired
+        access_log=False,  # Disable standard access log lines
     )

@@ -1,9 +1,18 @@
 import pytest
 import httpx
 from typing import AsyncGenerator
+from unittest.mock import patch, MagicMock
 
 # Unit test configuration - no server connectivity required
 # This prevents integration test fixtures from causing warnings
+
+# Mock FastMCP to prevent import errors during unit tests
+@pytest.fixture(scope="session", autouse=True)
+def mock_fastmcp():
+    """Mock FastMCP to prevent import errors in unit tests."""
+    with patch('nifi_mcp_server.core.FastMCP') as mock_mcp:
+        mock_mcp.return_value = MagicMock()
+        yield
 
 # Override the fixtures from parent conftest.py to prevent warnings
 @pytest.fixture(scope="module")
@@ -23,10 +32,15 @@ def global_logger():
     import logging
     return logging.getLogger(__name__)
 
-@pytest.fixture(scope="session") 
+@pytest.fixture(scope="session")
 def base_url():
-    """Mock base URL for unit tests."""
-    return "http://localhost:8000"
+    """Base URL for unit tests; respects MCP_SERVER_URL or MCP_SERVER_PORT."""
+    import os
+    url = os.environ.get("MCP_SERVER_URL")
+    if url:
+        return url
+    port = os.environ.get("MCP_SERVER_PORT", "8000")
+    return f"http://localhost:{port}"
 
 @pytest.fixture(scope="session")
 def target_nifi_server_id():

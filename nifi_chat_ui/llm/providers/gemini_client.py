@@ -76,15 +76,45 @@ class GeminiClient(LLMProvider):
         """Send message to Gemini using ADK for proper MCP integration."""
         bound_logger = self.logger.bind(user_request_id=user_request_id, action_id=action_id)
         
+        # LLM Debug Logging - Log the request being sent to Gemini
+        llm_request_data = {
+            "provider": "gemini",
+            "model": model_name,
+            "messages": messages,
+            "tools": tools
+        }
+        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id, action_id=action_id).debug("Calling Gemini LLM")
+        
         try:
             if self.adk_agent and ADK_AVAILABLE:
-                return self._send_with_adk(messages, system_prompt, model_name, bound_logger)
+                response = self._send_with_adk(messages, system_prompt, model_name, bound_logger)
             else:
                 # Fallback to manual implementation if ADK is not available
-                return self._send_with_manual_implementation(messages, system_prompt, model_name, tools, bound_logger)
+                response = self._send_with_manual_implementation(messages, system_prompt, model_name, tools, bound_logger)
+            
+            # LLM Debug Logging - Log the response received from Gemini
+            llm_response_data = {
+                "content_length": len(response.content) if response.content else 0,
+                "tool_calls_count": len(response.tool_calls) if response.tool_calls else 0,
+                "token_count_in": response.token_count_in,
+                "token_count_out": response.token_count_out,
+                "error": response.error,
+                "full_response": response.content
+            }
+            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id, action_id=action_id).debug("llm-response")
+            
+            return response
                 
         except Exception as e:
             bound_logger.error(f"Gemini API error: {e}", exc_info=True)
+            # LLM Debug Logging - Log the error response
+            llm_error_data = {
+                "error": str(e),
+                "token_count_in": 0,
+                "token_count_out": 0
+            }
+            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id, action_id=action_id).debug("Received error from Gemini LLM")
+            
             error_message = LLMErrorHandler.handle_error(e, "Gemini")
             return LLMResponse(
                 content=None,
@@ -183,7 +213,7 @@ class GeminiClient(LLMProvider):
                 "messages": messages,
                 "tools": [{"name": getattr(t, 'name', 'unknown'), "description": getattr(t, 'description', 'N/A')} for t in function_declarations] if function_declarations else None
             }
-            bound_logger.bind(interface="llm", direction="request", data=llm_request_data).debug("Calling Gemini LLM")
+            bound_logger.bind(interface="llm", direction="request", data=llm_request_data, action_id=action_id).debug("Calling Gemini LLM")
             
             # Create generation config with appropriate settings
             generation_config = genai.types.GenerationConfig(
@@ -230,7 +260,7 @@ class GeminiClient(LLMProvider):
                 "error": parsed_response.error,
                 "full_response": parsed_response.content if parsed_response.content else None
             }
-            bound_logger.bind(interface="llm", direction="response", data=llm_response_data).debug("llm-response")
+            bound_logger.bind(interface="llm", direction="response", data=llm_response_data, action_id=action_id).debug("llm-response")
             
             return parsed_response
             
@@ -243,7 +273,7 @@ class GeminiClient(LLMProvider):
                 "token_count_in": token_count_in,
                 "token_count_out": 0
             }
-            bound_logger.bind(interface="llm", direction="response", data=llm_error_data).debug("Received error from Gemini LLM")
+            bound_logger.bind(interface="llm", direction="response", data=llm_error_data, action_id=action_id).debug("Received error from Gemini LLM")
             
             return LLMResponse(
                 content=None,
@@ -441,15 +471,27 @@ class GeminiClient(LLMProvider):
                 )
             
             else:
-                error_msg = f"UNKNOWN: Gemini returned empty response for unknown reasons. Finish reasons: {finish_reasons}"
-                bound_logger.error(error_msg)
-                return LLMResponse(
-                    content=None,
-                    tool_calls=None,
-                    token_count_in=token_count_in,
-                    token_count_out=0,
-                    error=f"Empty response from Gemini: {error_msg}"
-                )
+                # Check if this is a context-related empty response
+                if token_count_in > 8000:  # High token count suggests context overflow
+                    error_msg = f"CONTEXT_OVERFLOW: Gemini returned empty response likely due to excessive context ({token_count_in} tokens). Finish reasons: {finish_reasons}"
+                    bound_logger.error(error_msg)
+                    return LLMResponse(
+                        content=None,
+                        tool_calls=None,
+                        token_count_in=token_count_in,
+                        token_count_out=0,
+                        error=f"Empty response from Gemini: {error_msg}"
+                    )
+                else:
+                    error_msg = f"UNKNOWN: Gemini returned empty response for unknown reasons. Finish reasons: {finish_reasons}"
+                    bound_logger.error(error_msg)
+                    return LLMResponse(
+                        content=None,
+                        tool_calls=None,
+                        token_count_in=token_count_in,
+                        token_count_out=0,
+                        error=f"Empty response from Gemini: {error_msg}"
+                    )
     
     def _analyze_tool_schemas_for_issues(self, tools, bound_logger):
         """

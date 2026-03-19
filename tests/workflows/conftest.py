@@ -160,9 +160,14 @@ def setup_test_environment():
     os.environ["TESTING"] = "true"
     
     # Mock critical imports that might not be available in test environment
-    with patch('nifi_chat_ui.chat_manager_compat.get_llm_response'), \
-         patch('nifi_chat_ui.mcp_handler.get_available_tools'), \
-         patch('nifi_chat_ui.mcp_handler.execute_mcp_tool'):
+    # Note: These patches may not be needed for all tests, but they prevent import errors
+    try:
+        with patch('nifi_chat_ui.llm.chat_manager.ChatManager.get_llm_response', create=True), \
+             patch('nifi_chat_ui.mcp_handler.get_available_tools', create=True), \
+             patch('nifi_chat_ui.mcp_handler.execute_mcp_tool', create=True):
+            yield
+    except (ImportError, AttributeError):
+        # If modules don't exist, just continue without mocking
         yield
     
     # Clean up
@@ -255,4 +260,71 @@ def pytest_collection_modifyitems(config, items):
             
         # Mark unit tests
         if "test_" in item.name and "integration" not in item.name:
-            item.add_marker(pytest.mark.unit) 
+            item.add_marker(pytest.mark.unit)
+
+
+# =============================================================================
+# LLM Mocking Fixtures for Documentation Workflow Tests
+# =============================================================================
+
+FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "llm_responses"
+
+
+@pytest.fixture
+def mock_llm_responses():
+    """Load cached LLM responses for testing."""
+    responses = {}
+    if FIXTURES_DIR.exists():
+        for file in FIXTURES_DIR.glob("*.json"):
+            import json
+            with open(file) as f:
+                responses[file.stem] = json.load(f)
+    return responses
+
+
+@pytest.fixture
+def mock_call_llm_async(mock_llm_responses):
+    """
+    Mock LLM calls to return cached responses.
+    
+    This prevents LLM API costs during testing.
+    Responses are keyed by action_id pattern.
+    """
+    async def _mock_call_llm(messages, tools, execution_state, action_id):
+        # Match action_id pattern to cached response
+        if "pg-summary" in action_id or "pg_with_children" in action_id:
+            return {"content": mock_llm_responses.get("pg_summary_responses", {}).get("pg_summary_default", "Mock PG summary")}
+        elif "virtual-groups" in action_id:
+            return {"content": mock_llm_responses.get("virtual_group_responses", {}).get("virtual_groups_default", "[]")}
+        elif "generation-exec-summary" in action_id or "executive" in action_id:
+            return {"content": mock_llm_responses.get("executive_summary_responses", {}).get("executive_summary_default", "Mock executive summary")}
+        elif "generation-diagram" in action_id or "diagram" in action_id:
+            return {"content": "```mermaid\nflowchart TD\n    A[Process Group] --> B[Sub Group]\n```"}
+        else:
+            return {"content": "Mock LLM response", "tool_calls": None, "token_count_in": 100, "token_count_out": 50}
+    
+    return _mock_call_llm
+
+
+@pytest.fixture
+def mock_call_nifi_tool():
+    """
+    Mock NiFi tool calls for testing.
+    
+    Returns empty results by default - tests can override as needed.
+    """
+    async def _mock_call_tool(tool_name, arguments, prep_res):
+        if tool_name == "list_nifi_objects_recursive":
+            return {
+                "results": [{"objects": [], "process_group_id": arguments.get("process_group_id", "root")}],
+                "completed": True,
+                "continuation_token": None
+            }
+        elif tool_name == "list_nifi_objects":
+            return {"results": [{"objects": []}]}
+        elif tool_name == "get_nifi_object_details":
+            return {}
+        else:
+            return {}
+    
+    return _mock_call_tool 

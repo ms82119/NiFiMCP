@@ -327,20 +327,48 @@ async def _create_nifi_connection_single(
             local_logger.error(f"Could not determine parent group ID for {missing_component} component.")
             raise ToolError(f"Could not determine parent group ID for {missing_component}.")
 
+        # Allow cross-PG when: (1) both ports (sibling-style), or (2) processor->child input port, or (3) child output port->processor (UI-style child PG links)
+        both_ports = source_type in ("INPUT_PORT", "OUTPUT_PORT") and target_type in ("INPUT_PORT", "OUTPUT_PORT")
+        processor_to_child_input = source_type == "PROCESSOR" and target_type == "INPUT_PORT"
+        child_output_to_processor = source_type == "OUTPUT_PORT" and target_type == "PROCESSOR"
+        cross_pg_allowed = both_ports or processor_to_child_input or child_output_to_processor
         if source_parent_pg_id != target_parent_pg_id:
-            local_logger.error(f"Source ({source_parent_pg_id}) and target ({target_parent_pg_id}) are in different groups.")
-            raise ToolError(f"Source and target components must be in the same process group.")
-
-        common_parent_pg_id = source_parent_pg_id
+            if not cross_pg_allowed:
+                local_logger.error(f"Source ({source_parent_pg_id}) and target ({target_parent_pg_id}) are in different groups.")
+                raise ToolError(f"Source and target components must be in the same process group.")
+            if processor_to_child_input:
+                common_parent_pg_id = source_parent_pg_id  # create in parent; source (processor) is in parent
+            elif child_output_to_processor:
+                common_parent_pg_id = target_parent_pg_id  # create in parent; destination (processor) is in parent
+            else:
+                try:
+                    target_pg_details = await nifi_client.get_process_group_details(target_parent_pg_id, user_request_id=user_request_id, action_id=action_id)
+                    target_grandparent_id = (target_pg_details.get("component") or {}).get("parentGroupId")
+                    common_parent_pg_id = target_grandparent_id if target_grandparent_id else target_parent_pg_id
+                except Exception as e:
+                    local_logger.warning(f"Could not get parent of target group {target_parent_pg_id}: {e}")
+                    common_parent_pg_id = target_parent_pg_id
+            local_logger.info(f"Cross-PG connection: creating in {common_parent_pg_id}, source in {source_parent_pg_id}, target in {target_parent_pg_id}")
+        else:
+            common_parent_pg_id = source_parent_pg_id
         local_logger = local_logger.bind(process_group_id=common_parent_pg_id)
+        cross_pg_ports = (source_parent_pg_id != target_parent_pg_id) and cross_pg_allowed
         local_logger.info(f"Validated components are in the same group: {common_parent_pg_id}")
 
     except (ValueError, NiFiAuthenticationError, ConnectionError) as e:
          local_logger.error(f"API error fetching component details: {e}", exc_info=False)
-         raise ToolError(f"Failed to fetch details for components: {e}")
+         raise ToolError(
+             f"Failed to fetch details for components (source or target): {e}. "
+             "Suggestion: Verify the component IDs exist in NiFi and are in the correct process groups; "
+             "for cross-PG connections use include_child_pg_ids and ensure ports/processors are in the map."
+         )
     except Exception as e:
          local_logger.error(f"Unexpected error fetching component details: {e}", exc_info=True)
-         raise ToolError(f"An unexpected error occurred fetching details: {e}")
+         raise ToolError(
+             f"An unexpected error occurred fetching details: {e}. "
+             "Suggestion: Verify the component IDs exist in NiFi and are in the correct process groups; "
+             "for cross-PG connections use include_child_pg_ids and ensure ports/processors are in the map."
+         )
 
     local_logger.info(f"Checking for existing connections between {source_id} and {target_id}...")
     try:
@@ -393,13 +421,17 @@ async def _create_nifi_connection_single(
         }
         local_logger.bind(interface="nifi", direction="request", data=nifi_create_req).debug("Calling NiFi API")
         
+        source_group_id = source_parent_pg_id if cross_pg_ports else common_parent_pg_id
+        target_group_id = target_parent_pg_id if cross_pg_ports else common_parent_pg_id
         connection_entity = await nifi_client.create_connection(
             process_group_id=common_parent_pg_id,
             source_id=source_id,
             target_id=target_id,
             relationships=relationships,
             source_type=source_type,
-            target_type=target_type
+            target_type=target_type,
+            source_group_id=source_group_id,
+            target_group_id=target_group_id,
         )
         filtered_entity = filter_connection_data(connection_entity)
         local_logger.bind(interface="nifi", direction="response", data=filtered_entity).debug("Received from NiFi API")
@@ -714,17 +746,32 @@ async def _create_controller_service_single(
 
 # --- Plural batch tools ---
 
+# Default spacing for auto-layout (NiFi processor box ~260px wide; 280/120 avoids overlap)
+DEFAULT_LAYOUT_SPACING_X = 280
+DEFAULT_LAYOUT_SPACING_Y = 120
+
+
 @mcp.tool()
 @tool_phases(["Build"])
 async def create_nifi_processors(
     processors: List[Dict[str, Any]],
-    process_group_id: str
+    process_group_id: str,
+    layout_origin_x: Optional[int] = None,
+    layout_origin_y: Optional[int] = None,
+    layout_spacing_x: int = DEFAULT_LAYOUT_SPACING_X,
+    layout_spacing_y: int = DEFAULT_LAYOUT_SPACING_Y,
+    layout_direction: str = "horizontal",
 ) -> List[Dict]:
     """
     Creates one or more NiFi processors in batch.
-    
+
     This tool efficiently handles multiple processor creation in a single request,
     ideal for building complex flows that require multiple processors.
+    Some processor types have NiFi defaults you may want to override (e.g. DuplicateFlowFile
+    "Number of Copies"); set them in properties here or via update_nifi_processors_properties.
+
+    When position is omitted for a processor, it is assigned automatically using layout_* parameters
+    so components do not stack on top of each other (horizontal row by default).
 
     Args:
         processors: List of processor definitions. Each dictionary must contain:
@@ -732,9 +779,15 @@ async def create_nifi_processors(
             - name (str): The desired name for the processor instance
             - position_x (int) OR position (dict): X coordinate OR nested position object {"x": 100, "y": 200}
             - position_y (int): Y coordinate (only if using position_x format)
+            - Omit position_x/position_y and position to use auto-layout (origin + spacing from layout_* params)
             - properties (dict, optional): Configuration properties for the processor
             - process_group_id (str, optional): Override the default process group for this specific processor
         process_group_id: Default process group UUID where all processors will be created (required)
+        layout_origin_x: X of first auto-laid-out processor (default 0). Used when a processor has no position.
+        layout_origin_y: Y of first auto-laid-out processor (default 0).
+        layout_spacing_x: Horizontal spacing between auto-laid-out processors (default 280).
+        layout_spacing_y: Vertical spacing between auto-laid-out processors (default 120).
+        layout_direction: "horizontal" (place in a row) or "vertical" (place in a column). Default "horizontal".
             
     Example:
     ```python
@@ -765,6 +818,13 @@ async def create_nifi_processors(
     Returns:
         List of result dictionaries, one per processor creation attempt.
     """
+    origin_x = layout_origin_x if layout_origin_x is not None else 0
+    origin_y = layout_origin_y if layout_origin_y is not None else 0
+    dir_lower = (layout_direction or "horizontal").strip().lower()
+    if dir_lower not in ("horizontal", "vertical"):
+        dir_lower = "horizontal"
+    auto_slot = 0
+
     results = []
     for i, proc in enumerate(processors):
         # Validate required fields early to provide better error messages
@@ -787,7 +847,7 @@ async def create_nifi_processors(
             })
             continue
         
-        # CRITICAL FIX: Handle both flat and nested position formats
+        # CRITICAL FIX: Handle both flat and nested position formats; allow auto-layout when omitted
         position_x = proc.get("position_x")
         position_y = proc.get("position_y")
         
@@ -795,10 +855,20 @@ async def create_nifi_processors(
         if position_x is None or position_y is None:
             position = proc.get("position", {})
             if isinstance(position, dict):
-                position_x = position.get("x")
-                position_y = position.get("y")
+                position_x = position_x if position_x is not None else position.get("x")
+                position_y = position_y if position_y is not None else position.get("y")
         
-        # Validate position fields
+        # Auto-layout: when position still missing, assign from layout origin + spacing
+        if position_x is None or position_y is None:
+            if dir_lower == "horizontal":
+                position_x = origin_x + auto_slot * layout_spacing_x
+                position_y = origin_y
+            else:
+                position_x = origin_x
+                position_y = origin_y + auto_slot * layout_spacing_y
+            auto_slot += 1
+        
+        # Validate position fields (should be set by now)
         if position_x is None or position_y is None:
             results.append({
                 "status": "error", 
@@ -839,7 +909,7 @@ async def _create_nifi_connections_legacy(
     Creates one or more NiFi connections in batch.
 
     IMPORTANT: This tool requires component UUIDs, not names. Use list_nifi_objects 
-    to get UUIDs first, or use create_complete_nifi_flow for name-based connections.
+    to get UUIDs first, or use create_nifi_flow_from_definition for name-based connections.
 
     Args:
         connections: List of connection definitions. Each dictionary must contain:
@@ -852,7 +922,7 @@ async def _create_nifi_connections_legacy(
     connections = [\n        {\n            \"source_id\": \"93865bc5-0197-1000-1b2c-1865bbf13903\",  # UUID from list_nifi_objects\n            \"target_id\": \"93865be3-0197-1000-9448-9091b9911330\",  # UUID from list_nifi_objects\n            \"relationships\": [\"success\"]\n        }\n    ]\n    ```
     
     Common Mistakes to Avoid:\n    ❌ Using component names: {\"source\": \"HandleHttpRequest\", \"target\": \"LogAttribute\"}\n    ❌ Wrong parameter names: {\"source_id\": \"...\", \"destination_id\": \"...\"}  \n    ❌ Wrong parameter names: {\"objects\": [...]}  # This is for delete_nifi_objects\n    
-    \n    For name-based connections, use create_complete_nifi_flow instead.
+    \n    For name-based connections, use create_nifi_flow_from_definition instead.
 
     Returns:
         List of result dictionaries, one per connection creation attempt.
@@ -873,13 +943,19 @@ async def _create_nifi_connections_legacy(
 @tool_phases(["Build"])
 async def create_nifi_ports(
     ports: List[Dict[str, Any]],
-    process_group_id: str
+    process_group_id: str,
+    layout_origin_x: Optional[int] = None,
+    layout_origin_y: Optional[int] = None,
+    layout_spacing_x: int = DEFAULT_LAYOUT_SPACING_X,
+    layout_spacing_y: int = DEFAULT_LAYOUT_SPACING_Y,
+    layout_direction: str = "horizontal",
 ) -> List[Dict]:
     """
     Creates one or more NiFi ports in batch.
     
     This tool efficiently handles multiple port creation in a single request,
     ideal for setting up data ingress and egress points for process groups.
+    When position is omitted for a port, it is assigned automatically (horizontal row by default).
 
     Args:
         ports: List of port definitions. Each dictionary must contain:
@@ -887,8 +963,12 @@ async def create_nifi_ports(
             - name (str): The desired name for the port instance
             - position_x (int) OR position (dict): X coordinate OR nested position object {"x": 100, "y": 200}
             - position_y (int): Y coordinate (only if using position_x format)
+            - Omit position to use auto-layout (layout_origin + spacing from layout_* params)
             - process_group_id (str, optional): Override the default process group for this specific port
         process_group_id: Default process group UUID where all ports will be created (required)
+        layout_origin_x, layout_origin_y: Origin for auto-laid-out ports (default 0). Used when a port has no position.
+        layout_spacing_x, layout_spacing_y: Spacing between auto-laid-out ports (default 280, 120).
+        layout_direction: "horizontal" or "vertical". Default "horizontal".
             
     Example:
     ```python
@@ -912,6 +992,13 @@ async def create_nifi_ports(
     Returns:
         List of result dictionaries, one per port creation attempt.
     """
+    port_origin_x = layout_origin_x if layout_origin_x is not None else 0
+    port_origin_y = layout_origin_y if layout_origin_y is not None else 0
+    port_dir = (layout_direction or "horizontal").strip().lower()
+    if port_dir not in ("horizontal", "vertical"):
+        port_dir = "horizontal"
+    port_auto_slot = 0
+
     results = []
     for i, port in enumerate(ports):
         # Validate required fields early to provide better error messages
@@ -943,7 +1030,7 @@ async def create_nifi_ports(
             })
             continue
         
-        # CRITICAL FIX: Handle both flat and nested position formats
+        # CRITICAL FIX: Handle both flat and nested position formats; allow auto-layout when omitted
         position_x = port.get("position_x")
         position_y = port.get("position_y")
         
@@ -951,8 +1038,18 @@ async def create_nifi_ports(
         if position_x is None or position_y is None:
             position = port.get("position", {})
             if isinstance(position, dict):
-                position_x = position.get("x")
-                position_y = position.get("y")
+                position_x = position_x if position_x is not None else position.get("x")
+                position_y = position_y if position_y is not None else position.get("y")
+        
+        # Auto-layout when position still missing
+        if position_x is None or position_y is None:
+            if port_dir == "horizontal":
+                position_x = port_origin_x + port_auto_slot * layout_spacing_x
+                position_y = port_origin_y
+            else:
+                position_x = port_origin_x
+                position_y = port_origin_y + port_auto_slot * layout_spacing_y
+            port_auto_slot += 1
         
         # Validate position fields
         if position_x is None or position_y is None:
@@ -1062,11 +1159,16 @@ async def create_nifi_process_group(
     name: str,
     position_x: int,
     position_y: int,
-    parent_process_group_id: str
+    parent_process_group_id: Optional[str] = None,
+    process_group_id: Optional[str] = None
 ) -> Dict:
     """
     Creates a new process group within a specified parent NiFi process group.
-    
+
+    Both parent_process_group_id and process_group_id refer to the **parent** group
+    (the group under which the new group is created), not the new group's ID.
+    You can pass either parameter; they are equivalent.
+
     This tool creates a process group that can contain other processors, services,
     and sub-process groups, helping organize complex flows.
 
@@ -1074,14 +1176,15 @@ async def create_nifi_process_group(
         name: The desired name for the new process group.
         position_x: The desired X coordinate for the process group on the canvas.
         position_y: The desired Y coordinate for the process group on the canvas.
-        parent_process_group_id: The UUID of the parent process group where the new group should be created (required).
+        parent_process_group_id: The UUID of the parent process group where the new group should be created.
+        process_group_id: Alias for parent_process_group_id (same meaning: parent group where the new group is created).
         
     Example:
     ```python
     name = "DataProcessingGroup"
     position_x = 200
     position_y = 150
-    parent_process_group_id = "abc-123-def-456"  # Required parent process group UUID
+    parent_process_group_id = "abc-123-def-456"  # or use process_group_id=
     ```
 
     Returns:
@@ -1094,6 +1197,13 @@ async def create_nifi_process_group(
         raise ToolError("NiFi client context is not set. This tool requires the X-Nifi-Server-Id header.")
     if not local_logger:
          raise ToolError("Request logger context is not set.")
+
+    target_parent_pg_id = parent_process_group_id or process_group_id
+    if not target_parent_pg_id:
+        raise ToolError(
+            "Required: parent_process_group_id (or process_group_id). "
+            "Suggestion: Pass the UUID of the process group under which the new group should be created."
+        )
          
     # Authentication handled by factory
     # context = local_logger._context # REMOVED
@@ -1103,8 +1213,6 @@ async def create_nifi_process_group(
     user_request_id = current_user_request_id.get() or "-"
     action_id = current_action_id.get() or "-"
     # --------------------------
-
-    target_parent_pg_id = parent_process_group_id
 
     position = {"x": position_x, "y": position_y}
     local_logger = local_logger.bind(parent_process_group_id=target_parent_pg_id)
@@ -1141,12 +1249,12 @@ async def create_nifi_process_group(
         return {"status": "error", "message": f"An unexpected error occurred creating process group '{name}': {e}", "entity": None}
 
 
-# REMOVED: create_nifi_flow tool - replaced by create_complete_nifi_flow
-# The enhanced create_complete_nifi_flow tool provides all functionality of this tool
+# REMOVED: create_nifi_flow tool - replaced by create_nifi_flow_from_definition
+# The enhanced create_nifi_flow_from_definition tool provides all functionality of this tool
 # plus controller services, @ServiceName resolution, and automatic flow validation
 #
 # DEPRECATED: This function has been removed from MCP tool registration.
-# Use create_complete_nifi_flow instead, which supports:
+# Use create_nifi_flow_from_definition instead, which supports:
 # - Controller services with automatic enabling
 # - Processors with @ServiceName reference resolution  
 # - Connections with name-based mapping
@@ -1159,7 +1267,7 @@ async def create_nifi_flow(
     """
     DEPRECATED: Creates a NiFi flow based on a list of processors and connections.
     
-    This function has been replaced by create_complete_nifi_flow which provides
+    This function has been replaced by create_nifi_flow_from_definition which provides
     enhanced functionality including controller services and flow validation.
     
     This function is kept for backward compatibility in tests but is no longer
@@ -1306,8 +1414,8 @@ async def create_nifi_flow(
             if item.get("type") == "connection": # Check top-level type
                 conn_def = item # Use the item directly
                 # Extract details using names
-                source_name = conn_def.get("source") # Expecting name
-                target_name = conn_def.get("dest") or conn_def.get("destination") # Allow variations
+                source_name = conn_def.get("source") or conn_def.get("source_name") # Support both formats
+                target_name = conn_def.get("target") or conn_def.get("target_name") or conn_def.get("dest") or conn_def.get("destination") # Allow variations
                 relationships = conn_def.get("relationships")
 
                 if not all([source_name, target_name, relationships]):
@@ -1379,7 +1487,7 @@ async def create_nifi_flow(
 
 @mcp.tool()
 @tool_phases(["Build"])
-async def create_complete_nifi_flow(
+async def create_nifi_flow_from_definition(
     nifi_objects: List[Dict[str, Any]],
     process_group_id: str | None = None,
     create_process_group: Optional[Dict[str, Any]] = None,
@@ -1954,14 +2062,14 @@ async def create_complete_nifi_flow(
         local_logger.info(f"Creating {len(all_connections)} connections...")
         
         for conn_def in all_connections:
-            source_name = conn_def.get("source")
-            target_name = conn_def.get("target") or conn_def.get("dest") or conn_def.get("destination")
+            source_name = conn_def.get("source") or conn_def.get("source_name")
+            target_name = conn_def.get("target") or conn_def.get("target_name") or conn_def.get("dest") or conn_def.get("destination")
             relationships = conn_def.get("relationships")
             
             if not all([source_name, target_name, relationships]):
                 error_result = {
                     "status": "error",
-                    "message": "Connection missing required fields (source, target, relationships)",
+                    "message": "Connection missing required fields (source/source_name, target/target_name, relationships)",
                     "definition": conn_def,
                     "object_type": "connection"
                 }
@@ -3194,7 +3302,7 @@ async def _analyze_and_auto_terminate_relationships(
         # Build a map of processor name -> relationships that will be used
         used_relationships = {}
         for conn_def in planned_connections:
-            source_name = conn_def.get("source")
+            source_name = conn_def.get("source") or conn_def.get("source_name")
             relationships = conn_def.get("relationships", [])
             
             if source_name and relationships:
@@ -3876,7 +3984,8 @@ async def _validate_processor_properties_upfront(processor_type: str, properties
 @tool_phases(["Build", "Modify"])
 async def create_nifi_connections(
     connections: List[Dict[str, Any]],
-    process_group_id: str
+    process_group_id: str,
+    include_child_pg_ids: Optional[List[str]] = None
 ) -> List[Dict]:
     """
     Creates NiFi connections using component names OR UUIDs with automatic resolution.
@@ -3903,6 +4012,10 @@ async def create_nifi_connections(
             - process_group_id (str, optional): Process group to search in (defaults to parameter)
             
         process_group_id: Default process group to search for components (required)
+
+        include_child_pg_ids: Optional list of child process group IDs whose input/output ports
+            should be included in the component map. Use when creating connections from the parent
+            to a child PG's ports (e.g. processor -> child input port, child output port -> processor).
             
     Example:
     ```python
@@ -4076,7 +4189,81 @@ async def create_nifi_connections(
                                 "name": name,
                                 "process_group_id": pg_id
                             }
-                        
+
+            # Include direct child PG ports so cross-PG connections can resolve by UUID or name
+            try:
+                child_pgs = await nifi_client.get_process_groups(pg_id)
+                for child_pg in (child_pgs or []):
+                    if not isinstance(child_pg, dict):
+                        continue
+                    child_id = child_pg.get("id") or (child_pg.get("component") or {}).get("id")
+                    if not child_id:
+                        continue
+                    try:
+                        inp_ports = await nifi_client.get_input_ports(child_id) or []
+                        out_ports = await nifi_client.get_output_ports(child_id) or []
+                    except Exception as _e:
+                        local_logger.warning(f"Could not fetch ports for child PG {child_id}: {_e}")
+                        continue
+                    for port_list, ptype in [(inp_ports, "INPUT_PORT"), (out_ports, "OUTPUT_PORT")]:
+                        for port in port_list:
+                            if not isinstance(port, dict):
+                                continue
+                            port_id = port.get("id")
+                            comp = port.get("component") or {}
+                            pname = comp.get("name") or port.get("name")
+                            if not (port_id and pname):
+                                continue
+                            ntype = "input_port" if ptype == "INPUT_PORT" else "output_port"
+                            component_map[f"{child_id}:{pname}"] = {
+                                "id": port_id, "type": ntype, "name": pname, "process_group_id": child_id
+                            }
+                            component_map[f"{pg_id}:UUID:{port_id}"] = {
+                                "id": port_id, "type": ntype, "name": pname, "process_group_id": child_id
+                            }
+            except Exception as child_e:
+                local_logger.warning(f"Could not add child PG ports for {pg_id}: {child_e}")
+
+            # Explicit child PG IDs: ensure their ports are in the map (e.g. for cross-PG connections)
+            if include_child_pg_ids:
+                try:
+                    child_pgs_list = await nifi_client.get_process_groups(pg_id) or []
+                    child_ids_here = set()
+                    for c in child_pgs_list:
+                        if not isinstance(c, dict):
+                            continue
+                        cid = c.get("id") or (c.get("component") or {}).get("id")
+                        if cid:
+                            child_ids_here.add(cid)
+                    for child_id in include_child_pg_ids:
+                        if child_id not in child_ids_here:
+                            continue
+                        try:
+                            inp_ports = await nifi_client.get_input_ports(child_id) or []
+                            out_ports = await nifi_client.get_output_ports(child_id) or []
+                        except Exception as _e:
+                            local_logger.warning(f"Could not fetch ports for included child PG {child_id}: {_e}")
+                            continue
+                        for port_list, ptype in [(inp_ports, "INPUT_PORT"), (out_ports, "OUTPUT_PORT")]:
+                            for port in port_list:
+                                if not isinstance(port, dict):
+                                    continue
+                                port_id = port.get("id")
+                                comp = port.get("component") or {}
+                                pname = comp.get("name") or port.get("name")
+                                if not (port_id and pname):
+                                    continue
+                                ntype = "input_port" if ptype == "INPUT_PORT" else "output_port"
+                                component_map[f"{child_id}:{pname}"] = {
+                                    "id": port_id, "type": ntype, "name": pname, "process_group_id": child_id
+                                }
+                                component_map[f"{pg_id}:UUID:{port_id}"] = {
+                                    "id": port_id, "type": ntype, "name": pname, "process_group_id": child_id
+                                }
+                        local_logger.info(f"Included child PG {child_id} ports in map for {pg_id}")
+                except Exception as inc_e:
+                    local_logger.warning(f"Could not add included child PG ports for {pg_id}: {inc_e}")
+
         except Exception as e:
             local_logger.warning(f"Failed to build component map for process group {pg_id}: {e}")
     
@@ -4095,12 +4282,44 @@ async def create_nifi_connections(
         if not source_name or not target_name:
             raise ToolError(f"Connection {i} missing required 'source_name' and/or 'target_name'")
         # Note: Empty relationships are allowed for port connections, validation happens in _create_nifi_connection_single
-        
+
         def is_uuid(value: str) -> bool:
             """Check if a string is a valid UUID format."""
             import re
             uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
             return bool(uuid_pattern.match(value))
+
+        # Ensure UUIDs (e.g. cross-PG ports) are in the map by fetching from NiFi if missing
+        async def _ensure_uuid_in_map(uuid_val: str) -> None:
+            if not is_uuid(uuid_val):
+                return
+            found = any(info.get("id") == uuid_val for info in component_map.values())
+            if found:
+                return
+            try:
+                for getter, ctype in [
+                    (nifi_client.get_processor_details, "processor"),
+                    (nifi_client.get_input_port_details, "input_port"),
+                    (nifi_client.get_output_port_details, "output_port"),
+                ]:
+                    try:
+                        ent = await getter(uuid_val)
+                        comp = ent.get("component") or {}
+                        parent_id = comp.get("parentGroupId") or ent.get("parentGroupId") or comp.get("groupId")
+                        cname = comp.get("name") or ent.get("name") or str(uuid_val)
+                        if parent_id:
+                            component_map[f"{pg_id}:UUID:{uuid_val}"] = {
+                                "id": uuid_val, "type": ctype, "name": cname, "process_group_id": parent_id
+                            }
+                            local_logger.info(f"Resolved {uuid_val} from NiFi as {ctype} '{cname}' in group {parent_id}")
+                        break
+                    except ValueError:
+                        continue
+            except Exception as e:
+                local_logger.warning(f"Could not fetch component {uuid_val} from NiFi: {e}")
+
+        await _ensure_uuid_in_map(source_name)
+        await _ensure_uuid_in_map(target_name)
         
         def resolve_component(component_name: str, pg_id: str, component_role: str):
             """Resolve component name or UUID to component info, handling duplicates and type-specific keys."""
@@ -4125,7 +4344,11 @@ async def create_nifi_connections(
                         local_logger.info(f"Resolved {component_role} UUID '{component_name}' to component '{info['name']}' ({info['type']})")
                         return key, info
                 # UUID not found in our component map
-                raise ToolError(f"{component_role.capitalize()} UUID '{component_name}' not found in process group '{pg_id}' or its components")
+                raise ToolError(
+                    f"{component_role.capitalize()} UUID '{component_name}' not found in process group '{pg_id}' or its components. "
+                    "Suggestion: Ensure the component exists and is in the connection's process group (or pass include_child_pg_ids for child ports); "
+                    "or use the component's name if it is in the same group."
+                )
             
             # Try direct lookup first
             direct_key = f"{pg_id}:{component_name}"
@@ -4151,7 +4374,23 @@ async def create_nifi_connections(
             elif len(type_specific_keys) > 1:
                 # Multiple type-specific matches - need disambiguation
                 available_types = [key.split(":")[-1] for key in type_specific_keys]
-                raise ToolError(f"Ambiguous {component_role} component '{component_name}' - multiple types found: {available_types}. Use format 'name:type' (e.g., 'DataInput:processor' or 'DataInput:input_port')")
+                raise ToolError(
+                    f"Ambiguous {component_role} component '{component_name}' - multiple types found: {available_types}. "
+                    "Suggestion: Use 'name:type' (e.g. 'requests:input_port') or the component's UUID."
+                )
+
+            # Fallback: match by name in any PG (e.g. child PG port "requests" when connecting from parent)
+            name_matches = [(k, v) for k, v in component_map.items() if v.get("name") == component_name]
+            if len(name_matches) == 1:
+                key, info = name_matches[0]
+                local_logger.info(f"Resolved {component_role} '{component_name}' by name match: {key}")
+                return key, info
+            if len(name_matches) > 1:
+                raise ToolError(
+                    f"Ambiguous {component_role} component '{component_name}' - multiple name matches. "
+                    "Suggestion: Use the component's UUID, or 'name:type' (e.g. 'done:output_port'), "
+                    "and ensure include_child_pg_ids includes the child group when connecting to child ports."
+                )
             
             # No matches found - provide helpful error
             available_components = []
@@ -4173,7 +4412,11 @@ async def create_nifi_connections(
                             available_components.append(name_part)
             
             available_components = sorted(set(available_components))
-            raise ToolError(f"{component_role.capitalize()} component '{component_name}' not found in process group '{pg_id}'. Available: {available_components}")
+            raise ToolError(
+                f"{component_role.capitalize()} component '{component_name}' not found in process group '{pg_id}'. Available: {available_components}. "
+                "Suggestion: Use a listed name, or 'name:type', or the component UUID; "
+                "for cross-PG connections include the child group in include_child_pg_ids."
+            )
         
         # Handle source component (UUID, name, or name:type)
         if is_uuid(source_name):
@@ -4189,7 +4432,11 @@ async def create_nifi_connections(
                     if pg_id != "root":
                         source_key = f"root:{base_source_name}:{source_type}"
                 if source_key not in component_map:
-                    raise ToolError(f"Source component '{source_name}' not found")
+                    raise ToolError(
+                        f"Source component '{source_name}' not found. "
+                        "Suggestion: Use a listed name, or 'name:type', or the component UUID; "
+                        "for cross-PG connections include the child group in include_child_pg_ids."
+                    )
                 source_info = component_map[source_key]
             else:
                 # Regular name resolution
@@ -4209,7 +4456,11 @@ async def create_nifi_connections(
                     if pg_id != "root":
                         target_key = f"root:{base_target_name}:{target_type}"
                 if target_key not in component_map:
-                    raise ToolError(f"Target component '{target_name}' not found")
+                    raise ToolError(
+                        f"Target component '{target_name}' not found. "
+                        "Suggestion: Use a listed name, or 'name:type', or the component UUID; "
+                        "for cross-PG connections include the child group in include_child_pg_ids."
+                    )
                 target_info = component_map[target_key]
             else:
                 # Regular name resolution
@@ -4267,6 +4518,10 @@ async def create_nifi_connections(
         
     except Exception as e:
         local_logger.error(f"Failed to create connections after name resolution: {e}")
-        raise ToolError(f"Connection creation failed after successful name resolution: {e}")
+        raise ToolError(
+            f"Connection creation failed after successful name resolution: {e}. "
+            "Suggestion: Check that both components exist and are running/valid; "
+            "for cross-PG links ensure the connection is created in the correct parent group (include_child_pg_ids)."
+        )
 
 

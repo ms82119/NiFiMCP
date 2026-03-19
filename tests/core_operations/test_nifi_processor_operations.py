@@ -369,9 +369,8 @@ async def test_auto_stop_update_running_processor(
     # No need to manually restart since auto-restart feature already did it
     global_logger.info(f"Test: Processor {generate_proc_id} is already running due to auto-restart feature")
 
-    # Attempt update with Auto-Stop disabled - should fail because processor is running
+    # Attempt update with header that would have disabled Auto-Stop (Auto-Stop is now always on, so update succeeds)
     headers_auto_stop_false = {**mcp_headers, "X-Mcp-Auto-Stop-Enabled": "false"}
-    # Use a different target value for the disabled test
     disabled_test_file_size = "3 kB" if target_file_size != "3 kB" else "4 kB"
     disabled_update_args = {
         "updates": [{
@@ -390,11 +389,11 @@ async def test_auto_stop_update_running_processor(
         custom_logger=global_logger
     )
     assert isinstance(update_result_list, list) and len(update_result_list) > 0, "Expected list response from batch tool"
-    assert update_result_list[0].get("status") == "error", \
-        "Expected error when updating running processor with Auto-Stop disabled"
-    global_logger.info("Test: Got expected error with Auto-Stop disabled")
+    assert update_result_list[0].get("status") == "success", \
+        "Auto-Stop is always on; update of running processor should succeed"
+    global_logger.info("Test: Update succeeded with Auto-Stop always on")
 
-    # Verify processor is still running and properties unchanged
+    # Verify processor state and that the property was updated
     verify_result_list = await call_tool(
         client=async_client,
         base_url=base_url,
@@ -404,14 +403,14 @@ async def test_auto_stop_update_running_processor(
         custom_logger=global_logger
     )
     assert verify_result_list[0].get("component", {}).get("state") == "RUNNING", \
-        "Processor should still be running after failed update attempt"
+        "Processor should be running after update (may have been stopped and restarted)"
     
-    # Verify the property was not changed from the successful update
-    unchanged_properties = verify_result_list[0].get("component", {}).get("config", {}).get("properties", {})
-    unchanged_file_size = unchanged_properties.get("File Size")
-    assert unchanged_file_size == target_file_size, \
-        f"File Size property should not have changed from successful update. Expected '{target_file_size}', got '{unchanged_file_size}'"
-    global_logger.info(f"Test: Confirmed processor {generate_proc_id} is still running with File Size: {target_file_size}")
+    # Verify the property was updated to the disabled-test value
+    updated_properties = verify_result_list[0].get("component", {}).get("config", {}).get("properties", {})
+    updated_file_size = updated_properties.get("File Size")
+    assert updated_file_size == disabled_test_file_size, \
+        f"File Size property should have been updated. Expected '{disabled_test_file_size}', got '{updated_file_size}'"
+    global_logger.info(f"Test: Confirmed processor {generate_proc_id} is running with File Size: {disabled_test_file_size}")
 
 @pytest.mark.anyio
 async def test_create_processor_with_service_reference_resolution(

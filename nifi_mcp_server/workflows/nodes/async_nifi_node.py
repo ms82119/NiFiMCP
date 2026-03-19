@@ -9,21 +9,24 @@ import sys
 import os
 import uuid
 import asyncio
-import importlib.util
+import time
 from typing import Dict, Any, List, Optional
 
-# Import PocketFlow async classes
-"""
-Update: The pocketflow examples directory has moved to docs/libdocs/pocketflow examples
-"""
-pocketflow_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'docs', 'libdocs', 'pocketflow examples')
-sys.path.append(pocketflow_path)
-
-# Import AsyncNode from the pocketflow examples __init__.py
-spec = importlib.util.spec_from_file_location("pocketflow_init", os.path.join(pocketflow_path, "__init__.py"))
-pocketflow_init = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(pocketflow_init)
-AsyncNode = pocketflow_init.AsyncNode
+# Import PocketFlow async classes from the installed package
+try:
+    from pocketflow import AsyncNode
+except ImportError:
+    # Fallback for development - try to import from local examples
+    pocketflow_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'docs', 'libdocs', 'pocketflow examples')
+    if os.path.exists(pocketflow_path):
+        sys.path.append(pocketflow_path)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pocketflow_init", os.path.join(pocketflow_path, "__init__.py"))
+        pocketflow_init = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pocketflow_init)
+        AsyncNode = pocketflow_init.AsyncNode
+    else:
+        raise ImportError("PocketFlow package not found and local examples not available")
 
 from loguru import logger
 from ..core.event_system import (
@@ -36,6 +39,9 @@ from ..core.event_system import (
 from nifi_chat_ui.llm.chat_manager import ChatManager
 from nifi_chat_ui.llm.mcp.client import MCPClient
 from nifi_chat_ui.mcp_handler import get_available_tools, execute_mcp_tool
+
+
+# Removed GoldenContextManager class - no longer needed
 
 
 class AsyncNiFiWorkflowNode(AsyncNode):
@@ -56,44 +62,138 @@ class AsyncNiFiWorkflowNode(AsyncNode):
         # Initialize ChatManager for new modular architecture
         self._chat_manager = None
         self._mcp_client = None
+        
+        # No longer need golden context manager - using database messages directly
     
     def get_chat_manager(self) -> ChatManager:
         """Get or create the ChatManager instance."""
         if self._chat_manager is None:
-            # Import config
-            import sys
-            import os
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))  # Go up to NiFiMCP root
-            if parent_dir not in sys.path:
-                sys.path.insert(0, parent_dir)
+            config_dict = None  # Initialize to None
             
-            from config import settings as config
+            # Try to get config from execution state first (passed from main thread)
+            if hasattr(self, '_config_dict') and self._config_dict:
+                config_dict = self._config_dict
+                self.bound_logger.info("Using config passed from main thread")
+            elif hasattr(self, 'execution_state') and self.execution_state:
+                # Defensive check: ensure execution_state is a dict before calling .get()
+                if isinstance(self.execution_state, dict) and self.execution_state.get('_config_dict'):
+                    config_dict = self.execution_state['_config_dict']
+                    self.bound_logger.info("Using config from shared state")
+                else:
+                    # execution_state exists but is not a dict or doesn't have _config_dict
+                    self.bound_logger.debug(f"execution_state is not a dict or missing _config_dict: {type(self.execution_state)}")
+                    config_dict = None
             
-            # Use the existing config system
-            config_dict = {
-                'openai': {
-                    'api_key': config.OPENAI_API_KEY,
-                    'models': config.OPENAI_MODELS
-                },
-                'gemini': {
-                    'api_key': config.GOOGLE_API_KEY,
-                    'models': config.GEMINI_MODELS
-                },
-                'anthropic': {
-                    'api_key': config.ANTHROPIC_API_KEY,
-                    'models': config.ANTHROPIC_MODELS
-                },
-                'perplexity': {
-                    'api_key': config.PERPLEXITY_API_KEY,
-                    'models': config.PERPLEXITY_MODELS
-                }
-            }
+            if not config_dict:
+                # Fallback: Import config in background thread (may cause warnings)
+                try:
+                    import sys
+                    import os
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))  # Go up to NiFiMCP root
+                    if parent_dir not in sys.path:
+                        sys.path.insert(0, parent_dir)
+                    
+                    from config import settings as config
+                    
+                    # Use the existing config system
+                    config_dict = {
+                        'openai': {
+                            'api_key': config.OPENAI_API_KEY,
+                            'models': config.OPENAI_MODELS
+                        },
+                        'gemini': {
+                            'api_key': config.GOOGLE_API_KEY,
+                            'models': config.GEMINI_MODELS
+                        },
+                        'anthropic': {
+                            'api_key': config.ANTHROPIC_API_KEY,
+                            'models': config.ANTHROPIC_MODELS
+                        },
+                        'perplexity': {
+                            'api_key': config.PERPLEXITY_API_KEY,
+                            'models': config.PERPLEXITY_MODELS
+                        }
+                    }
+                    self.bound_logger.info("Initialized config in background thread")
+                except Exception as e:
+                    self.bound_logger.error(f"Failed to import config in background thread: {e}")
+                    # Use empty config as fallback
+                    config_dict = {}
             
             self._chat_manager = ChatManager(config_dict)
             self.bound_logger.info("Initialized new modular ChatManager for workflow")
         
         return self._chat_manager
+    
+    def set_config(self, config_dict: Dict[str, Any]):
+        """Set config dictionary from main thread to avoid background thread imports."""
+        self._config_dict = config_dict
+        self.bound_logger.info("Config set from main thread")
+    
+    def set_execution_state(self, execution_state: Dict[str, Any]):
+        """Set execution state to access config from shared state."""
+        # Defensive check: ensure execution_state is a dict
+        if not isinstance(execution_state, dict):
+            self.bound_logger.error(f"set_execution_state called with non-dict! Type: {type(execution_state)}, Value: {str(execution_state)[:200]}")
+            raise ValueError(f"execution_state must be a dict, got {type(execution_state).__name__}")
+        self.execution_state = execution_state
+        self.bound_logger.info("Execution state set in workflow node")
+    
+    def set_shared_state(self, shared: Dict[str, Any]):
+        """Store reference to shared state for token cost tracking."""
+        if not isinstance(shared, dict):
+            self.bound_logger.warning(f"set_shared_state called with non-dict! Type: {type(shared)}")
+            return
+        self.shared_state = shared
+    
+    def _calculate_token_cost(self, provider: str, model_name: str, tokens_in: int, tokens_out: int) -> float:
+        """Calculate token cost in USD based on provider and model.
+        
+        Pricing as of 2024 (approximate):
+        - OpenAI: gpt-4o-mini: $0.15/$0.60 per 1M tokens (in/out)
+        - OpenAI: gpt-4o: $2.50/$10.00 per 1M tokens (in/out)
+        - Anthropic: claude-3-5-sonnet: $3.00/$15.00 per 1M tokens (in/out)
+        - Gemini: gemini-1.5-pro: $1.25/$5.00 per 1M tokens (in/out)
+        - Perplexity: pplx-70b-online: $0.70/$0.70 per 1M tokens (in/out)
+        """
+        # Pricing per 1M tokens (input, output)
+        pricing = {
+            "openai": {
+                "gpt-4o-mini": (0.15, 0.60),
+                "gpt-4o": (2.50, 10.00),
+                "gpt-4-turbo": (10.00, 30.00),
+                "gpt-3.5-turbo": (0.50, 1.50),
+            },
+            "anthropic": {
+                "claude-3-5-sonnet": (3.00, 15.00),
+                "claude-3-opus": (15.00, 75.00),
+                "claude-3-sonnet": (3.00, 15.00),
+                "claude-3-haiku": (0.25, 1.25),
+            },
+            "gemini": {
+                "gemini-1.5-pro": (1.25, 5.00),
+                "gemini-1.5-flash": (0.075, 0.30),
+                "gemini-pro": (0.50, 1.50),
+            },
+            "perplexity": {
+                "pplx-70b-online": (0.70, 0.70),
+                "pplx-7b-online": (0.20, 0.20),
+            }
+        }
+        
+        provider_key = provider.lower()
+        model_key = model_name.lower()
+        
+        if provider_key in pricing and model_key in pricing[provider_key]:
+            price_in, price_out = pricing[provider_key][model_key]
+            cost = (tokens_in / 1_000_000 * price_in) + (tokens_out / 1_000_000 * price_out)
+            return cost
+        
+        # Default fallback pricing (average)
+        default_price_in, default_price_out = 1.00, 3.00
+        cost = (tokens_in / 1_000_000 * default_price_in) + (tokens_out / 1_000_000 * default_price_out)
+        return cost
     
     def get_mcp_client(self) -> MCPClient:
         """Get or create the MCPClient instance."""
@@ -103,8 +203,53 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     async def prep_async(self, shared: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare the node execution context."""
+        # Log node prep with shared state snapshot
+        if isinstance(shared, dict):
+            snapshot = self._create_shared_state_snapshot(shared)
+            self.workflow_logger.bind(
+                interface="workflow",
+                data={
+                    "node_name": self.name,
+                    "action": "prep",
+                    "shared_state_snapshot": snapshot
+                }
+            ).info(f"Node prep: {self.name}")
+        
         # Default prep - subclasses should override
-        return shared
+        # But ensure step_id is always included for event emission
+        prep_result = shared.copy() if isinstance(shared, dict) else {}
+        if "step_id" not in prep_result:
+            prep_result["step_id"] = self.name
+        return prep_result
+    
+    def _create_shared_state_snapshot(self, shared: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a snapshot of shared state for logging."""
+        if not isinstance(shared, dict):
+            return {"error": "shared is not a dict"}
+        
+        snapshot = {
+            "keys": list(shared.keys()),
+            "sizes": {}
+        }
+        
+        # Track sizes of important keys
+        important_keys = ["pg_tree", "pg_summaries", "doc_sections", "final_document", 
+                         "processors", "connections", "process_groups"]
+        for key in important_keys:
+            value = shared.get(key)
+            if isinstance(value, (list, dict, str)):
+                snapshot["sizes"][key] = len(value)
+            elif value is not None:
+                snapshot["sizes"][key] = 1  # Non-empty but not sizeable
+        
+        # Include a few key values (truncated)
+        snapshot["sample_values"] = {}
+        for key in ["current_phase", "workflow_name", "process_group_id", "user_request_id"]:
+            if key in shared:
+                val = shared[key]
+                snapshot["sample_values"][key] = str(val)[:100] if val else None
+        
+        return snapshot
     
     async def exec_async(self, prep_res: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the node logic."""
@@ -113,23 +258,56 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     async def post_async(self, shared: Dict[str, Any], prep_res: Dict[str, Any], exec_res: Dict[str, Any]) -> str:
         """Post-process the execution results."""
+        # Log node post with shared state snapshot showing changes
+        if isinstance(shared, dict):
+            snapshot = self._create_shared_state_snapshot(shared)
+            exec_summary = {}
+            if isinstance(exec_res, dict):
+                exec_summary = {
+                    "status": exec_res.get("status", "unknown"),
+                    "keys": list(exec_res.keys())[:10]  # Limit to first 10 keys
+                }
+            
+            self.workflow_logger.bind(
+                interface="workflow",
+                data={
+                    "node_name": self.name,
+                    "action": "post",
+                    "shared_state_snapshot": snapshot,
+                    "exec_result_summary": exec_summary
+                }
+            ).info(f"Node post: {self.name}")
+        
         # Default post - return default action
         return "default"
     
     async def call_llm_async(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], 
                            execution_state: Dict[str, Any], action_id: str) -> Dict[str, Any]:
         """Call LLM asynchronously with event emission."""
+        # Defensive check: ensure execution_state is a dict
+        if not isinstance(execution_state, dict):
+            self.bound_logger.error(f"execution_state is not a dict in call_llm_async! Type: {type(execution_state)}")
+            raise ValueError(f"execution_state must be a dict, got {type(execution_state).__name__}")
+        
         workflow_id = execution_state.get("workflow_id", "unknown")
         step_id = execution_state.get("step_id", self.name)
         user_request_id = execution_state.get("user_request_id")
         
-        # Emit LLM start event
+        # Extract current phase from execution_state (from shared state)
+        current_phase = execution_state.get("current_phase", "-")
+        
+        # Emit LLM start event with enhanced information
         await emit_llm_start(workflow_id, step_id, {
             "action_id": action_id,
             "message_count": len(messages),
             "tool_count": len(tools) if tools else 0,
             "provider": execution_state.get("provider", "unknown"),
-            "model": execution_state.get("model_name", "unknown")
+            "model": execution_state.get("model_name", "unknown"),
+            "model_name": execution_state.get("model_name", "unknown"),  # Explicit model name for UI
+            "messages_in_request": len([msg for msg in messages if msg.get("role") in ["user", "assistant", "tool"]]) + 1,  # Count non-system messages + 1 for system message
+            "tools_available": len(tools) if tools else 0,  # Count available tools
+            "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
+            "phase": current_phase  # Add current phase for workflow.log
         }, user_request_id)
         
         try:
@@ -167,7 +345,7 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 response_data = {"error": f"Invalid response type: {type(response_data)}"}
             
             # Check for error response
-            if "error" in response_data:
+            if response_data.get("error"):  # Changed from "error" in response_data to response_data.get("error")
                 # Emit LLM error event
                 await self.event_emitter.emit(EventTypes.LLM_ERROR, {
                     "action_id": action_id,
@@ -178,15 +356,72 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 self.bound_logger.error(f"LLM returned error: {response_data['error']}")
                 return response_data
             
+            # Extract current phase from execution_state
+            current_phase = execution_state.get("current_phase", "-")
+            
+            # Track token costs in shared metrics (if available)
+            tokens_in = response_data.get("token_count_in", 0)
+            tokens_out = response_data.get("token_count_out", 0)
+            provider = execution_state.get("provider", "unknown")
+            model_name = execution_state.get("model_name", "unknown")
+            
+            # Accumulate token costs per phase
+            # Try to get shared state from node instance (set during prep_async/exec_async)
+            if hasattr(self, 'shared_state') and self.shared_state:
+                shared = self.shared_state
+                if isinstance(shared, dict):
+                    metrics = shared.setdefault("metrics", {})
+                    
+                    # Initialize token tracking if not present
+                    if "token_costs" not in metrics:
+                        metrics["token_costs"] = {
+                            "discovery": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+                            "analysis": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+                            "generation": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+                            "total": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+                        }
+                    
+                    # Get phase-specific token tracking (default to current_phase or "analysis")
+                    # Normalize phase key to lowercase to match token_costs dict keys
+                    phase_key = current_phase.lower() if current_phase != "-" else "analysis"
+                    if phase_key not in metrics["token_costs"]:
+                        phase_key = "analysis"  # Fallback
+                    
+                    phase_costs = metrics["token_costs"].get(phase_key, {})
+                    phase_costs["tokens_in"] = phase_costs.get("tokens_in", 0) + tokens_in
+                    phase_costs["tokens_out"] = phase_costs.get("tokens_out", 0) + tokens_out
+                    
+                    # Calculate cost (provider-specific pricing)
+                    cost = self._calculate_token_cost(provider, model_name, tokens_in, tokens_out)
+                    phase_costs["cost_usd"] = phase_costs.get("cost_usd", 0.0) + cost
+                    metrics["token_costs"][phase_key] = phase_costs
+                    
+                    # Update totals
+                    total_costs = metrics["token_costs"]["total"]
+                    total_costs["tokens_in"] = total_costs.get("tokens_in", 0) + tokens_in
+                    total_costs["tokens_out"] = total_costs.get("tokens_out", 0) + tokens_out
+                    total_costs["cost_usd"] = total_costs.get("cost_usd", 0.0) + cost
+                    
+                    self.bound_logger.debug(
+                        f"Token costs updated: {phase_key} +{tokens_in}in/{tokens_out}out "
+                        f"(${cost:.6f}), total: {total_costs['tokens_in']}in/{total_costs['tokens_out']}out "
+                        f"(${total_costs['cost_usd']:.6f})"
+                    )
+            
             # Emit LLM complete event
             tool_calls_data = response_data.get("tool_calls") or []
             await emit_llm_complete(workflow_id, step_id, {
                 "action_id": action_id,
-                "response_content": response_data.get("content", "")[:200] if response_data.get("content") else "",
+                "response_content": response_data.get("content", ""),
                 "tool_calls": len(tool_calls_data),
-                "tokens_in": response_data.get("token_count_in", 0),
-                "tokens_out": response_data.get("token_count_out", 0),
-                "status": "success"
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "status": "success",
+                "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
+                "provider": provider,
+                "model": model_name,
+                "model_name": model_name,  # Add explicit model_name field
+                "phase": current_phase  # Add current phase for workflow.log
             }, user_request_id)
             
             return response_data
@@ -203,7 +438,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             return {"error": str(e)}
     
     async def execute_tool_calls_async(self, tool_calls: List[Dict[str, Any]], 
-                                     execution_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+                                     execution_state: Dict[str, Any], 
+                                     llm_action_id: str = None) -> List[Dict[str, Any]]:
         """Execute tool calls asynchronously with event emission."""
         workflow_id = execution_state.get("workflow_id", "unknown")
         step_id = execution_state.get("step_id", self.name)
@@ -228,13 +464,24 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 except json.JSONDecodeError:
                     args_dict = {}
                 
-                # Emit tool start event
+                # Generate tool-specific action ID
+                tool_action_id = f"wf-{workflow_id}-{step_id}-tool-{uuid.uuid4()}"
+                
+                # Extract current phase from execution_state
+                current_phase = execution_state.get("current_phase", "-")
+                
+                # Emit tool start event with action_id for correlation
+                # Use action_id field (not just tool_call_id) so EventBridge can find it
                 await emit_tool_start(workflow_id, step_id, {
                     "tool_name": function_name,
-                    "tool_call_id": tool_call_id,
+                    "action_id": llm_action_id or tool_call_id,  # Use action_id field for EventBridge
+                    "tool_call_id": tool_call_id,  # Keep for backward compatibility
                     "tool_index": i + 1,
                     "total_tools": len(tool_calls),
-                    "arguments": args_dict
+                    "arguments": args_dict,
+                    "llm_action_id": llm_action_id,  # Keep for correlation
+                    "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
+                    "phase": current_phase  # Add current phase for workflow.log
                 }, user_request_id)
                 
                 # Define the sync function to call in executor
@@ -243,7 +490,8 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                         tool_name=function_name,
                         params=args_dict,
                         selected_nifi_server_id=nifi_server_id,
-                        user_request_id=user_request_id
+                        user_request_id=user_request_id,
+                        action_id=tool_call_id  # Use LLM's tool_call_id instead of generated action_id
                     )
                 
                 # Execute tool in thread pool to avoid blocking
@@ -259,23 +507,33 @@ class AsyncNiFiWorkflowNode(AsyncNode):
                 }
                 tool_results.append(result_message)
                 
-                # Emit tool complete event
+                # Extract current phase from execution_state
+                current_phase = execution_state.get("current_phase", "-")
+                
+                # Emit tool complete event with action_id for correlation
+                # Use action_id field (not just tool_call_id) so EventBridge can find it
                 await emit_tool_complete(workflow_id, step_id, {
                     "tool_name": function_name,
-                    "tool_call_id": tool_call_id,
+                    "action_id": llm_action_id or tool_call_id,  # Use action_id field for EventBridge
+                    "tool_call_id": tool_call_id,  # Keep for backward compatibility
                     "tool_index": i + 1,
                     "total_tools": len(tool_calls),
                     "result_length": len(str(tool_result)),
-                    "status": "success"
+                    "status": "success",
+                    "llm_action_id": llm_action_id,  # Keep for correlation
+                    "loop_count": execution_state.get("loop_count", 0),  # Include current iteration
+                    "phase": current_phase  # Add current phase for workflow.log
                 }, user_request_id)
                 
             except Exception as e:
-                # Emit tool error event
+                # Emit tool error event with LLM action_id for correlation
                 await self.event_emitter.emit(EventTypes.TOOL_ERROR, {
                     "tool_name": function_name,
                     "tool_call_id": tool_call_id,
                     "error": str(e),
-                    "status": "error"
+                    "status": "error",
+                    "llm_action_id": llm_action_id,  # Add LLM action_id for correlation
+                    "loop_count": execution_state.get("loop_count", 0)  # Include current iteration
                 }, workflow_id, step_id, user_request_id)
                 
                 self.bound_logger.error(f"Tool execution failed: {function_name} - {e}")
@@ -293,15 +551,18 @@ class AsyncNiFiWorkflowNode(AsyncNode):
     
     async def add_message_to_context_async(self, message: Dict[str, Any], 
                                          execution_state: Dict[str, Any]):
-        """Add a message to the execution context with event emission."""
+        """Add a message to the execution context with event emission and golden context update."""
         workflow_id = execution_state.get("workflow_id", "unknown")
         step_id = execution_state.get("step_id", self.name)
         user_request_id = execution_state.get("user_request_id")
         
-        # Add to messages
+        # Add to execution state messages
         if "messages" not in execution_state:
             execution_state["messages"] = []
         execution_state["messages"].append(message)
+        
+        # Add to golden context (this now persists to session state)
+        # self.golden_context_manager.add_message_to_golden_context(message) # This line was removed
         
         # Emit message added event
         await emit_message_added(workflow_id, step_id, {
@@ -311,6 +572,98 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             "tool_calls": len(message.get("tool_calls", [])),
             "action_id": message.get("action_id")
         }, user_request_id)
+    
+    # Removed get_golden_context_for_llm method - no longer needed
+    
+    async def add_workflow_message(self, message: Dict[str, Any], 
+                                 execution_state: Dict[str, Any],
+                                 persist_to_golden: bool = True):
+        """Add a message to the workflow with optional golden context persistence."""
+        # Always add to execution state
+        if "messages" not in execution_state:
+            execution_state["messages"] = []
+        execution_state["messages"].append(message)
+        
+        # Messages are already persisted to database - no need for golden context
+        if message.get("workflow_event"):
+            self.bound_logger.debug(f"Workflow event message: {message.get('content', '')[:50]}...")
+        else:
+            self.bound_logger.debug(f"Added message to execution state: role={message.get('role')}, has_content={bool(message.get('content'))}")
+        
+        # Emit message added event
+        workflow_id = execution_state.get("workflow_id", "unknown")
+        step_id = execution_state.get("step_id", self.name)
+        user_request_id = execution_state.get("user_request_id")
+        
+        await emit_message_added(workflow_id, step_id, {
+            "message_role": message.get("role"),
+            "message_type": "tool_calls" if "tool_calls" in message else "content",
+            "content_length": len(message.get("content", "")),
+            "tool_calls": len(message.get("tool_calls", [])),
+            "action_id": message.get("action_id"),
+            "is_status_report": message.get("is_status_report", False)  # Include status report flag
+        }, user_request_id)
+    
+    def apply_smart_pruning_to_messages(self, messages: List[Dict[str, Any]], execution_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Apply smart pruning to messages based on execution state settings."""
+        if not messages:
+            return []
+        
+        # Check if auto-prune history is enabled
+        auto_prune_history = execution_state.get("auto_prune_history", True)
+        if not auto_prune_history:
+            self.bound_logger.debug("Auto-prune history disabled, returning all messages without pruning")
+            return messages
+        
+        try:
+            # Import smart pruning function
+            import sys
+            import os
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            # Fix the import path - go up to the workspace root, then into nifi_chat_ui
+            workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_dir))))
+            if workspace_root not in sys.path:
+                sys.path.insert(0, workspace_root)
+            
+            from nifi_chat_ui.utils.message_utils import smart_prune_messages
+            
+            # Get tools for token calculation
+            tools = self.prepare_tools(execution_state)
+            
+            # Ensure tools is a list (not None)
+            if tools is None:
+                tools = []
+                self.bound_logger.debug("No tools available for token calculation, using empty list")
+            
+            # Get max tokens limit
+            max_tokens = execution_state.get("max_tokens_limit", 32000)
+            
+            # Log the pruning attempt details
+            self.bound_logger.debug(f"Smart pruning attempt: {len(messages)} messages, max_tokens={max_tokens}, tools_count={len(tools)}")
+            
+            # Apply smart pruning
+            pruned_messages = smart_prune_messages(
+                messages,
+                max_tokens=max_tokens,
+                provider=execution_state.get("provider"),
+                model_name=execution_state.get("model_name"),
+                tools=tools,
+                logger=self.bound_logger
+            )
+            
+            self.bound_logger.info(f"Applied smart pruning: {len(messages)} -> {len(pruned_messages)} messages (max_tokens={max_tokens})")
+            return pruned_messages
+            
+        except ImportError as e:
+            self.bound_logger.warning(f"Could not import smart_prune_messages: {e}")
+            return messages
+        except Exception as e:
+            self.bound_logger.error(f"Error applying smart pruning: {e}")
+            # Don't fail the entire workflow due to pruning errors
+            # Return original messages and continue execution
+            # This ensures the LLM can still process the conversation even if pruning fails
+            self.bound_logger.warning("Smart pruning failed, continuing with original messages to ensure workflow execution")
+            return messages
     
     def prepare_tools(self, execution_state: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         """Prepare tools for LLM execution (sync method for compatibility)."""
@@ -335,4 +688,168 @@ class AsyncNiFiWorkflowNode(AsyncNode):
             
         except Exception as e:
             self.bound_logger.error(f"Error preparing tools: {e}")
-            return [] 
+            return []
+    
+    async def call_nifi_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        prep_res: Dict[str, Any]
+    ) -> Any:
+        """
+        Helper method to call NiFi tools via MCP.
+        
+        Args:
+            tool_name: Name of the tool to call
+            arguments: Tool arguments
+            prep_res: Prep result containing execution context
+        
+        Returns:
+            Tool execution result
+        """
+        workflow_id = prep_res.get("workflow_id", "unknown")
+        step_id = prep_res.get("step_id", self.name)
+        user_request_id = prep_res.get("user_request_id")
+        nifi_server_id = prep_res.get("nifi_server_id")
+        
+        # Generate action ID for this tool call
+        import uuid
+        action_id = f"wf-{workflow_id}-{step_id}-tool-{uuid.uuid4()}"
+        
+        # Extract current phase from prep_res (which should have current_phase from shared state)
+        current_phase = prep_res.get("current_phase", "-")
+        
+        # Emit tool start event
+        await emit_tool_start(workflow_id, step_id, {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "action_id": action_id,
+            "phase": current_phase  # Add current phase for workflow.log
+        }, user_request_id)
+        
+        try:
+            # Execute tool via MCP
+            loop = asyncio.get_event_loop()
+            
+            def call_sync_tool():
+                return execute_mcp_tool(
+                    tool_name=tool_name,
+                    params=arguments,
+                    selected_nifi_server_id=nifi_server_id,
+                    user_request_id=user_request_id,
+                    action_id=action_id
+                )
+            
+            result = await loop.run_in_executor(None, call_sync_tool)
+            
+            # Calculate result length for UI display
+            result_str = str(result) if result is not None else ""
+            result_length = len(result_str)
+            
+            # Extract current phase from prep_res
+            current_phase = prep_res.get("current_phase", "-")
+            
+            # Emit tool complete event with result length for UI
+            await emit_tool_complete(workflow_id, step_id, {
+                "tool_name": tool_name,
+                "action_id": action_id,
+                "result_length": result_length,
+                "tool_result": result_str[:200] if result_length > 0 else "",  # Preview for UI
+                "status": "success",
+                "phase": current_phase  # Add current phase for workflow.log
+            }, user_request_id)
+            
+            return result
+            
+        except Exception as e:
+            # Emit tool error event
+            await self.event_emitter.emit(EventTypes.TOOL_ERROR, {
+                "tool_name": tool_name,
+                "action_id": action_id,
+                "error": str(e),
+                "status": "error"
+            }, workflow_id, step_id, user_request_id)
+            
+            self.bound_logger.error(f"Tool call failed: {e}", exc_info=True)
+            raise
+    
+    async def emit_doc_phase_event(
+        self,
+        event_type: str,
+        phase: str,
+        shared: Dict[str, Any],
+        metrics: Optional[Dict[str, Any]] = None,
+        progress_message: Optional[str] = None
+    ):
+        """
+        Helper method to emit documentation phase events.
+        
+        Args:
+            event_type: Event type (from EventTypes)
+            phase: Phase name (INIT, DISCOVERY, ANALYSIS, GENERATION)
+            shared: Shared state dict
+            metrics: Optional metrics dict
+            progress_message: Optional progress message
+        """
+        from ..core.event_system import (
+            emit_doc_phase_start,
+            emit_doc_phase_complete,
+            emit_doc_progress,
+        )
+        
+        workflow_id = shared.get("workflow_id", "unknown") if isinstance(shared, dict) else "unknown"
+        step_id = shared.get("step_id", self.name) if isinstance(shared, dict) else self.name
+        user_request_id = shared.get("user_request_id") if isinstance(shared, dict) else None
+
+        # Optional: small shared_state snapshot for observability
+        details = None
+        if isinstance(shared, dict):
+            snapshot_keys = ["pg_tree", "pg_summaries", "doc_sections", "final_document"]
+            sizes: Dict[str, int] = {}
+            for key in snapshot_keys:
+                value = shared.get(key)
+                if isinstance(value, (list, dict, str)):
+                    sizes[key] = len(value)
+            if sizes:
+                details = {"snapshot_sizes": sizes}
+        
+        if event_type == EventTypes.DOC_PHASE_START:
+            # Use provided progress_message or a sensible default
+            msg = progress_message or f"{phase} phase starting..."
+            await emit_doc_phase_start(
+                workflow_id,
+                step_id,
+                phase,
+                progress_message=msg,
+                details=details,
+                user_request_id=user_request_id,
+            )
+        elif event_type == EventTypes.DOC_PHASE_COMPLETE:
+            started_at = shared.get(f"{phase}_start_time", time.time())
+            await emit_doc_phase_complete(
+                workflow_id,
+                step_id,
+                phase,
+                started_at,
+                metrics or {},
+                progress_message=progress_message,
+                details=details,
+                user_request_id=user_request_id,
+            )
+        elif event_type == EventTypes.DOC_PROGRESS_UPDATE:
+            await emit_doc_progress(
+                workflow_id,
+                step_id,
+                phase,
+                progress_message or "",
+                None,
+                metrics,
+                user_request_id,
+            )
+        else:
+            # Generic event emission
+            await self.event_emitter.emit(event_type, {
+                "phase": phase,
+                "metrics": metrics or {},
+                "message": progress_message
+            }, workflow_id, step_id, user_request_id) 

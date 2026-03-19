@@ -28,15 +28,15 @@ class TestContractValidation:
     
     def test_get_llm_response_contract(self):
         """Test that workflow calls get_llm_response with correct signature."""
-        from nifi_chat_ui.chat_manager_compat import get_llm_response
+        from nifi_chat_ui.llm.chat_manager import ChatManager
         import inspect
         
         # Get actual function signature
-        sig = inspect.signature(get_llm_response)
+        sig = inspect.signature(ChatManager.get_llm_response)
         param_names = list(sig.parameters.keys())
         
         # Verify workflow code matches expected parameters
-        expected_params = ['messages', 'system_prompt', 'tools', 'provider', 'model_name', 'user_request_id']
+        expected_params = ['messages', 'system_prompt', 'provider', 'model_name', 'user_request_id']
         for param in expected_params:
             assert param in param_names, f"get_llm_response missing expected parameter: {param}"
     
@@ -74,8 +74,8 @@ class TestRealIntegrationWithMockedHTTP:
         """Set up test fixtures."""
         self.node = InitializeExecutionNode()
         
-    @patch('requests.post')  # Mock HTTP, not functions
-    @patch('requests.get')   # Mock HTTP, not functions
+    @patch('nifi_chat_ui.mcp_handler.requests.post')  # Mock the actual HTTP calls in mcp_handler
+    @patch('nifi_chat_ui.mcp_handler.requests.get')   # Mock the actual HTTP calls in mcp_handler
     def test_real_openai_integration(self, mock_get, mock_post):
         """Test with real LLM function but mocked HTTP calls."""
         # Mock HTTP responses for tools API
@@ -130,15 +130,27 @@ class TestRealIntegrationWithMockedHTTP:
         assert mock_get.called  # Tools API called
         assert mock_post.called  # OpenAI API called
         
+        # Verify that both MCP and OpenAI calls were made
+        assert mock_get.called  # Tools API called
+        assert mock_post.called  # Both MCP and OpenAI APIs called
+        
+        # Find the OpenAI call (to api.openai.com)
+        openai_calls = [call for call in mock_post.call_args_list if 'api.openai.com' in str(call)]
+        assert len(openai_calls) > 0, "No OpenAI API calls found"
+        
         # Verify OpenAI call structure
-        openai_call = mock_post.call_args
-        call_data = json.loads(openai_call[1]['data'])  # Get POST data
+        openai_call = openai_calls[0]
+        if 'json' in openai_call[1]:
+            call_data = openai_call[1]['json']
+        else:
+            call_data = json.loads(openai_call[1].get('data', '{}'))
+        
         assert 'messages' in call_data
         assert 'model' in call_data
         assert call_data['model'] == 'gpt-4o-mini'
     
-    @patch('requests.post')
-    @patch('requests.get') 
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get') 
     def test_anthropic_unavailable_fallback(self, mock_get, mock_post):
         """Test behavior when Anthropic is not available."""
         # Mock tools API
@@ -163,8 +175,8 @@ class TestRealIntegrationWithMockedHTTP:
         if result["status"] == "error":
             assert "anthropic" in result.get("message", "").lower()
     
-    @patch('requests.post')
-    @patch('requests.get')
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get')
     def test_tool_execution_with_real_calls(self, mock_get, mock_post):
         """Test tool execution using real execute_mcp_tool function."""
         # Mock tools API
@@ -248,8 +260,8 @@ class TestErrorConditionsWithRealFunctions:
         """Set up test fixtures."""
         self.node = InitializeExecutionNode()
     
-    @patch('requests.post')
-    @patch('requests.get')
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get')
     def test_network_error_handling(self, mock_get, mock_post):
         """Test handling of network errors."""
         # Simulate network error
@@ -270,8 +282,8 @@ class TestErrorConditionsWithRealFunctions:
         assert result["status"] == "success"  # Should continue with empty tools
         assert result["loop_count"] >= 1
     
-    @patch('requests.post')
-    @patch('requests.get')
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get')
     def test_invalid_openai_api_key(self, mock_get, mock_post):
         """Test handling of invalid API key."""
         # Mock tools API success
@@ -305,7 +317,7 @@ class TestParameterValidationWithAutospec:
         """Set up test fixtures."""
         self.node = InitializeExecutionNode()
     
-    @patch('nifi_chat_ui.chat_manager_compat.get_llm_response', autospec=True)
+    @patch('nifi_chat_ui.chat_manager.get_llm_response', autospec=True)
     @patch('nifi_chat_ui.mcp_handler.get_available_tools', autospec=True) 
     def test_function_called_with_correct_parameters(self, mock_get_tools, mock_llm_response):
         """Test that functions are called with correct parameter names and types."""
@@ -357,8 +369,8 @@ class TestWorkflowEndToEndImproved:
         self.nodes = create_unguided_mimic_workflow()
         self.executor = GuidedWorkflowExecutor(self.workflow_name, self.nodes)
     
-    @patch('requests.post')
-    @patch('requests.get')
+    @patch('nifi_chat_ui.mcp_handler.requests.post')
+    @patch('nifi_chat_ui.mcp_handler.requests.get')
     def test_complete_workflow_execution_realistic(self, mock_get, mock_post):
         """Test complete workflow with realistic HTTP mocking."""
         # Mock tools API
@@ -367,7 +379,7 @@ class TestWorkflowEndToEndImproved:
             {
                 "type": "function",
                 "function": {
-                    "name": "create_complete_nifi_flow",
+                    "name": "create_nifi_flow_from_definition",
                     "description": "Create a complete NiFi flow",
                     "parameters": {
                         "type": "object",
@@ -391,7 +403,7 @@ class TestWorkflowEndToEndImproved:
                             "id": "call_create_flow",
                             "type": "function",
                             "function": {
-                                "name": "create_complete_nifi_flow",
+                                "name": "create_nifi_flow_from_definition",
                                 "arguments": '{"nifi_objects": [{"type": "processor", "processor_type": "org.apache.nifi.processors.standard.GenerateFlowFile", "name": "GenerateFlowFile", "position": {"x": 100, "y": 100}}], "process_group_id": "root"}'
                             }
                         }]
@@ -446,7 +458,7 @@ class TestWorkflowEndToEndImproved:
         assert shared_state["total_tokens_out"] > 0
         assert shared_state["loop_count"] >= 2
         assert shared_state["tool_calls_executed"] > 0
-        assert "create_complete_nifi_flow" in shared_state.get("executed_tools", [])
+        assert "create_nifi_flow_from_definition" in shared_state.get("executed_tools", [])
 
 
 if __name__ == "__main__":

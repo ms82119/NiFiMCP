@@ -1,5 +1,5 @@
 """
-Tests for the invoke_nifi_http_endpoint tool with enhanced flow status integration.
+Tests for the invoke_http_endpoint tool with enhanced flow status integration.
 These tests validate that the new mandatory process_group_id parameter works correctly
 and that flow status is always included in the response.
 """
@@ -20,14 +20,14 @@ async def test_invoke_http_endpoint_missing_process_group_id(
     global_logger: Any
 ):
     """Test that missing process_group_id parameter causes validation error."""
-    global_logger.info("Test: Testing invoke_nifi_http_endpoint with missing process_group_id")
+    global_logger.info("Test: Testing invoke_http_endpoint with missing process_group_id")
     
     # Try to call without process_group_id - this should fail validation
     with pytest.raises(Exception) as exc_info:
         await call_tool(
             client=async_client,
             base_url=base_url,
-            tool_name="invoke_nifi_http_endpoint",
+            tool_name="invoke_http_endpoint",
             arguments={
                 "url": "http://httpbin.org/get",
                 "method": "GET"
@@ -51,7 +51,7 @@ async def test_invoke_http_endpoint_success_with_flow_status(
     nifi_test_server_id: str
 ):
     """Test successful HTTP endpoint invocation includes flow status."""
-    global_logger.info("Test: Testing invoke_nifi_http_endpoint with successful response and flow status")
+    global_logger.info("Test: Testing invoke_http_endpoint with successful response and flow status")
     
     test_url = "http://httpbin.org/post"
     test_process_group_id = "root"
@@ -61,7 +61,7 @@ async def test_invoke_http_endpoint_success_with_flow_status(
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="invoke_nifi_http_endpoint",
+        tool_name="invoke_http_endpoint",
         arguments={
             "url": test_url,
             "process_group_id": test_process_group_id,
@@ -78,7 +78,7 @@ async def test_invoke_http_endpoint_success_with_flow_status(
     if isinstance(result, list) and len(result) > 0:
         result = result[0]
     
-    global_logger.info(f"invoke_nifi_http_endpoint result keys: {list(result.keys())}")
+    global_logger.info(f"invoke_http_endpoint result keys: {list(result.keys())}")
     
     # Verify basic HTTP response structure
     assert "status" in result
@@ -121,7 +121,7 @@ async def test_invoke_http_endpoint_timeout_with_flow_status(
     global_logger: Any
 ):
     """Test HTTP endpoint timeout still includes flow status."""
-    global_logger.info("Test: Testing invoke_nifi_http_endpoint with timeout and flow status")
+    global_logger.info("Test: Testing invoke_http_endpoint with timeout and flow status")
     
     # Use httpbin delay endpoint to trigger timeout
     test_url = "http://httpbin.org/delay/15"  # 15 second delay
@@ -131,7 +131,7 @@ async def test_invoke_http_endpoint_timeout_with_flow_status(
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="invoke_nifi_http_endpoint",
+        tool_name="invoke_http_endpoint",
         arguments={
             "url": test_url,
             "process_group_id": test_process_group_id,
@@ -171,7 +171,7 @@ async def test_invoke_http_endpoint_different_methods(
     global_logger: Any
 ):
     """Test different HTTP methods all include flow status."""
-    global_logger.info("Test: Testing invoke_nifi_http_endpoint with different HTTP methods")
+    global_logger.info("Test: Testing invoke_http_endpoint with different HTTP methods")
     
     methods_to_test = ["GET", "POST", "PUT"]
     
@@ -189,7 +189,7 @@ async def test_invoke_http_endpoint_different_methods(
         result = await call_tool(
             client=async_client,
             base_url=base_url,
-            tool_name="invoke_nifi_http_endpoint",
+            tool_name="invoke_http_endpoint",
             arguments={
                 "url": test_url,
                 "process_group_id": "root",
@@ -220,7 +220,7 @@ async def test_invoke_http_endpoint_http_error_with_flow_status(
     global_logger: Any
 ):
     """Test HTTP endpoint returning error status still includes flow status."""
-    global_logger.info("Test: Testing invoke_nifi_http_endpoint with HTTP error response")
+    global_logger.info("Test: Testing invoke_http_endpoint with HTTP error response")
     
     # Use httpbin 404 endpoint to get HTTP error
     test_url = "http://httpbin.org/status/404"
@@ -228,7 +228,7 @@ async def test_invoke_http_endpoint_http_error_with_flow_status(
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="invoke_nifi_http_endpoint",
+        tool_name="invoke_http_endpoint",
         arguments={
             "url": test_url,
             "process_group_id": "root",
@@ -266,7 +266,7 @@ async def test_invoke_http_endpoint_string_payload(
     global_logger: Any
 ):
     """Test HTTP endpoint with string payload and custom headers."""
-    global_logger.info("Test: Testing invoke_nifi_http_endpoint with string payload")
+    global_logger.info("Test: Testing invoke_http_endpoint with string payload")
     
     test_url = "http://httpbin.org/post"
     test_payload = "This is a string payload"
@@ -278,7 +278,7 @@ async def test_invoke_http_endpoint_string_payload(
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="invoke_nifi_http_endpoint",
+        tool_name="invoke_http_endpoint",
         arguments={
             "url": test_url,
             "process_group_id": "root",
@@ -321,7 +321,7 @@ async def test_flow_status_structure_validation(
     result = await call_tool(
         client=async_client,
         base_url=base_url,
-        tool_name="invoke_nifi_http_endpoint",
+        tool_name="invoke_http_endpoint",
         arguments={
             "url": "http://httpbin.org/get",
             "process_group_id": "root",

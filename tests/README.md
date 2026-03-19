@@ -16,7 +16,7 @@ This directory contains tests for the NiFi MCP Server project.
 python -m pytest
 
 # Run specific test file
-python -m pytest tests/core_operations/test_create_complete_nifi_flow.py
+python -m pytest tests/core_operations/test_create_nifi_flow_from_definition.py
 
 # Run tests with verbose output
 python -m pytest -v
@@ -76,7 +76,7 @@ If cleanup fails, it's usually due to:
 
 Tests use the following configuration:
 - **NiFi Server**: `nifi-local-example` (http://localhost:8080)
-- **MCP Server**: http://localhost:8000
+- **MCP Server**: Set `MCP_SERVER_URL` (full URL) or `MCP_SERVER_PORT` (e.g. `8001`); default port is 8000. Example: `MCP_SERVER_PORT=8001 pytest tests/...` or `MCP_SERVER_URL=http://localhost:8001 pytest tests/...`.
 - **Test naming**: Uses server ID to avoid conflicts
 
 ## Best Practices
@@ -98,7 +98,7 @@ tests/
 │   └── test_smart_pruning_logic.py   # Smart pruning algorithm tests (1 test)
 ├── core_operations/              # Integration tests (require NiFi server)
 │   ├── test_nifi_processor_operations.py
-│   ├── test_create_complete_nifi_flow.py
+│   ├── test_create_nifi_flow_from_definition.py
 │   ├── test_nifi_controller_service_operations.py
 │   └── ... (other integration tests)
 ├── auto_features/               # Tests for auto features (stop, delete, purge)

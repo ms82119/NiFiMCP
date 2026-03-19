@@ -450,4 +450,165 @@ def document_nifi_flow_improved(
     return document_nifi_flow_simplified(
         processors, connections, input_ports, output_ports, 
         include_properties, include_descriptions
-    ) 
+    )
+
+
+# =============================================================================
+# Port-to-Port Connection Traversal (Phase 2)
+# =============================================================================
+
+async def resolve_port_connections(
+    connections: List[Dict],
+    process_groups: Dict[str, Dict],
+    nifi_client,
+    user_request_id: str = "-",
+    action_id: str = "-"
+) -> List[Dict]:
+    """
+    Resolve connections through ports to show cross-PG data flow.
+    
+    Returns enriched connections with source/destination PG info.
+    """
+    enriched_connections = []
+    
+    for conn in connections:
+        conn_comp = conn.get("component", {})
+        source = conn_comp.get("source", {})
+        dest = conn_comp.get("destination", {})
+        
+        enriched = {
+            **conn,
+            "source": source,
+            "destination": dest,
+            "cross_pg": False,
+            "source_pg_name": None,
+            "dest_pg_name": None
+        }
+        
+        # Check if connection involves ports
+        source_type = source.get("type", "")
+        dest_type = dest.get("type", "")
+        
+        if source_type == "OUTPUT_PORT":
+            # Find which PG this output port belongs to
+            source_pg_id = source.get("groupId")
+            if source_pg_id and source_pg_id in process_groups:
+                enriched["source_pg_name"] = process_groups[source_pg_id].get("name")
+                enriched["cross_pg"] = True
+                
+        if dest_type == "INPUT_PORT":
+            # Find which PG this input port belongs to
+            dest_pg_id = dest.get("groupId")
+            if dest_pg_id and dest_pg_id in process_groups:
+                enriched["dest_pg_name"] = process_groups[dest_pg_id].get("name")
+                enriched["cross_pg"] = True
+        
+        enriched_connections.append(enriched)
+    
+    return enriched_connections
+
+
+def build_cross_pg_flow_map(
+    process_groups: Dict[str, Dict],
+    connections: List[Dict]
+) -> Dict[str, List[Dict]]:
+    """
+    Build a map showing data flow between process groups.
+    
+    Returns:
+        Dict mapping "source_pg_id -> dest_pg_id" to list of connection details
+    """
+    flow_map = {}
+    
+    for conn in connections:
+        if conn.get("cross_pg"):
+            source_pg = conn.get("source", {}).get("groupId", "unknown")
+            dest_pg = conn.get("destination", {}).get("groupId", "unknown")
+            key = f"{source_pg}->{dest_pg}"
+            
+            if key not in flow_map:
+                flow_map[key] = []
+            
+            flow_map[key].append({
+                "connection_id": conn.get("id"),
+                "source_port": conn.get("source", {}).get("name"),
+                "dest_port": conn.get("destination", {}).get("name"),
+                "relationship": conn.get("component", {}).get("selectedRelationships", [])
+            })
+    
+    return flow_map
+
+
+# =============================================================================
+# Output Format Profiles (Phase 2)
+# =============================================================================
+
+OUTPUT_PROFILES = {
+    "full": {
+        "include_properties": True,
+        "include_expressions": True,
+        "include_connections": True,
+        "include_comments": True,
+        "include_position": True,
+        "include_status": True,
+        "max_property_value_length": None,  # No limit
+    },
+    "summary": {
+        "include_properties": False,
+        "include_expressions": False,
+        "include_connections": True,
+        "include_comments": False,
+        "include_position": False,
+        "include_status": True,
+        "max_property_value_length": None,
+    },
+    "doc_optimized": {
+        "include_properties": True,  # Only business-relevant ones
+        "include_expressions": True,
+        "include_connections": True,
+        "include_comments": True,
+        "include_position": False,
+        "include_status": False,
+        "max_property_value_length": 500,  # Truncate long values
+    },
+    "llm_analysis": {
+        "include_properties": True,  # Only business-relevant ones
+        "include_expressions": True,
+        "include_connections": True,  # Summarized
+        "include_comments": True,
+        "include_position": False,
+        "include_status": False,
+        "max_property_value_length": 1000,
+    }
+}
+
+
+def apply_output_profile(
+    data: Dict, 
+    profile_name: str = "full"
+) -> Dict:
+    """Apply output profile to reduce token usage."""
+    profile = OUTPUT_PROFILES.get(profile_name, OUTPUT_PROFILES["full"])
+    result = {}
+    
+    for key, value in data.items():
+        # Skip excluded fields
+        if key == "properties" and not profile["include_properties"]:
+            continue
+        if key == "expressions" and not profile["include_expressions"]:
+            continue
+        if key == "position" and not profile["include_position"]:
+            continue
+        if key in ["runStatus", "state", "status"] and not profile["include_status"]:
+            continue
+        if key == "comments" and not profile["include_comments"]:
+            continue
+        
+        # Truncate long string values
+        max_len = profile.get("max_property_value_length")
+        if max_len and isinstance(value, str) and len(value) > max_len:
+            value = value[:max_len] + f"... [truncated, {len(value)} chars total]"
+        
+        result[key] = value
+    
+    return result

@@ -759,12 +759,10 @@ async def test_feature_configuration_defaults(
             headers=mcp_headers,
             custom_logger=global_logger
         )
-        # Behavior depends on config defaults
-        default_auto_stop = mcp_settings.get_feature_auto_stop_enabled()
-        expected_status = "success" if default_auto_stop else "error"
-        assert delete_result_list[0].get("status") == expected_status, \
-            f"Expected {expected_status} with default configuration (Auto-Stop is {'enabled' if default_auto_stop else 'disabled'})"
-        global_logger.info(f"Default Test: Got expected {expected_status} with default configuration")
+        # Auto-Stop is always on; delete of running processor should succeed
+        assert delete_result_list[0].get("status") == "success", \
+            "Expected success with default configuration (Auto-Stop is always on)"
+        global_logger.info("Default Test: Got expected success with default configuration")
 
     finally:
         # Clean up the process group

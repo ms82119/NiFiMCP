@@ -27,7 +27,8 @@ class WorkflowDefinition:
                  category: str = "Basic",
                  phases: List[str] = None,
                  enabled: bool = True,
-                 is_async: bool = False):
+                 is_async: bool = False,
+                 factory: Optional[Callable] = None):
         """
         Initialize workflow definition.
         
@@ -40,6 +41,7 @@ class WorkflowDefinition:
             phases: List of NiFi phases this workflow covers
             enabled: Whether the workflow is enabled
             is_async: Whether this is an async workflow
+            factory: Legacy parameter for backward compatibility
         """
         self.name = name
         self.display_name = display_name or name
@@ -50,8 +52,8 @@ class WorkflowDefinition:
         self.enabled = enabled
         self.is_async = is_async
         
-        # Legacy support
-        self.factory = create_workflow_func
+        # Legacy support - use factory if provided, otherwise use create_workflow_func
+        self.factory = factory or create_workflow_func
         
     def create_nodes(self) -> List[WorkflowNode]:
         """Create workflow nodes using the factory function."""

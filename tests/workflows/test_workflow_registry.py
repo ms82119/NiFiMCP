@@ -46,7 +46,7 @@ class TestWorkflowDefinition:
             description="A test workflow for testing",
             category="Testing",
             phases=["Review", "Creation"],
-            factory=mock_workflow_factory,
+            create_workflow_func=mock_workflow_factory,
             enabled=True
         )
         
@@ -80,7 +80,7 @@ class TestWorkflowDefinition:
             description="A workflow that fails",
             category="Testing",
             phases=["Review"],
-            factory=failing_factory
+            create_workflow_func=failing_factory
         )
         
         with pytest.raises(ValueError) as exc_info:
@@ -97,7 +97,8 @@ class TestWorkflowDefinition:
             "description": "A test workflow for testing",
             "category": "Testing",
             "phases": ["Review", "Creation"],
-            "enabled": True
+            "enabled": True,
+            "is_async": False
         }
         
         assert result == expected
@@ -117,7 +118,7 @@ class TestWorkflowRegistry:
             description="First test workflow",
             category="Basic",
             phases=["Review"],
-            factory=mock_workflow_factory,
+            create_workflow_func=mock_workflow_factory,
             enabled=True
         )
         
@@ -127,7 +128,7 @@ class TestWorkflowRegistry:
             description="Second test workflow",
             category="Advanced",
             phases=["Creation", "Modification"],
-            factory=mock_workflow_factory,
+            create_workflow_func=mock_workflow_factory,
             enabled=True
         )
         
@@ -137,7 +138,7 @@ class TestWorkflowRegistry:
             description="A disabled workflow",
             category="Basic",
             phases=["Review"],
-            factory=mock_workflow_factory,
+            create_workflow_func=mock_workflow_factory,
             enabled=False
         )
         
@@ -319,7 +320,7 @@ class TestWorkflowRegistry:
             description="A workflow that fails",
             category="Testing",
             phases=["Review"],
-            factory=failing_factory,
+            create_workflow_func=failing_factory,
             enabled=True
         )
         
@@ -355,7 +356,7 @@ class TestWorkflowRegistryGlobalFunctions:
             description="Test",
             category="Test",
             phases=["Review"],
-            factory=mock_workflow_factory
+            create_workflow_func=mock_workflow_factory
         )
         
         register_workflow(workflow_def)

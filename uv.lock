@@ -1285,9 +1285,11 @@ dependencies = [
     { name = "pytest" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "requests" },
     { name = "rich" },
     { name = "st-copy-to-clipboard" },
     { name = "streamlit" },
+    { name = "streamlit-copy-to-clipboard" },
     { name = "tiktoken" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1314,9 +1316,11 @@ requires-dist = [
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.32.4" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "st-copy-to-clipboard", specifier = ">=0.1.6" },
     { name = "streamlit", specifier = ">=1.30.0" },
+    { name = "streamlit-copy-to-clipboard", specifier = ">=0.0.1" },
     { name = "tiktoken", specifier = ">=0.5.0" },
     { name = "typer", specifier = ">=0.15.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
@@ -2400,6 +2404,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3e/c0/7286284567e5045f0c587c426d0c41aee5d10c0a2e360e627a83037e9f0c/streamlit-1.44.1.tar.gz", hash = "sha256:c6914ed6d5b76870b461510476806db370f36425ae0e6654d227c988288198d3", size = 9423685 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/17/fc425e1d4d86e31b2aaf0812a2ef2163763a0670d671720c7c36e8679323/streamlit-1.44.1-py3-none-any.whl", hash = "sha256:9fe355f58b11f4eb71e74f115ce1f38c4c9eaff2733e6bcffb510ac1298a5990", size = 9812242 },
+]
+
+[[package]]
+name = "streamlit-copy-to-clipboard"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "streamlit" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/07/28/40867c70e3921c9eaba7ea3e981a2f01a26b87e7e4017a33f3bf9d30d179/streamlit-copy-to-clipboard-0.0.1.tar.gz", hash = "sha256:5b478107c2074929907b1b715fccd2aa32fafe0e3487568796e5a18ca145e415", size = 439855 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/54/e32550beb4d00ad680ed925b4bfdadd5e3a4968f9e898be6d4ec369ad4fc/streamlit_copy_to_clipboard-0.0.1-py3-none-any.whl", hash = "sha256:e512d7610e044f4c65f86d0ca6aabf203a0d10e550044c397309063a3595c68e", size = 2358 },
 ]
 
 [[package]]

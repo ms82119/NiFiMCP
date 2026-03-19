@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NiFi Chat UI</title>
+    <link rel="stylesheet" href="/static/styles.css?v=2025-08-31-2">
+    <link rel="stylesheet" href="/static/themes.css?v=2025-08-31-1">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1 class="app-title">🤖 NiFi Chat UI</h1>
+                <div class="header-controls">
+                    <!-- Theme Selector -->
+                    <div class="theme-selector">
+                        <button id="theme-selector-btn" class="theme-selector-btn" title="Select theme">
+                            <span class="theme-preview"></span>
+                            <span class="theme-name">Modern Blue</span>
+                            <span>▼</span>
+                        </button>
+                        <div id="theme-selector-dropdown" class="theme-selector-dropdown">
+                            <div class="theme-option" data-theme-preset="modern-blue">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Modern Blue</div>
+                                    <div class="theme-description">Clean and professional</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="professional-gray">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Professional Gray</div>
+                                    <div class="theme-description">Corporate and neutral</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="warm-orange">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Warm Orange</div>
+                                    <div class="theme-description">Energetic and friendly</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="clean-green">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Clean Green</div>
+                                    <div class="theme-description">Natural and calming</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="minimalist">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Minimalist</div>
+                                    <div class="theme-description">Simple and clean</div>
+                                </div>
+                            </div>
+                            <div class="theme-option" data-theme-preset="dark-purple">
+                                <div class="theme-preview"></div>
+                                <div>
+                                    <div class="theme-name">Dark Purple</div>
+                                    <div class="theme-description">Original purple theme</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark mode">
+                        <span class="theme-icon">☀️</span>
+                    </button>
+
+                    <!-- LLM Model Selection -->
+                    <div class="model-selector">
+                        <label for="model-select-header" class="server-label">LLM:</label>
+                        <select id="model-select-header" class="server-select" title="Select LLM Model">
+                            <option value="">Loading models...</option>
+                        </select>
+                        <div class="exec-settings">
+                            <label class="exec-item">
+                                <span class="server-label">Tokens:</span>
+                                <select id="max-tokens-limit" class="server-select">
+                                    <option value="16000">16,000</option>
+                                    <option value="32000" selected>32,000</option>
+                                    <option value="64000">64,000</option>
+                                    <option value="128000">128,000</option>
+                                    <option value="0">No limit</option>
+                                </select>
+                            </label>
+                            <label class="exec-item">
+                                <span class="server-label">Max Actions:</span>
+                                <input type="number" id="max-actions" value="10" min="1" max="20" class="server-select exec-number">
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- NiFi Server Selection -->
+                    <div class="nifi-server-selector">
+                        <label for="nifi-server-select-header" class="server-label">NiFi Server:</label>
+                        <select id="nifi-server-select-header" class="server-select" title="Select NiFi Server">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+
+                    
+                    
+                    <!-- Enhanced Connection Status -->
+                    <div class="connection-status">
+                        <div class="connection-item">
+                            <span id="nifi-connection-indicator" class="connection-indicator disconnected"></span>
+                            <span id="nifi-connection-text">NiFi Server</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+
+            
+
+            <!-- Chat History -->
+            <div class="chat-container">
+                <div id="chat-history" class="chat-history">
+                    <!-- Welcome message -->
+                    <div class="message system-message">
+                        <div class="message-content">
+                            <h3>Welcome to NiFi Chat UI! 🚀</h3>
+                            <p>I'm here to help you manage your NiFi workflows. You can ask me to:</p>
+                            <ul>
+                                <li>Create and configure NiFi processors</li>
+                                <li>Manage process groups and connections</li>
+                                <li>Monitor flow status and performance</li>
+                                <li>Debug and troubleshoot issues</li>
+                                <li>And much more!</li>
+                            </ul>
+                            <p>Just type your request below and I'll help you get started.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="input-area">
+                <!-- Stop Button (hidden by default) -->
+                <div id="stop-button" class="stop-button" style="display: none;">
+                    <button id="stop-workflow-btn" class="btn btn-stop">
+                        <span class="btn-icon">⏹️</span>
+                        <span class="btn-text">Stop Workflow</span>
+                    </button>
+                </div>
+
+                <!-- Input Form -->
+                <div id="input-form" class="input-form">
+                    <!-- Objective Input -->
+                    <div class="objective-container">
+                        <textarea 
+                            id="objective-input" 
+                            class="objective-input" 
+                            placeholder="Optional: Set an objective or context for this conversation..."
+                            rows="2"
+                        ></textarea>
+                        <div class="objective-footer">
+                            <span class="char-count objective-char-count">
+                                <span id="objective-char-count">0</span> characters
+                            </span>
+                        </div>
+                    </div>
+                    
+                    <div class="input-container">
+                        <textarea 
+                            id="user-input" 
+                            class="user-input" 
+                            placeholder="What can I help you with? (e.g., 'Create a simple flow with a GenerateFlowFile processor')"
+                            rows="1"
+                        ></textarea>
+                        <button id="send-button" class="btn btn-send">
+                            <span class="btn-icon">▶️</span>
+                        </button>
+                    </div>
+                    <div class="input-footer">
+                        <span class="char-count prompt-char-count">
+                            <span id="prompt-char-count">0</span> characters
+                        </span>
+                        <div class="input-options">
+                            <button id="workflow-modal-btn" class="btn btn-secondary btn-small">
+                                <span class="btn-icon">⚙️</span>
+                                Workflow: <span id="current-workflow">unguided</span>
+                            </button>
+                            
+                            <button id="copy-conversation-btn-footer" class="btn btn-secondary btn-small">
+                                <span class="btn-icon">📋</span>
+                                Copy Chat
+                            </button>
+                            <button id="clear-chat-btn-footer" class="btn btn-secondary btn-small">Clear Chat</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Loading Overlay -->
+        <div id="loading-overlay" class="loading-overlay" style="display: none;">
+            <div class="loading-content">
+                <div class="loading-spinner"></div>
+                <p>Processing your request...</p>
+            </div>
+        </div>
+
+        <!-- Error Modal -->
+        <div id="error-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>⚠️ Error</h3>
+                    <button class="modal-close" onclick="closeErrorModal()">×</button>
+                </div>
+                <div class="modal-body">
+                    <p id="error-message"></p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" onclick="closeErrorModal()">OK</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Workflow Modal -->
+        <div id="workflow-modal" class="modal" style="display: none;">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h3>⚙️ Workflow & Tools Configuration</h3>
+                    <button id="close-workflow-modal-btn" class="modal-close">×</button>
+                </div>
+                <div class="modal-body">
+                    <!-- Workflow Selection -->
+                    <div class="modal-section">
+                        <h4>Select Workflow:</h4>
+                        <select id="workflow-select-modal" class="settings-select">
+                            <option value="">Loading workflows...</option>
+                        </select>
+                        <div id="workflow-description-modal" class="workflow-description"></div>
+                    </div>
+
+                    <!-- Phase Filtering -->
+                    <div class="modal-section">
+                        <h4>Tool Selection By Phase:</h4>
+                        <div class="phase-filters">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="phase-all" checked>
+                                <span class="checkmark"></span>
+                                All Phases
+                            </label>
+                            <div id="phase-checkboxes" class="phase-checkboxes">
+                                <!-- Phase checkboxes will be populated here -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Available Tools -->
+                    <div class="modal-section">
+                        <h4>Available MCP Tools <span class="tool-count">(0)</span></h4>
+                        <div id="tools-container-modal" class="tools-container">
+                            <div class="loading">Loading tools...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="close-workflow-modal-footer-btn" class="btn btn-primary">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/safari-theme-fix.js"></script>
+    <script type="module" src="/static/app.js"></script>
+</body>
+</html>

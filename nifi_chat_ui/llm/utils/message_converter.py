@@ -220,17 +220,22 @@ class MessageConverter:
                     function_name = f"unknown_function_{tool_call_id[-6:]}"
                 
                 # Parse the content
-                try:
-                    if isinstance(content, str):
+                if isinstance(content, str):
+                    # If it's a string, try to parse as JSON
+                    try:
                         if content.strip().startswith(("{", "[")):
                             result_content = json.loads(content)
                         else:
                             result_content = {"result": content}
-                    else:
-                        result_content = {"result": str(content)}
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse tool result as JSON: {content[:100]}...")
-                    result_content = {"result": content}
+                    except json.JSONDecodeError:
+                        # If JSON parsing fails, treat as plain text
+                        result_content = {"result": content}
+                elif isinstance(content, (dict, list)):
+                    # If it's already a Python object, use it directly
+                    result_content = content
+                else:
+                    # For other types, convert to string
+                    result_content = {"result": str(content)}
                 
                 # Convert lists to dictionary structure for Gemini
                 if isinstance(result_content, list):

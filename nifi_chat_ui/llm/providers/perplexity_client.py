@@ -71,6 +71,15 @@ Please keep this in mind when asking questions. I'll provide helpful guidance an
         if not perplexity_messages or perplexity_messages[0]["role"] != "system":
             perplexity_messages.insert(0, {"role": "system", "content": system_prompt})
         
+        # LLM Debug Logging - Log the request being sent to Perplexity
+        llm_request_data = {
+            "provider": "perplexity",
+            "model": model_name,
+            "messages": perplexity_messages,
+            "tools": None  # Perplexity doesn't support tools
+        }
+        self.logger.bind(interface="llm", direction="request", data=llm_request_data, user_request_id=user_request_id, action_id=action_id).debug("Calling Perplexity LLM")
+        
         try:
             response = self.client.chat.completions.create(
                 model=model_name,
@@ -90,6 +99,18 @@ Please keep this in mind when asking questions. I'll provide helpful guidance an
                 ]
             token_count_in = getattr(response.usage, 'prompt_tokens', 0)
             token_count_out = getattr(response.usage, 'completion_tokens', 0)
+            
+            # LLM Debug Logging - Log the response received from Perplexity
+            llm_response_data = {
+                "content_length": len(response_content) if response_content else 0,
+                "tool_calls_count": len(response_tool_calls) if response_tool_calls else 0,
+                "token_count_in": token_count_in,
+                "token_count_out": token_count_out,
+                "error": None,
+                "full_response": response_content
+            }
+            self.logger.bind(interface="llm", direction="response", data=llm_response_data, user_request_id=user_request_id, action_id=action_id).debug("llm-response")
+            
             return LLMResponse(
                 content=response_content,
                 tool_calls=response_tool_calls,
@@ -98,6 +119,13 @@ Please keep this in mind when asking questions. I'll provide helpful guidance an
             )
         except Exception as e:
             self.logger.error(f"Perplexity API error: {e}")
+            # LLM Debug Logging - Log the error response
+            llm_error_data = {
+                "error": str(e),
+                "token_count_in": 0,
+                "token_count_out": 0
+            }
+            self.logger.bind(interface="llm", direction="response", data=llm_error_data, user_request_id=user_request_id, action_id=action_id).debug("Received error from Perplexity LLM")
             raise
     
     def format_tools(self, tools: List[Dict[str, Any]]) -> Any:

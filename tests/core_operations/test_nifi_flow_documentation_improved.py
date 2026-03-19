@@ -250,6 +250,47 @@ async def test_document_flow_component_details(
         for field in required_port_fields:
             assert field in port_data, f"Port {port_id} missing required field: {field}"
 
+
+@pytest.mark.anyio
+async def test_document_flow_include_flow_summary(
+    test_complex_flow: Dict[str, Any],
+    async_client: httpx.AsyncClient,
+    base_url: str,
+    mcp_headers: Dict[str, str],
+    global_logger: Any
+):
+    """Test that document_nifi_flow with include_flow_summary=True returns flow_summary with entry_points, controller_services, paths, boundary_ports."""
+    pg_id = test_complex_flow["process_group_id"]
+    doc_result_list = await call_tool(
+        client=async_client,
+        base_url=base_url,
+        tool_name="document_nifi_flow",
+        arguments={
+            "process_group_id": pg_id,
+            "include_flow_summary": True,
+        },
+        headers=mcp_headers,
+        custom_logger=global_logger
+    )
+    assert isinstance(doc_result_list, list) and len(doc_result_list) > 0
+    doc_result = doc_result_list[0]
+    assert doc_result.get("status") in ["success", "warning"]
+    flow_doc = doc_result.get("documentation", {})
+    flow_summary = flow_doc.get("flow_summary")
+    assert flow_summary is not None, "flow_summary should be present when include_flow_summary=True"
+    assert "entry_points" in flow_summary, "flow_summary should have entry_points"
+    assert "controller_services" in flow_summary, "flow_summary should have controller_services"
+    assert "decision_branches" in flow_summary, "flow_summary should have decision_branches"
+    assert "flow_paths" in flow_summary, "flow_summary should have flow_paths"
+    assert "boundary_ports" in flow_summary, "flow_summary should have boundary_ports"
+    assert "cross_pg_connections" in flow_summary, "flow_summary should have cross_pg_connections (cross-PG port resolution)"
+    assert "cross_pg_flow_map" in flow_summary, "flow_summary should have cross_pg_flow_map"
+    assert isinstance(flow_summary["entry_points"], list), "entry_points should be a list"
+    assert isinstance(flow_summary["boundary_ports"], dict), "boundary_ports should be a dict"
+    assert "input_ports" in flow_summary["boundary_ports"], "boundary_ports should have input_ports"
+    assert "output_ports" in flow_summary["boundary_ports"], "boundary_ports should have output_ports"
+
+
 @pytest.mark.anyio
 async def test_document_flow_with_merge_inputs_simplified(
     test_merge_flow: Dict[str, Any],

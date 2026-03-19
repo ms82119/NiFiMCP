@@ -21,7 +21,8 @@ DEFAULT_LOGGING_CONFIG = {
 
 DEFAULT_APP_CONFIG = {
     'nifi': {
-        'servers': [] # Default to empty list
+        'servers': [],  # Default to empty list
+        'flow_export_directory': 'flow_exports',  # Relative to project root; or absolute path
     },
     'llm': {
         'google': {'api_key': None, 'models': ['gemini-1.5-pro-latest']},
@@ -31,9 +32,11 @@ DEFAULT_APP_CONFIG = {
         'expert_help_model': {'provider': None, 'model': None}
     },
     'mcp_features': {
-        'auto_stop_enabled': True,
-        'auto_delete_enabled': True,
-        'auto_purge_enabled': True
+        'auto_delete_enabled': True
+    },
+    'operation_timeouts': {
+        'auto_stop_verify_seconds': 15,
+        'auto_stop_verify_connection_seconds': 5
     },
     'logging': {
         'llm_enqueue_enabled': True
@@ -43,13 +46,43 @@ DEFAULT_APP_CONFIG = {
         'default_action_limit': 10,
         'retry_attempts': 3,
         'enabled_workflows': [
-            'unguided_mimic',
-            'async_unguided_mimic',
-            'documentation',
-            'review_analysis',
-            'build_new',
-            'build_modify'
-        ]
+            'unguided',
+            'flow_documentation'
+        ],
+        'documentation_workflow': {
+            'discovery': {
+                'timeout_seconds': 120,       # Max time for discovery phase
+                'max_depth': 10,              # Max PG nesting depth
+                'batch_size': 50,             # Components per API call
+                'max_retries': 3              # Retries on API failure
+            },
+            'analysis': {
+                'large_pg_threshold': 25,     # Trigger virtual grouping above this
+                'max_processors_per_llm_call': 30,  # Batch size for LLM
+                'max_tokens_per_analysis': 8000,     # Token budget per call
+                'min_virtual_groups': 3,      # Minimum virtual groups
+                'max_virtual_groups': 7,      # Maximum virtual groups
+                'include_unclassified': True,  # Report unknown types
+                'property_extraction': {
+                    'mode': 'balanced',  # 'minimal', 'balanced', 'comprehensive'
+                    'max_properties_per_processor': 10,  # Limit to prevent token bloat
+                    'truncate_large_values': True,
+                    'max_value_length': 500,
+                    'include_defaults': False  # Skip properties with default values
+                }
+            },
+            'generation': {
+                'max_mermaid_nodes': 50,      # Simplify large diagrams
+                'summary_max_words': 500,     # Executive summary limit
+                'include_all_io': True        # Always list IO processors
+            },
+            'output': {
+                'format': 'markdown',         # Output format
+                'include_raw_data': False,    # Include JSON appendix
+                'validate_mermaid': True,     # Validate diagram syntax
+                'save_shared_state': True     # Save generation shared state snapshot
+            }
+        }
     }
 }
 
@@ -108,16 +141,21 @@ def get_nifi_server_config(server_id: str) -> dict | None:
     print(f"Warning: NiFi server configuration not found for ID: {server_id}")
     return None
 
+
+def get_flow_export_directory() -> str:
+    """Returns the resolved flow export directory (absolute path). Relative paths are resolved against PROJECT_ROOT."""
+    raw = _APP_CONFIG.get('nifi', {}).get('flow_export_directory', DEFAULT_APP_CONFIG['nifi'].get('flow_export_directory', 'flow_exports'))
+    if not raw:
+        raw = 'flow_exports'
+    path = Path(raw)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return str(path.resolve())
+
 # --- MCP Feature Flags --- Accessors ---
 def get_feature_auto_stop_enabled(headers: dict | None = None) -> bool:
-    """Returns whether the Auto-Stop feature is enabled, checking header override first."""
-    if headers:
-        # Convert header keys to lowercase for case-insensitive comparison
-        headers = {k.lower(): v for k, v in headers.items()}
-        header_value = headers.get("x-mcp-auto-stop-enabled") # Headers are case-insensitive
-        if header_value is not None:
-            return str(header_value).lower() == "true"
-    return _APP_CONFIG.get('mcp_features', {}).get('auto_stop_enabled', DEFAULT_APP_CONFIG['mcp_features']['auto_stop_enabled'])
+    """Auto-Stop is always enabled. Kept for backward compatibility; headers and config are ignored."""
+    return True
 
 def get_feature_auto_delete_enabled(headers: dict | None = None) -> bool:
     """Returns whether the Auto-Delete feature is enabled, checking header override first."""
@@ -130,14 +168,29 @@ def get_feature_auto_delete_enabled(headers: dict | None = None) -> bool:
     return _APP_CONFIG.get('mcp_features', {}).get('auto_delete_enabled', DEFAULT_APP_CONFIG['mcp_features']['auto_delete_enabled'])
 
 def get_feature_auto_purge_enabled(headers: dict | None = None) -> bool:
-    """Returns whether the Auto-Purge feature is enabled, checking header override first."""
-    if headers:
-        # Convert header keys to lowercase for case-insensitive comparison
-        headers = {k.lower(): v for k, v in headers.items()}
-        header_value = headers.get("x-mcp-auto-purge-enabled")
-        if header_value is not None:
-            return str(header_value).lower() == "true"
-    return _APP_CONFIG.get('mcp_features', {}).get('auto_purge_enabled', DEFAULT_APP_CONFIG['mcp_features']['auto_purge_enabled'])
+    """Auto-Purge is always enabled. Kept for backward compatibility; headers and config are ignored."""
+    return True
+
+# --- Operation timeouts (for Auto-Stop verify, disable wait, etc.) ---
+def get_auto_stop_verify_seconds() -> int:
+    """Seconds to wait when verifying a component has stopped (processor/PG, controller-service disable)."""
+    val = os.environ.get("NIFI_AUTO_STOP_VERIFY_SECONDS")
+    if val is not None:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return _APP_CONFIG.get('operation_timeouts', {}).get('auto_stop_verify_seconds', 15)
+
+def get_auto_stop_verify_connection_seconds() -> int:
+    """Seconds to wait when verifying connection endpoints have stopped (connection/processor delete)."""
+    val = os.environ.get("NIFI_AUTO_STOP_VERIFY_CONNECTION_SECONDS")
+    if val is not None:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return _APP_CONFIG.get('operation_timeouts', {}).get('auto_stop_verify_connection_seconds', 5)
 
 # --- Logging Configuration Accessors ---
 
@@ -207,11 +260,9 @@ nifi_server_summary = [(s.get('id', 'N/A'), s.get('name', 'N/A')) for s in get_n
 print(f"NiFi Servers configured: {len(nifi_server_summary)} {nifi_server_summary if nifi_server_summary else '(None)'}")
 print(f"Logging config loaded: {'Yes' if LOGGING_CONFIG != DEFAULT_LOGGING_CONFIG else 'No (Using Defaults)'}")
 
-# Print MCP Feature Flags status
+# Print MCP Feature Flags status (Auto-Stop and Auto-Purge are always on)
 print("\nMCP Feature Flags:")
-print(f"  Auto-Stop Enabled: {get_feature_auto_stop_enabled()}")
 print(f"  Auto-Delete Enabled: {get_feature_auto_delete_enabled()}")
-print(f"  Auto-Purge Enabled: {get_feature_auto_purge_enabled()}")
 
 # Print Logging Configuration status
 print("\nLogging Configuration:")
@@ -250,6 +301,99 @@ print(f"  Execution Mode: {get_workflow_execution_mode()}")
 print(f"  Default Action Limit: {get_workflow_action_limit()}")
 print(f"  Retry Attempts: {get_workflow_retry_attempts()}")
 print(f"  Enabled Workflows: {get_enabled_workflows()}")
+
+# --- Documentation Workflow Configuration Accessors ---
+
+def get_documentation_workflow_config() -> dict:
+    """Returns the documentation workflow configuration.
+    
+    Looks in workflows.documentation_workflow first (correct location),
+    then falls back to root-level documentation_workflow for backward compatibility.
+    """
+    workflows_config = _APP_CONFIG.get('workflows', {})
+    if 'documentation_workflow' in workflows_config:
+        return workflows_config['documentation_workflow']
+    
+    # Fallback to root level for backward compatibility
+    return _APP_CONFIG.get('documentation_workflow', 
+                           DEFAULT_APP_CONFIG.get('workflows', {}).get('documentation_workflow', {}))
+
+def get_doc_discovery_config() -> dict:
+    """Returns discovery phase configuration."""
+    return get_documentation_workflow_config().get('discovery', {})
+
+def get_doc_analysis_config() -> dict:
+    """Returns analysis phase configuration."""
+    return get_documentation_workflow_config().get('analysis', {})
+
+def get_doc_generation_config() -> dict:
+    """Returns generation phase configuration."""
+    return get_documentation_workflow_config().get('generation', {})
+
+def get_doc_output_config() -> dict:
+    """Returns output configuration."""
+    return get_documentation_workflow_config().get('output', {})
+
+def get_doc_property_extraction_config() -> dict:
+    """Returns property extraction configuration."""
+    return get_doc_analysis_config().get('property_extraction', {
+        'mode': 'balanced',
+        'max_properties_per_processor': 10,
+        'truncate_large_values': True,
+        'max_value_length': 500,
+        'include_defaults': False
+    })
+
+def get_doc_property_extraction_mode() -> str:
+    """Returns property extraction mode: 'minimal', 'balanced', or 'comprehensive'."""
+    return get_doc_property_extraction_config().get('mode', 'balanced')
+
+def should_save_generation_shared_state() -> bool:
+    """Returns whether to save generation shared state snapshot."""
+    return get_doc_output_config().get('save_shared_state', True)
+
+# Convenience accessors for common settings
+def get_doc_discovery_timeout() -> int:
+    """Returns discovery timeout in seconds."""
+    return get_doc_discovery_config().get('timeout_seconds', 120)
+
+def get_doc_max_processors_per_llm() -> int:
+    """Returns max processors per LLM analysis call."""
+    return get_doc_analysis_config().get('max_processors_per_llm_call', 30)
+
+def get_doc_max_mermaid_nodes() -> int:
+    """Returns max nodes in Mermaid diagram."""
+    return get_doc_generation_config().get('max_mermaid_nodes', 50)
+
+def get_doc_large_pg_threshold() -> int:
+    """Returns processor count threshold for virtual grouping."""
+    return get_doc_analysis_config().get('large_pg_threshold', 25)
+
+def validate_documentation_workflow_config() -> list[str]:
+    """Validate documentation workflow configuration, return list of warnings."""
+    warnings = []
+    config = get_documentation_workflow_config()
+    
+    # Check discovery settings
+    discovery = config.get('discovery', {})
+    if discovery.get('timeout_seconds', 120) < 30:
+        warnings.append("Discovery timeout < 30s may cause incomplete results")
+    if discovery.get('max_depth', 10) > 20:
+        warnings.append("Max depth > 20 may cause performance issues")
+    
+    # Check analysis settings
+    analysis = config.get('analysis', {})
+    if analysis.get('max_processors_per_llm_call', 30) > 50:
+        warnings.append("More than 50 processors per LLM call may exceed token limits")
+    if analysis.get('large_pg_threshold', 25) < 10:
+        warnings.append("Large PG threshold < 10 may create too many virtual groups")
+    
+    # Check generation settings
+    generation = config.get('generation', {})
+    if generation.get('max_mermaid_nodes', 50) > 100:
+        warnings.append("Mermaid diagrams with >100 nodes may not render well")
+    
+    return warnings
 
 # --- Deprecated Functions (Keep temporarily for reference/smooth transition if needed, but remove eventually) ---
 
