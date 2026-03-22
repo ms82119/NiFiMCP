@@ -1,6 +1,10 @@
-# NiFi MCP Usage Guide - Built-in Chat Bot
+# NiFi MCP Usage Guide — Built-in Chat Bot
 
-This guide provides detailed information about using the Built-In NiFi Chat Bot effectively.  It is a bit out of date (was pre version 2.0), but generally concepts are still applicable.
+**Audience:** people using the **built-in browser chat bot** in this project (session objective, tool phases, UI).
+
+If you use NiFi tools from an **IDE agent** (Cursor, Claude Code, Gemini IDE, etc.) over MCP, see **[MCP Agent Guide](./MCP-Agent-Guide.md)** for orchestration: which tools to prefer, avoiding parallel heavy reads, and continuation tokens. That guide is platform-neutral; this document stays focused on the chat UI.
+
+This guide provides detailed information about using the Built-In NiFi Chat Bot effectively. It is a bit out of date (was pre version 2.0), but generally concepts are still applicable.
 
 ## UI Features and Tips
 
@@ -72,6 +76,7 @@ You can enable or disable these features globally by changing these settings. Th
 3. **Health verdict** – Use `get_process_group_status` to get a single `health` field (`healthy` / `errors` / `degraded`) and an optional `bulletin_summary`. Use `include_child_groups=True` and `max_depth` to get status for descendant PGs in one call, with `child_groups` and `child_health_summary` (counts of healthy/errors/degraded).
 4. **Outline-first exploration** – For large, deep flows, use `get_flow_outline` to get a lightweight process group tree with counts and boundary ports. Alternatively, use `list_nifi_objects` with `object_type="process_groups"`, `search_scope="recursive"`, and `include_boundary_ports=True` to get a hierarchy with input_ports/output_ports (and optionally counts) on each node up to depth 2.
 5. **PG-level error analysis** – Use `analyze_nifi_processor_errors` with `process_group_id` to analyze errors across all processors in a group (or use `processor_id` for a single processor).
+6. **Heavy tools and parallel calls** – If the LLM runs many large read tools at once, NiFi may show transient errors. Prefer one heavy documentation or status pass at a time. For IDE/MCP agents, see **[MCP Agent Guide](./MCP-Agent-Guide.md)**.
 
 ### Flowfile debugging and tracing
 1. **List flowfiles** – Use `list_flowfiles` with `target_id` (connection or processor) and `target_type` (`connection` or `processor`). Results are paged: when `has_more` is true, pass the returned `continuation_token` on the next call (with the same `target_id` and `target_type`) to get the next page. Default `max_results` is 100 per call to limit token usage.

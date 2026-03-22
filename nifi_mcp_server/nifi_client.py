@@ -19,6 +19,32 @@ class NiFiOperationError(Exception):
     """Raised when there is an error performing an operation in NiFi."""
     pass
 
+
+def _http_error_detail(exc: BaseException) -> str:
+    """Human-readable detail for logging and raised errors; httpx ReadError often has str(exc)==''."""
+    s = str(exc).strip()
+    if s:
+        return s
+    r = repr(exc)
+    if r and r != "''":
+        return r
+    return type(exc).__name__
+
+
+def _is_transient_httpx_error(exc: BaseException) -> bool:
+    """Transport/network failures that often succeed on retry."""
+    return isinstance(
+        exc,
+        (
+            httpx.ReadError,
+            httpx.ConnectError,
+            httpx.RemoteProtocolError,
+            httpx.WriteError,
+            httpx.PoolTimeout,
+        ),
+    )
+
+
 # Define needed models locally
 class AuthParams:
     """Authentication parameters for NiFi."""
@@ -126,8 +152,8 @@ class NiFiClient:
                     return self._auth_config
                 raise NiFiAuthenticationError(f"Failed to get auth config: {e.response.status_code}") from e
             except httpx.RequestError as e:
-                logger.error(f"Error getting auth config: {e}")
-                raise NiFiAuthenticationError(f"Error getting auth config: {e}") from e
+                logger.error(f"Error getting auth config: {_http_error_detail(e)}")
+                raise NiFiAuthenticationError(f"Error getting auth config: {_http_error_detail(e)}") from e
 
     async def _get_credentials(self, server_id: Optional[str] = None) -> Tuple[str, str]:
         """Gets credentials, prompting if not available."""
@@ -153,8 +179,8 @@ class NiFiClient:
                     logger.debug(f"Credentials retrieved from callback for server {server_id}")
                     return username, password
             except Exception as e:
-                logger.error(f"Error getting credentials from callback: {e}")
-                raise NiFiAuthenticationError(f"Failed to get credentials: {e}") from e
+                logger.error(f"Error getting credentials from callback: {_http_error_detail(e)}")
+                raise NiFiAuthenticationError(f"Failed to get credentials: {_http_error_detail(e)}") from e
         
         # If still missing, raise error (in web context, callback should be provided)
         if not username or not password:
@@ -245,7 +271,7 @@ class NiFiClient:
                             logger.debug(f"Endpoint {endpoint} ({auth_method}) returned {e.response.status_code}: {e.response.text[:200]}")
                         continue
                     except Exception as e:
-                        logger.debug(f"Error trying {endpoint} ({auth_method}): {e}, trying next...")
+                        logger.debug(f"Error trying {endpoint} ({auth_method}): {_http_error_detail(e)}, trying next...")
                         continue
                 
                 # If all endpoints failed, provide detailed error message
@@ -261,8 +287,8 @@ class NiFiClient:
             except NiFiAuthenticationError:
                 raise
             except httpx.RequestError as e:
-                logger.error(f"Network error during OIDC authentication: {e}")
-                raise NiFiAuthenticationError(f"Network error during OIDC authentication: {e}") from e
+                logger.error(f"Network error during OIDC authentication: {_http_error_detail(e)}")
+                raise NiFiAuthenticationError(f"Network error during OIDC authentication: {_http_error_detail(e)}") from e
 
     async def authenticate(self, server_id: Optional[str] = None):
         """Authenticates with NiFi and stores the token.
@@ -356,11 +382,11 @@ class NiFiClient:
                 
                 raise NiFiAuthenticationError(f"Authentication failed: {e.response.status_code}") from e
             except httpx.RequestError as e:
-                logger.error(f"An error occurred during authentication: {e}")
-                raise NiFiAuthenticationError(f"An error occurred during authentication: {e}") from e
+                logger.error(f"An error occurred during authentication: {_http_error_detail(e)}")
+                raise NiFiAuthenticationError(f"An error occurred during authentication: {_http_error_detail(e)}") from e
             except Exception as e:
-                logger.error(f"An unexpected error occurred during authentication: {e}", exc_info=True)
-                raise NiFiAuthenticationError(f"An unexpected error occurred during authentication: {e}") from e
+                logger.error(f"An unexpected error occurred during authentication: {_http_error_detail(e)}", exc_info=True)
+                raise NiFiAuthenticationError(f"An unexpected error occurred during authentication: {_http_error_detail(e)}") from e
 
     async def close(self):
         """Closes the underlying httpx client."""
@@ -397,11 +423,11 @@ class NiFiClient:
             local_logger.error(f"Failed to get root process group ID: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to get root process group ID: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error getting root process group ID: {e}")
-            raise ConnectionError(f"Error getting root process group ID: {e}") from e
+            local_logger.error(f"Error getting root process group ID: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting root process group ID: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred getting root process group ID: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting root process group ID: {e}") from e
+            local_logger.error(f"An unexpected error occurred getting root process group ID: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting root process group ID: {_http_error_detail(e)}") from e
 
     async def download_flow_definition(self, process_group_id: str, include_referenced_services: bool = False) -> dict:
         """Downloads the flow definition for a process group as JSON (same as UI 'Download flow definition').
@@ -420,11 +446,11 @@ class NiFiClient:
             logger.error(f"Failed to download flow definition: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to download flow definition: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error downloading flow definition: {e}")
-            raise ConnectionError(f"Error downloading flow definition: {e}") from e
+            logger.error(f"Error downloading flow definition: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error downloading flow definition: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error downloading flow definition: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error downloading flow definition: {e}") from e
+            logger.error(f"An unexpected error downloading flow definition: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error downloading flow definition: {_http_error_detail(e)}") from e
 
     async def list_processors(self, process_group_id: str, user_request_id: str = "-", action_id: str = "-") -> list[dict]:
         """Lists processors within a specified process group."""
@@ -449,11 +475,11 @@ class NiFiClient:
             local_logger.error(f"Failed to list processors for group {process_group_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to list processors: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error listing processors for group {process_group_id}: {e}")
-            raise ConnectionError(f"Error listing processors: {e}") from e
+            local_logger.error(f"Error listing processors for group {process_group_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error listing processors: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred listing processors: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred listing processors: {e}") from e
+            local_logger.error(f"An unexpected error occurred listing processors: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred listing processors: {_http_error_detail(e)}") from e
 
     async def create_processor(
         self,
@@ -498,11 +524,11 @@ class NiFiClient:
             logger.error(f"Failed to create processor '{name}': {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to create processor: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error creating processor '{name}': {e}")
-            raise ConnectionError(f"Error creating processor: {e}") from e
+            logger.error(f"Error creating processor '{name}': {_http_error_detail(e)}")
+            raise ConnectionError(f"Error creating processor: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred creating processor '{name}': {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred creating processor: {e}") from e
+            logger.error(f"An unexpected error occurred creating processor '{name}': {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred creating processor: {_http_error_detail(e)}") from e
 
     async def create_connection(
         self,
@@ -561,11 +587,11 @@ class NiFiClient:
             logger.error(f"Failed to create connection: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to create connection: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error creating connection: {e}")
-            raise ConnectionError(f"Error creating connection: {e}") from e
+            logger.error(f"Error creating connection: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error creating connection: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred creating connection: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred creating connection: {e}") from e
+            logger.error(f"An unexpected error occurred creating connection: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred creating connection: {_http_error_detail(e)}") from e
 
     async def get_processor_details(self, processor_id: str) -> dict:
         """Fetches the details and configuration of a specific processor."""
@@ -592,11 +618,11 @@ class NiFiClient:
                 logger.error(f"Failed to get details for processor {processor_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to get processor details: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error getting details for processor {processor_id}: {e}")
-            raise ConnectionError(f"Error getting processor details: {e}") from e
+            logger.error(f"Error getting details for processor {processor_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting processor details: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred getting processor details for {processor_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting processor details: {e}") from e
+            logger.error(f"An unexpected error occurred getting processor details for {processor_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting processor details: {_http_error_detail(e)}") from e
 
     async def delete_processor(self, processor_id: str, version: int) -> bool:
         """Deletes a processor given its ID and current revision version."""
@@ -635,11 +661,11 @@ class NiFiClient:
                  logger.error(f"Failed to delete processor {processor_id}: {e.response.status_code} - {e.response.text}")
                  raise ConnectionError(f"Failed to delete processor: {e.response.status_code}, {e.response.text}") from e
         except httpx.RequestError as e:
-            logger.error(f"Error deleting processor {processor_id}: {e}")
-            raise ConnectionError(f"Error deleting processor: {e}") from e
+            logger.error(f"Error deleting processor {processor_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error deleting processor: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred deleting processor {processor_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred deleting processor: {e}") from e
+            logger.error(f"An unexpected error occurred deleting processor {processor_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred deleting processor: {_http_error_detail(e)}") from e
 
     async def get_connection(self, connection_id: str) -> dict:
         """Fetches the details of a specific connection."""
@@ -664,11 +690,11 @@ class NiFiClient:
                 logger.error(f"Failed to get details for connection {connection_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to get connection details: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error getting details for connection {connection_id}: {e}")
-            raise ConnectionError(f"Error getting connection details: {e}") from e
+            logger.error(f"Error getting details for connection {connection_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting connection details: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred getting connection details for {connection_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting connection details: {e}") from e
+            logger.error(f"An unexpected error occurred getting connection details for {connection_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting connection details: {_http_error_detail(e)}") from e
 
     async def list_connections(self, process_group_id: Optional[str] = None, user_request_id: str = "-", action_id: str = "-") -> list[dict]:
         """Lists all connections in a process group or in the entire flow if no process_group_id is provided."""
@@ -726,7 +752,7 @@ class NiFiClient:
                     raise ValueError(f"Could not determine revision version for connection {connection_id}")
                 logger.info(f"Using fetched revision version {version_number} for connection {connection_id}")
             except Exception as e:
-                logger.error(f"Failed to fetch connection {connection_id} details to get version: {e}")
+                logger.error(f"Failed to fetch connection {connection_id} details to get version: {_http_error_detail(e)}")
                 raise
 
         endpoint = f"/connections/{connection_id}?version={version_number}&clientId={self._client_id}"
@@ -754,11 +780,11 @@ class NiFiClient:
                 logger.error(f"Failed to delete connection {connection_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to delete connection: {e.response.status_code}, {e.response.text}") from e
         except httpx.RequestError as e:
-            logger.error(f"Error deleting connection {connection_id}: {e}")
-            raise ConnectionError(f"Error deleting connection: {e}") from e
+            logger.error(f"Error deleting connection {connection_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error deleting connection: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred deleting connection {connection_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred deleting connection: {e}") from e
+            logger.error(f"An unexpected error occurred deleting connection {connection_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred deleting connection: {_http_error_detail(e)}") from e
 
     async def update_connection(self, connection_id: str, update_payload: Dict[str, Any]) -> Dict:
         """Updates a specific connection using the provided payload (including revision and component)."""
@@ -794,11 +820,11 @@ class NiFiClient:
                 logger.error(f"Failed to update connection {connection_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to update connection: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error updating connection {connection_id}: {e}")
-            raise ConnectionError(f"Error updating connection: {e}") from e
+            logger.error(f"Error updating connection {connection_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error updating connection: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred updating connection {connection_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred updating connection: {e}") from e
+            logger.error(f"An unexpected error occurred updating connection {connection_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred updating connection: {_http_error_detail(e)}") from e
 
     async def update_processor_config(
         self,
@@ -822,7 +848,7 @@ class NiFiClient:
             current_revision = current_entity["revision"]
             current_component = current_entity["component"]
         except (ValueError, ConnectionError) as e:
-            logger.error(f"Failed to fetch processor {processor_id} for update: {e}")
+            logger.error(f"Failed to fetch processor {processor_id} for update: {_http_error_detail(e)}")
             raise
 
         # 2. Prepare the update payload
@@ -925,11 +951,11 @@ class NiFiClient:
                 logger.error(f"Failed to update processor {processor_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to update processor: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error updating processor {processor_id}: {e}")
-            raise ConnectionError(f"Error updating processor: {e}") from e
+            logger.error(f"Error updating processor {processor_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error updating processor: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred updating processor {processor_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred updating processor: {e}") from e
+            logger.error(f"An unexpected error occurred updating processor {processor_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred updating processor: {_http_error_detail(e)}") from e
 
     async def update_processor_state(self, processor_id: str, state: str) -> dict:
         """Starts or stops a specific processor."""
@@ -948,7 +974,7 @@ class NiFiClient:
             current_entity = await self.get_processor_details(processor_id)
             current_revision = current_entity["revision"]
         except (ValueError, ConnectionError) as e:
-            logger.error(f"Failed to fetch processor {processor_id} to update state: {e}")
+            logger.error(f"Failed to fetch processor {processor_id} to update state: {_http_error_detail(e)}")
             raise
 
         # 2. Prepare the update payload for the run-status endpoint
@@ -977,11 +1003,11 @@ class NiFiClient:
                 logger.error(f"Failed to change state for processor {processor_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to change processor state: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error changing state for processor {processor_id}: {e}")
-            raise ConnectionError(f"Error changing processor state: {e}") from e
+            logger.error(f"Error changing state for processor {processor_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error changing processor state: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred changing state for processor {processor_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred changing processor state: {e}") from e
+            logger.error(f"An unexpected error occurred changing state for processor {processor_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred changing processor state: {_http_error_detail(e)}") from e
 
     async def get_process_group_status_snapshot(self, process_group_id: str) -> dict:
         """Fetches the status snapshot for a specific process group, including component states and queue sizes.
@@ -1014,11 +1040,11 @@ class NiFiClient:
                 logger.error(f"Failed to get status snapshot for process group {process_group_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to get process group status snapshot: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error getting status snapshot for process group {process_group_id}: {e}")
-            raise ConnectionError(f"Error getting process group status snapshot: {e}") from e
+            logger.error(f"Error getting status snapshot for process group {process_group_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting process group status snapshot: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred getting status snapshot for {process_group_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting process group status snapshot: {e}") from e
+            logger.error(f"An unexpected error occurred getting status snapshot for {process_group_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting process group status snapshot: {_http_error_detail(e)}") from e
 
     async def get_bulletin_board(self, group_id: Optional[str] = None, source_id: Optional[str] = None, limit: int = 100) -> List[Dict]:
         """Fetches bulletins from the NiFi bulletin board, optionally filtered.
@@ -1059,11 +1085,11 @@ class NiFiClient:
             logger.error(f"Failed to get bulletins: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to get bulletins: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error getting bulletins: {e}")
-            raise ConnectionError(f"Error getting bulletins: {e}") from e
+            logger.error(f"Error getting bulletins: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting bulletins: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred getting bulletins: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting bulletins: {e}") from e
+            logger.error(f"An unexpected error occurred getting bulletins: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting bulletins: {_http_error_detail(e)}") from e
 
     async def get_parameter_context(self, process_group_id: str, user_request_id: str = "-", action_id: str = "-") -> list:
         """Retrieves the parameter context associated with a process group."""
@@ -1092,17 +1118,17 @@ class NiFiClient:
             return parameters # Return full parameter entity list
 
         except NiFiAuthenticationError as e:
-             local_logger.error(f"Authentication error fetching parameter context for PG {process_group_id}: {e}", exc_info=False)
+             local_logger.error(f"Authentication error fetching parameter context for PG {process_group_id}: {_http_error_detail(e)}", exc_info=False)
              raise ToolError(f"Authentication error accessing parameter context for PG {process_group_id}.") from e
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to get parameter context for PG {process_group_id}: {e.response.status_code} - {e.response.text}")
             raise ToolError(f"Failed to get parameter context: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError, ConnectionError) as e:
-            local_logger.error(f"Error getting parameter context for PG {process_group_id}: {e}")
-            raise ToolError(f"Error getting parameter context: {e}") from e
+            local_logger.error(f"Error getting parameter context for PG {process_group_id}: {_http_error_detail(e)}")
+            raise ToolError(f"Error getting parameter context: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred getting parameter context for PG {process_group_id}: {e}", exc_info=True)
-            raise ToolError(f"An unexpected error occurred getting parameter context: {e}") from e
+            local_logger.error(f"An unexpected error occurred getting parameter context for PG {process_group_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ToolError(f"An unexpected error occurred getting parameter context: {_http_error_detail(e)}") from e
 
     async def get_input_ports(self, process_group_id: str) -> list[dict]:
         """Lists input ports within a specified process group."""
@@ -1124,11 +1150,11 @@ class NiFiClient:
             logger.error(f"Failed to list input ports for group {process_group_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to list input ports: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error listing input ports for group {process_group_id}: {e}")
-            raise ConnectionError(f"Error listing input ports: {e}") from e
+            logger.error(f"Error listing input ports for group {process_group_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error listing input ports: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred listing input ports: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred listing input ports: {e}") from e
+            logger.error(f"An unexpected error occurred listing input ports: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred listing input ports: {_http_error_detail(e)}") from e
 
     async def get_output_ports(self, process_group_id: str) -> list[dict]:
         """Lists output ports within a specified process group."""
@@ -1150,11 +1176,11 @@ class NiFiClient:
             logger.error(f"Failed to list output ports for group {process_group_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to list output ports: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error listing output ports for group {process_group_id}: {e}")
-            raise ConnectionError(f"Error listing output ports: {e}") from e
+            logger.error(f"Error listing output ports for group {process_group_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error listing output ports: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred listing output ports: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred listing output ports: {e}") from e
+            logger.error(f"An unexpected error occurred listing output ports: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred listing output ports: {_http_error_detail(e)}") from e
 
     async def get_process_groups(self, process_group_id: str) -> list[dict]:
         """Lists immediate child process groups within a specified process group."""
@@ -1163,39 +1189,57 @@ class NiFiClient:
 
         client = await self._get_client()
         endpoint = f"/process-groups/{process_group_id}/process-groups"
-        try:
-            logger.info(f"Fetching child process groups for group {process_group_id} from {self.base_url}{endpoint}")
-            response = await client.get(endpoint)
-            response.raise_for_status()
-            data = response.json()
-            # Response is ProcessGroupsEntity with 'processGroups' key
-            groups = data.get("processGroups", [])
-            logger.info(f"Found {len(groups)} child process groups in group {process_group_id}.")
-            return groups
-        except httpx.HTTPStatusError as e:
-            error_text = e.response.text or ""
-            logger.error(f"Failed to list process groups for group {process_group_id}: {e.response.status_code} - {error_text}")
-            
-            # Handle token expiration (401 with "Session Expired" or similar)
-            if e.response.status_code == 401 and ("Session Expired" in error_text or "expired" in error_text.lower() or "unauthorized" in error_text.lower()):
-                logger.warning(f"Token appears to be expired (401 Unauthorized). Clearing token for potential re-authentication.")
-                self._token = None
-                # Force client recreation on next use
-                if self._client:
-                    await self._client.aclose()
-                    self._client = None
-                raise NiFiAuthenticationError(
-                    f"Authentication token has expired. Please provide a new access token. "
-                    f"Original error: {e.response.status_code} - {error_text}"
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                logger.info(f"Fetching child process groups for group {process_group_id} from {self.base_url}{endpoint}")
+                response = await client.get(endpoint)
+                response.raise_for_status()
+                data = response.json()
+                # Response is ProcessGroupsEntity with 'processGroups' key
+                groups = data.get("processGroups", [])
+                logger.info(f"Found {len(groups)} child process groups in group {process_group_id}.")
+                return groups
+            except httpx.HTTPStatusError as e:
+                error_text = e.response.text or ""
+                logger.error(f"Failed to list process groups for group {process_group_id}: {e.response.status_code} - {error_text}")
+
+                # Handle token expiration (401 with "Session Expired" or similar)
+                if e.response.status_code == 401 and ("Session Expired" in error_text or "expired" in error_text.lower() or "unauthorized" in error_text.lower()):
+                    logger.warning(f"Token appears to be expired (401 Unauthorized). Clearing token for potential re-authentication.")
+                    self._token = None
+                    # Force client recreation on next use
+                    if self._client:
+                        await self._client.aclose()
+                        self._client = None
+                    raise NiFiAuthenticationError(
+                        f"Authentication token has expired. Please provide a new access token. "
+                        f"Original error: {e.response.status_code} - {error_text}"
+                    ) from e
+
+                raise ConnectionError(
+                    f"Failed to list process groups: HTTP {e.response.status_code} {error_text[:800]}"
                 ) from e
-            
-            raise ConnectionError(f"Failed to list process groups: {e.response.status_code}") from e
-        except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error listing process groups for group {process_group_id}: {e}")
-            raise ConnectionError(f"Error listing process groups: {e}") from e
-        except Exception as e:
-            logger.error(f"An unexpected error occurred listing process groups: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred listing process groups: {e}") from e
+            except httpx.RequestError as e:
+                if attempt < max_attempts - 1 and _is_transient_httpx_error(e):
+                    delay = 0.15 * (2**attempt)
+                    logger.warning(
+                        f"Transient error listing process groups for {process_group_id} "
+                        f"(attempt {attempt + 1}/{max_attempts}): {_http_error_detail(e)}; retrying in {delay}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                detail = _http_error_detail(e)
+                logger.error(f"Error listing process groups for group {process_group_id}: {detail}")
+                raise ConnectionError(f"Error listing process groups: {detail}") from e
+            except ValueError as e:
+                detail = _http_error_detail(e)
+                logger.error(f"Error listing process groups for group {process_group_id}: {detail}")
+                raise ConnectionError(f"Error listing process groups: {detail}") from e
+            except Exception as e:
+                detail = _http_error_detail(e)
+                logger.error(f"An unexpected error occurred listing process groups: {detail}", exc_info=True)
+                raise ConnectionError(f"An unexpected error occurred listing process groups: {detail}") from e
 
     async def get_process_group_details(self, process_group_id: str, user_request_id: str = "-", action_id: str = "-") -> dict:
         """Fetches the details of a specific process group."""
@@ -1221,11 +1265,11 @@ class NiFiClient:
                 local_logger.error(f"Failed to get details for process group {process_group_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to get process group details: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error getting details for process group {process_group_id}: {e}")
-            raise ConnectionError(f"Error getting process group details: {e}") from e
+            local_logger.error(f"Error getting details for process group {process_group_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting process group details: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred getting process group details for {process_group_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting process group details: {e}") from e
+            local_logger.error(f"An unexpected error occurred getting process group details for {process_group_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting process group details: {_http_error_detail(e)}") from e
 
     async def update_process_group_position(self, process_group_id: str, x: float, y: float) -> dict:
         """Updates a process group's position on the canvas. GETs current entity then PUTs with new position."""
@@ -1234,7 +1278,7 @@ class NiFiClient:
         try:
             current = await self.get_process_group_details(process_group_id)
         except (ValueError, ConnectionError) as e:
-            logger.error(f"Failed to fetch process group {process_group_id} for position update: {e}")
+            logger.error(f"Failed to fetch process group {process_group_id} for position update: {_http_error_detail(e)}")
             raise
         rev = current.get("revision", {})
         comp = current.get("component", {}).copy()
@@ -1280,11 +1324,11 @@ class NiFiClient:
                 logger.error(f"Failed to get flow details for process group {process_group_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to get process group flow details: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error getting flow details for process group {process_group_id}: {e}")
-            raise ConnectionError(f"Error getting process group flow details: {e}") from e
+            logger.error(f"Error getting flow details for process group {process_group_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting process group flow details: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred getting process group flow details for {process_group_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting process group flow details: {e}") from e
+            logger.error(f"An unexpected error occurred getting process group flow details for {process_group_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting process group flow details: {_http_error_detail(e)}") from e
 
     async def get_input_port_details(self, port_id: str) -> dict:
         """Fetches the details of a specific input port."""
@@ -1309,11 +1353,11 @@ class NiFiClient:
                 logger.error(f"Failed to get details for input port {port_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to get input port details: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error getting details for input port {port_id}: {e}")
-            raise ConnectionError(f"Error getting input port details: {e}") from e
+            logger.error(f"Error getting details for input port {port_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting input port details: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred getting input port details for {port_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting input port details: {e}") from e
+            logger.error(f"An unexpected error occurred getting input port details for {port_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting input port details: {_http_error_detail(e)}") from e
 
     async def get_output_port_details(self, port_id: str) -> dict:
         """Fetches the details of a specific output port."""
@@ -1338,11 +1382,11 @@ class NiFiClient:
                 logger.error(f"Failed to get details for output port {port_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to get output port details: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error getting details for output port {port_id}: {e}")
-            raise ConnectionError(f"Error getting output port details: {e}") from e
+            logger.error(f"Error getting details for output port {port_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting output port details: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred getting output port details for {port_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting output port details: {e}") from e
+            logger.error(f"An unexpected error occurred getting output port details for {port_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting output port details: {_http_error_detail(e)}") from e
 
     async def delete_input_port(self, port_id: str, version: int) -> bool:
         """Deletes an input port given its ID and current revision version."""
@@ -1375,11 +1419,11 @@ class NiFiClient:
                  logger.error(f"Failed to delete input port {port_id}: {e.response.status_code} - {e.response.text}")
                  raise ConnectionError(f"Failed to delete input port: {e.response.status_code}, {e.response.text}") from e
         except httpx.RequestError as e:
-            logger.error(f"Error deleting input port {port_id}: {e}")
-            raise ConnectionError(f"Error deleting input port: {e}") from e
+            logger.error(f"Error deleting input port {port_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error deleting input port: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred deleting input port {port_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred deleting input port: {e}") from e
+            logger.error(f"An unexpected error occurred deleting input port {port_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred deleting input port: {_http_error_detail(e)}") from e
 
     async def delete_output_port(self, port_id: str, version: int) -> bool:
         """Deletes an output port given its ID and current revision version."""
@@ -1412,11 +1456,11 @@ class NiFiClient:
                  logger.error(f"Failed to delete output port {port_id}: {e.response.status_code} - {e.response.text}")
                  raise ConnectionError(f"Failed to delete output port: {e.response.status_code}, {e.response.text}") from e
         except httpx.RequestError as e:
-            logger.error(f"Error deleting output port {port_id}: {e}")
-            raise ConnectionError(f"Error deleting output port: {e}") from e
+            logger.error(f"Error deleting output port {port_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error deleting output port: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred deleting output port {port_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred deleting output port: {e}") from e
+            logger.error(f"An unexpected error occurred deleting output port {port_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred deleting output port: {_http_error_detail(e)}") from e
 
     async def delete_process_group(self, pg_id: str, version: int) -> bool:
         """Deletes a process group given its ID and current revision version. Fails if not empty."""
@@ -1451,11 +1495,11 @@ class NiFiClient:
                  logger.error(f"Failed to delete process group {pg_id}: {e.response.status_code} - {e.response.text}")
                  raise ConnectionError(f"Failed to delete process group: {e.response.status_code}, {e.response.text}") from e
         except httpx.RequestError as e:
-            logger.error(f"Error deleting process group {pg_id}: {e}")
-            raise ConnectionError(f"Error deleting process group: {e}") from e
+            logger.error(f"Error deleting process group {pg_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error deleting process group: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred deleting process group {pg_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred deleting process group: {e}") from e
+            logger.error(f"An unexpected error occurred deleting process group {pg_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred deleting process group: {_http_error_detail(e)}") from e
 
     async def update_input_port_state(self, port_id: str, state: str) -> dict:
         """Starts or stops a specific input port."""
@@ -1472,7 +1516,7 @@ class NiFiClient:
             current_entity = await self.get_input_port_details(port_id)
             current_revision = current_entity["revision"]
         except (ValueError, ConnectionError) as e:
-            logger.error(f"Failed to fetch input port {port_id} to update state: {e}")
+            logger.error(f"Failed to fetch input port {port_id} to update state: {_http_error_detail(e)}")
             raise
 
         # 2. Prepare payload
@@ -1500,11 +1544,11 @@ class NiFiClient:
                 logger.error(f"Failed to change state for input port {port_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to change input port state: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error changing state for input port {port_id}: {e}")
-            raise ConnectionError(f"Error changing input port state: {e}") from e
+            logger.error(f"Error changing state for input port {port_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error changing input port state: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred changing state for input port {port_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred changing input port state: {e}") from e
+            logger.error(f"An unexpected error occurred changing state for input port {port_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred changing input port state: {_http_error_detail(e)}") from e
 
     async def update_output_port_state(self, port_id: str, state: str) -> dict:
         """Starts or stops a specific output port."""
@@ -1521,7 +1565,7 @@ class NiFiClient:
             current_entity = await self.get_output_port_details(port_id)
             current_revision = current_entity["revision"]
         except (ValueError, ConnectionError) as e:
-            logger.error(f"Failed to fetch output port {port_id} to update state: {e}")
+            logger.error(f"Failed to fetch output port {port_id} to update state: {_http_error_detail(e)}")
             raise
 
         # 2. Prepare payload
@@ -1549,11 +1593,11 @@ class NiFiClient:
                 logger.error(f"Failed to change state for output port {port_id}: {e.response.status_code} - {e.response.text}")
                 raise ConnectionError(f"Failed to change output port state: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error changing state for output port {port_id}: {e}")
-            raise ConnectionError(f"Error changing output port state: {e}") from e
+            logger.error(f"Error changing state for output port {port_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error changing output port state: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred changing state for output port {port_id}: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred changing output port state: {e}") from e
+            logger.error(f"An unexpected error occurred changing state for output port {port_id}: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred changing output port state: {_http_error_detail(e)}") from e
 
     async def update_input_port_position(self, port_id: str, x: float, y: float) -> dict:
         """Updates an input port's position on the canvas. GETs current entity then PUTs with new position."""
@@ -1562,7 +1606,7 @@ class NiFiClient:
         try:
             current = await self.get_input_port_details(port_id)
         except (ValueError, ConnectionError) as e:
-            logger.error(f"Failed to fetch input port {port_id} for position update: {e}")
+            logger.error(f"Failed to fetch input port {port_id} for position update: {_http_error_detail(e)}")
             raise
         rev = current.get("revision", {})
         comp = current.get("component", {}).copy()
@@ -1585,7 +1629,7 @@ class NiFiClient:
         try:
             current = await self.get_output_port_details(port_id)
         except (ValueError, ConnectionError) as e:
-            logger.error(f"Failed to fetch output port {port_id} for position update: {e}")
+            logger.error(f"Failed to fetch output port {port_id} for position update: {_http_error_detail(e)}")
             raise
         rev = current.get("revision", {})
         comp = current.get("component", {}).copy()
@@ -1629,11 +1673,11 @@ class NiFiClient:
             logger.error(f"Failed to create input port '{name}': {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to create input port: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error creating input port '{name}': {e}")
-            raise ConnectionError(f"Error creating input port: {e}") from e
+            logger.error(f"Error creating input port '{name}': {_http_error_detail(e)}")
+            raise ConnectionError(f"Error creating input port: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred creating input port '{name}': {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred creating input port: {e}") from e
+            logger.error(f"An unexpected error occurred creating input port '{name}': {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred creating input port: {_http_error_detail(e)}") from e
 
     async def create_output_port(self, pg_id: str, name: str, position: Dict[str, float]) -> dict:
         """Creates a new output port in the specified process group."""
@@ -1662,11 +1706,11 @@ class NiFiClient:
             logger.error(f"Failed to create output port '{name}': {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to create output port: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error creating output port '{name}': {e}")
-            raise ConnectionError(f"Error creating output port: {e}") from e
+            logger.error(f"Error creating output port '{name}': {_http_error_detail(e)}")
+            raise ConnectionError(f"Error creating output port: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred creating output port '{name}': {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred creating output port: {e}") from e
+            logger.error(f"An unexpected error occurred creating output port '{name}': {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred creating output port: {_http_error_detail(e)}") from e
 
     async def create_process_group(self, parent_pg_id: str, name: str, position: Dict[str, float]) -> dict:
         """Creates a new process group within the specified parent process group."""
@@ -1696,11 +1740,11 @@ class NiFiClient:
             logger.error(f"Failed to create process group '{name}': {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to create process group: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error creating process group '{name}': {e}")
-            raise ConnectionError(f"Error creating process group: {e}") from e
+            logger.error(f"Error creating process group '{name}': {_http_error_detail(e)}")
+            raise ConnectionError(f"Error creating process group: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred creating process group '{name}': {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred creating process group: {e}") from e
+            logger.error(f"An unexpected error occurred creating process group '{name}': {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred creating process group: {_http_error_detail(e)}") from e
 
     async def get_processor_types(self) -> List[Dict]:
         """Fetches the list of available processor types from the NiFi instance."""
@@ -1724,11 +1768,11 @@ class NiFiClient:
             logger.error(f"Failed to get processor types: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to get processor types: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            logger.error(f"Error getting processor types: {e}")
-            raise ConnectionError(f"Error getting processor types: {e}") from e
+            logger.error(f"Error getting processor types: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting processor types: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred getting processor types: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting processor types: {e}") from e
+            logger.error(f"An unexpected error occurred getting processor types: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting processor types: {_http_error_detail(e)}") from e
 
     async def search_flow(self, query: str) -> Dict:
         """Performs a global search across the NiFi flow using the provided query string."""
@@ -1754,11 +1798,11 @@ class NiFiClient:
             # Don't raise ValueError for 404, search simply might not find anything or endpoint might differ
             raise ConnectionError(f"Failed to perform flow search: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e: # Include ValueError for potential JSON parsing issues
-            logger.error(f"Error performing flow search for query '{query}': {e}")
-            raise ConnectionError(f"Error performing flow search: {e}") from e
+            logger.error(f"Error performing flow search for query '{query}': {_http_error_detail(e)}")
+            raise ConnectionError(f"Error performing flow search: {_http_error_detail(e)}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred performing flow search for query '{query}': {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred performing flow search: {e}") from e
+            logger.error(f"An unexpected error occurred performing flow search for query '{query}': {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred performing flow search: {_http_error_detail(e)}") from e
 
     async def update_process_group_state(self, pg_id: str, state: str) -> dict:
         """Starts or stops all eligible components within a specific process group."""
@@ -1806,8 +1850,8 @@ class NiFiClient:
             logger.error(f"Failed to set process group {pg_id} state to {normalized_state}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to set process group state: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error setting process group {pg_id} state to {normalized_state}: {e}")
-            raise ConnectionError(f"Error setting process group state: {e}") from e
+            logger.error(f"Error setting process group {pg_id} state to {normalized_state}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error setting process group state: {_http_error_detail(e)}") from e
 
     async def purge_process_group_flowfiles(self, process_group_id: str, timeout_seconds: int = 30) -> Dict[str, Any]:
         """
@@ -1895,8 +1939,8 @@ class NiFiClient:
             logger.error(f"Failed to create drop request for connection {connection_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to create drop request: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error creating drop request for connection {connection_id}: {e}")
-            raise ConnectionError(f"Error creating drop request: {e}") from e
+            logger.error(f"Error creating drop request for connection {connection_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error creating drop request: {_http_error_detail(e)}") from e
 
     async def get_drop_request(self, connection_id: str, request_id: str) -> Dict[str, Any]:
         """Gets the status of a drop request.
@@ -1925,8 +1969,8 @@ class NiFiClient:
             logger.error(f"Failed to get drop request status for {request_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to get drop request status: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error getting drop request status for {request_id}: {e}")
-            raise ConnectionError(f"Error getting drop request status: {e}") from e
+            logger.error(f"Error getting drop request status for {request_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting drop request status: {_http_error_detail(e)}") from e
 
     async def delete_drop_request(self, connection_id: str, request_id: str) -> None:
         """Delete a drop request for a connection to clean up."""
@@ -1945,7 +1989,7 @@ class NiFiClient:
             logger.warning(f"Failed to delete drop request {request_id}: {e.response.status_code} - {e.response.text}")
             # Don't raise an error here as this is cleanup
         except Exception as e:
-            logger.warning(f"Error deleting drop request {request_id}: {e}")
+            logger.warning(f"Error deleting drop request {request_id}: {_http_error_detail(e)}")
             # Don't raise an error here as this is cleanup
 
     async def delete_connections_batch(self, connection_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -1996,8 +2040,8 @@ class NiFiClient:
                         raise ValueError(f"Could not determine revision version for connection {connection_id}")
                     logger.info(f"Using fetched revision version {version_number} for batch deletion of connection {connection_id}")
                 except Exception as e:
-                    logger.error(f"Failed to fetch connection {connection_id} details to get version: {e}")
-                    results[connection_id]["message"] = f"Failed to get connection details: {e}"
+                    logger.error(f"Failed to fetch connection {connection_id} details to get version: {_http_error_detail(e)}")
+                    results[connection_id]["message"] = f"Failed to get connection details: {_http_error_detail(e)}"
                     results[connection_id]["error"] = e
                     continue
 
@@ -2042,7 +2086,7 @@ class NiFiClient:
                 
             except Exception as e:
                 error_msg = f"Error deleting connection: {str(e)}"
-                logger.error(f"An unexpected error occurred deleting connection {connection_id}: {e}", exc_info=True)
+                logger.error(f"An unexpected error occurred deleting connection {connection_id}: {_http_error_detail(e)}", exc_info=True)
                 
                 results[connection_id]["message"] = error_msg
                 results[connection_id]["error"] = e
@@ -2084,7 +2128,7 @@ class NiFiClient:
             }
 
         except Exception as e:
-            logger.error(f"Error during drop request for connection {connection_id}: {e}")
+            logger.error(f"Error during drop request for connection {connection_id}: {_http_error_detail(e)}")
             return {
                 "success": False,
                 "connection_id": connection_id,
@@ -2150,8 +2194,8 @@ class NiFiClient:
             logger.error(f"Failed to create flowfile listing request for connection {connection_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to create flowfile listing request: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error creating flowfile listing request for connection {connection_id}: {e}")
-            raise ConnectionError(f"Error creating flowfile listing request: {e}") from e
+            logger.error(f"Error creating flowfile listing request for connection {connection_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error creating flowfile listing request: {_http_error_detail(e)}") from e
 
     async def get_flowfile_listing_request(self, connection_id: str, request_id: str) -> Dict[str, Any]:
         """Gets the status of a flowfile listing request.
@@ -2180,8 +2224,8 @@ class NiFiClient:
             logger.error(f"Failed to get flowfile listing request status for {request_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to get flowfile listing request status: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error getting flowfile listing request status for {request_id}: {e}")
-            raise ConnectionError(f"Error getting flowfile listing request status: {e}") from e
+            logger.error(f"Error getting flowfile listing request status for {request_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting flowfile listing request status: {_http_error_detail(e)}") from e
 
     async def delete_flowfile_listing_request(self, connection_id: str, request_id: str) -> None:
         """Delete a flowfile listing request to clean up.
@@ -2205,7 +2249,7 @@ class NiFiClient:
             logger.warning(f"Failed to delete flowfile listing request {request_id}: {e.response.status_code} - {e.response.text}")
             # Don't raise an error here as this is cleanup
         except Exception as e:
-            logger.warning(f"Error deleting flowfile listing request {request_id}: {e}")
+            logger.warning(f"Error deleting flowfile listing request {request_id}: {_http_error_detail(e)}")
             # Don't raise an error here as this is cleanup
 
     # --- Provenance Query Methods ---
@@ -2289,8 +2333,8 @@ class NiFiClient:
             logger.error(f"Failed to submit provenance query: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to submit provenance query: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error submitting provenance query: {e}")
-            raise ConnectionError(f"Error submitting provenance query: {e}") from e
+            logger.error(f"Error submitting provenance query: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error submitting provenance query: {_http_error_detail(e)}") from e
 
     async def get_provenance_query(self, query_id: str) -> Dict[str, Any]:
         """Gets the status of a provenance query.
@@ -2318,8 +2362,8 @@ class NiFiClient:
             logger.error(f"Failed to get provenance query status for {query_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to get provenance query status: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error getting provenance query status for {query_id}: {e}")
-            raise ConnectionError(f"Error getting provenance query status: {e}") from e
+            logger.error(f"Error getting provenance query status for {query_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting provenance query status: {_http_error_detail(e)}") from e
 
     async def get_provenance_results(self, query_id: str) -> List[Dict[str, Any]]:
         """Gets the results of a completed provenance query.
@@ -2352,8 +2396,8 @@ class NiFiClient:
             logger.error(f"Failed to get provenance query results for {query_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to get provenance query results: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error getting provenance query results for {query_id}: {e}")
-            raise ConnectionError(f"Error getting provenance query results: {e}") from e
+            logger.error(f"Error getting provenance query results for {query_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting provenance query results: {_http_error_detail(e)}") from e
 
     async def delete_provenance_query(self, query_id: str) -> None:
         """Delete a provenance query to clean up.
@@ -2376,7 +2420,7 @@ class NiFiClient:
             logger.warning(f"Failed to delete provenance query {query_id}: {e.response.status_code} - {e.response.text}")
             # Don't raise an error here as this is cleanup
         except Exception as e:
-            logger.warning(f"Error deleting provenance query {query_id}: {e}")
+            logger.warning(f"Error deleting provenance query {query_id}: {_http_error_detail(e)}")
             # Don't raise an error here as this is cleanup
 
     # --- Provenance Event Content Methods ---
@@ -2409,8 +2453,8 @@ class NiFiClient:
                 raise ValueError(f"Provenance event {event_id} not found") from e
             raise ConnectionError(f"Failed to get provenance event: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error getting provenance event {event_id}: {e}")
-            raise ConnectionError(f"Error getting provenance event: {e}") from e
+            logger.error(f"Error getting provenance event {event_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting provenance event: {_http_error_detail(e)}") from e
 
     async def get_provenance_event_content(self, event_id: int, direction: Literal["input", "output"]) -> httpx.Response:
         """Gets content for a specific provenance event.
@@ -2441,8 +2485,8 @@ class NiFiClient:
                 raise ValueError(f"Content not available for provenance event {event_id} ({direction})") from e
             raise ConnectionError(f"Failed to get provenance event content: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            logger.error(f"Error getting {direction} content for provenance event {event_id}: {e}")
-            raise ConnectionError(f"Error getting provenance event content: {e}") from e
+            logger.error(f"Error getting {direction} content for provenance event {event_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting provenance event content: {_http_error_detail(e)}") from e
 
     # ==========================================
     # Controller Service Methods
@@ -2471,11 +2515,11 @@ class NiFiClient:
             local_logger.error(f"Failed to list controller services for group {process_group_id}: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to list controller services: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error listing controller services for group {process_group_id}: {e}")
-            raise ConnectionError(f"Error listing controller services: {e}") from e
+            local_logger.error(f"Error listing controller services for group {process_group_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error listing controller services: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred listing controller services: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred listing controller services: {e}") from e
+            local_logger.error(f"An unexpected error occurred listing controller services: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred listing controller services: {_http_error_detail(e)}") from e
 
     async def get_controller_service_details(self, controller_service_id: str, user_request_id: str = "-", action_id: str = "-") -> Dict:
         """Gets detailed information about a specific controller service."""
@@ -2500,11 +2544,11 @@ class NiFiClient:
                 raise ValueError(f"Controller service {controller_service_id} not found") from e
             raise ConnectionError(f"Failed to get controller service details: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error getting controller service details for {controller_service_id}: {e}")
-            raise ConnectionError(f"Error getting controller service details: {e}") from e
+            local_logger.error(f"Error getting controller service details for {controller_service_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting controller service details: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred getting controller service details: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting controller service details: {e}") from e
+            local_logger.error(f"An unexpected error occurred getting controller service details: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting controller service details: {_http_error_detail(e)}") from e
 
     async def create_controller_service(
         self,
@@ -2556,11 +2600,11 @@ class NiFiClient:
             local_logger.error(f"Failed to create controller service '{name}': {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to create controller service: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error creating controller service '{name}': {e}")
-            raise ConnectionError(f"Error creating controller service: {e}") from e
+            local_logger.error(f"Error creating controller service '{name}': {_http_error_detail(e)}")
+            raise ConnectionError(f"Error creating controller service: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred creating controller service '{name}': {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred creating controller service: {e}") from e
+            local_logger.error(f"An unexpected error occurred creating controller service '{name}': {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred creating controller service: {_http_error_detail(e)}") from e
 
     async def update_controller_service_properties(
         self,
@@ -2607,11 +2651,11 @@ class NiFiClient:
                 raise ValueError(f"Conflict updating controller service {controller_service_id}. Revision mismatch: {e.response.text}") from e
             raise ConnectionError(f"Failed to update controller service properties: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error updating controller service properties for {controller_service_id}: {e}")
-            raise ConnectionError(f"Error updating controller service properties: {e}") from e
+            local_logger.error(f"Error updating controller service properties for {controller_service_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error updating controller service properties: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred updating controller service properties: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred updating controller service properties: {e}") from e
+            local_logger.error(f"An unexpected error occurred updating controller service properties: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred updating controller service properties: {_http_error_detail(e)}") from e
 
     async def delete_controller_service(self, controller_service_id: str, version: int, user_request_id: str = "-", action_id: str = "-") -> bool:
         """Deletes a controller service."""
@@ -2644,11 +2688,11 @@ class NiFiClient:
                 raise ValueError(f"Conflict deleting controller service {controller_service_id}. Revision mismatch or service in use: {e.response.text}") from e
             raise ConnectionError(f"Failed to delete controller service: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error deleting controller service {controller_service_id}: {e}")
-            raise ConnectionError(f"Error deleting controller service: {e}") from e
+            local_logger.error(f"Error deleting controller service {controller_service_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error deleting controller service: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred deleting controller service: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred deleting controller service: {e}") from e
+            local_logger.error(f"An unexpected error occurred deleting controller service: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred deleting controller service: {_http_error_detail(e)}") from e
 
     async def enable_controller_service(self, controller_service_id: str, user_request_id: str = "-", action_id: str = "-") -> Dict:
         """Enables a controller service."""
@@ -2702,11 +2746,11 @@ class NiFiClient:
                 raise ValueError(f"Conflict enabling controller service {controller_service_id}: {e.response.text}") from e
             raise ConnectionError(f"Failed to enable controller service: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error enabling controller service {controller_service_id}: {e}")
-            raise ConnectionError(f"Error enabling controller service: {e}") from e
+            local_logger.error(f"Error enabling controller service {controller_service_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error enabling controller service: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred enabling controller service: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred enabling controller service: {e}") from e
+            local_logger.error(f"An unexpected error occurred enabling controller service: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred enabling controller service: {_http_error_detail(e)}") from e
 
     async def disable_controller_service(self, controller_service_id: str, user_request_id: str = "-", action_id: str = "-") -> Dict:
         """Disables a controller service."""
@@ -2745,11 +2789,11 @@ class NiFiClient:
                 raise ValueError(f"Conflict disabling controller service {controller_service_id}: {e.response.text}") from e
             raise ConnectionError(f"Failed to disable controller service: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error disabling controller service {controller_service_id}: {e}")
-            raise ConnectionError(f"Error disabling controller service: {e}") from e
+            local_logger.error(f"Error disabling controller service {controller_service_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error disabling controller service: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred disabling controller service: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred disabling controller service: {e}") from e
+            local_logger.error(f"An unexpected error occurred disabling controller service: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred disabling controller service: {_http_error_detail(e)}") from e
 
     async def get_controller_service_types(self, user_request_id: str = "-", action_id: str = "-") -> List[Dict]:
         """Fetches the list of available controller service types from the NiFi instance."""
@@ -2776,8 +2820,8 @@ class NiFiClient:
             local_logger.error(f"Failed to get controller service types: {e.response.status_code} - {e.response.text}")
             raise ConnectionError(f"Failed to get controller service types: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
-            local_logger.error(f"Error getting controller service types: {e}")
-            raise ConnectionError(f"Error getting controller service types: {e}") from e
+            local_logger.error(f"Error getting controller service types: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting controller service types: {_http_error_detail(e)}") from e
         except Exception as e:
-            local_logger.error(f"An unexpected error occurred getting controller service types: {e}", exc_info=True)
-            raise ConnectionError(f"An unexpected error occurred getting controller service types: {e}") from e
+            local_logger.error(f"An unexpected error occurred getting controller service types: {_http_error_detail(e)}", exc_info=True)
+            raise ConnectionError(f"An unexpected error occurred getting controller service types: {_http_error_detail(e)}") from e

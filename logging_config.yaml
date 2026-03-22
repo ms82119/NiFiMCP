@@ -3,45 +3,45 @@ log_directory: "logs"
 interface_debug_enabled: true # Master toggle for interface JSON logs
 
 console:
-  level: "DEBUG"
+  level: "WARNING"
   format: "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <level>{message}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | <yellow>Req:{extra[user_request_id]}</yellow> | <blue>Act:{extra[action_id]}</blue>"
 
 client_file:
   enabled: true
   path: "{log_directory}/client.log"
-  level: "DEBUG"
+  level: "WARNING"
   rotation: null # Overwrite on start
   format: "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {message} | {name}:{function}:{line} | Req:{extra[user_request_id]} | Act:{extra[action_id]}"
 
 server_file:
   enabled: true
   path: "{log_directory}/server.log"
-  level: "DEBUG"
+  level: "WARNING"
   rotation: INFO # Overwrite on start
   format: "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {message} | {name}:{function}:{line} | Req:{extra[user_request_id]} | Act:{extra[action_id]}"
 
 # Interface Debug Logs (only active if interface_debug_enabled is true)
 llm_debug_file:
   path: "{log_directory}/llm_debug.log"
-  level: "DEBUG"
+  level: "WARNING"
   rotation: null # Overwrite on start
   # Format is handled by _serialize_record function in logging_setup.py
 
 mcp_debug_file:
   path: "{log_directory}/mcp_debug.log"
-  level: "DEBUG"
+  level: "WARNING"
   rotation: null # Overwrite on start
   # Format is handled by _serialize_record function in logging_setup.py
 
 nifi_debug_file:
   path: "{log_directory}/nifi_debug.log"
-  level: "DEBUG"
+  level: "WARNING"
   rotation: null # Overwrite on start
   # Format is handled by _serialize_record function in logging_setup.py
 
 # Workflow Debug Logs (dedicated workflow execution logging)
 workflow_debug_file:
   path: "{log_directory}/workflow.log"
-  level: "DEBUG"
+  level: "WARNING"
   rotation: null # Overwrite on start
   # Format is handled by _serialize_record function in logging_setup.py 

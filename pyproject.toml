@@ -32,6 +32,9 @@ dependencies = [
 [tool.setuptools]
 packages = ["config", "nifi_chat_ui", "nifi_mcp_client", "nifi_mcp_server"]
 
+[tool.setuptools.package-data]
+nifi_mcp_server = ["mcp_instructions.txt"]
+
 [tool.pytest.ini_options]
 # See tests/README.md for test organization guidelines
 markers = [

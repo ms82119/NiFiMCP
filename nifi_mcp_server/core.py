@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from loguru import logger
 # from dotenv import load_dotenv # Removed
 
@@ -10,10 +12,23 @@ from config.settings import get_nifi_server_config, get_nifi_servers # Added
 # Load .env file - REMOVED (Handled by config.settings)
 # load_dotenv()
 
+# Platform-neutral guidance for MCP clients that surface server instructions (GetInstructions).
+_MCP_INSTRUCTIONS_PATH = Path(__file__).resolve().parent / "mcp_instructions.txt"
+try:
+    _MCP_INSTRUCTIONS_TEXT = _MCP_INSTRUCTIONS_PATH.read_text(encoding="utf-8")
+except OSError as e:
+    _MCP_INSTRUCTIONS_TEXT = ""
+    logger.warning(
+        "Could not read MCP instructions from {}: {} — server instructions will be empty.",
+        _MCP_INSTRUCTIONS_PATH,
+        e,
+    )
+
 # Initialize FastMCP server
 # Shared instance for the application
 mcp = FastMCP(
     "nifi_controller",
+    instructions=_MCP_INSTRUCTIONS_TEXT or None,
     description="An MCP server to interact with Apache NiFi.",
     protocol_version="2024-09-01",  # Explicitly set protocol version
     type_validation_mode="compat",  # Use compatibility mode for type validation

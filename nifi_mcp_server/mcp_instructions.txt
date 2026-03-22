@@ -1,0 +1,14 @@
+You are using the NiFi MCP server to interact with Apache NiFi via tools. Follow these rules to stay reliable and efficient.
+
+ORCHESTRATION
+- When documenting an unknown flow: one call to get_flow_outline to see structure, then document_nifi_flow on the chosen root.
+- Full hierarchical documentation: use document_nifi_flow with include_child_groups=true and max_depth set for the flow depth (often 5–10). That is the primary path for "document this process group and everything under it."
+- If a tool returns continuation_token or completed=false, resume with the SAME tool and the token—do not parallelize retries.
+- Prefer ONE heavy read tool per user goal per turn. Do not call get_flow_outline, document_nifi_flow, and get_process_group_status in parallel for the same sweep; NiFi may hit transient connection/read errors under concurrent load.
+- get_process_group_status is heavy when include_child_groups=true. Use it when the user wants health, queues, or bulletins—typically as a separate step after documentation, unless they explicitly want both.
+
+STRATEGY
+- For large flows, you may document one subtree (one branch of the tree) before moving to sibling process groups to limit output size and stay coherent.
+
+LONG-FORM HELP
+- Repository docs: docs/MCP-Agent-Guide.md (agent orchestration; same ideas as this block in more detail).

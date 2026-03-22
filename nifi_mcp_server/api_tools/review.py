@@ -40,6 +40,17 @@ from ..request_context import current_nifi_client, current_request_logger # Adde
 from ..request_context import current_user_request_id, current_action_id # Added
 
 
+def _process_group_entity_id(entity: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Return process group entity id. NiFi may expose id at top level or only under component."""
+    if not entity:
+        return None
+    eid = entity.get("id")
+    if eid:
+        return eid
+    comp = entity.get("component") or {}
+    return comp.get("id")
+
+
 # --- Helper Functions (Now use context vars) --- 
 
 async def _get_process_group_name(pg_id: str) -> str:
@@ -282,7 +293,7 @@ async def _list_components_recursively_with_timeout(
             # Process children in parallel with timeout checks
             child_tasks = []
             for child_group_entity in child_groups:
-                child_id = child_group_entity.get('id')
+                child_id = _process_group_entity_id(child_group_entity)
                 if child_id and child_id not in processed_pgs:
                     # Check timeout before starting each child
                     if timeout_seconds and (time.time() - start_time) >= timeout_seconds:
@@ -378,7 +389,7 @@ async def _enrich_pg_hierarchy_with_boundary_ports(
     """
     node_id = node.get("id")
     node_name = node.get("name", "Unknown")
-    children_raw = node.get("child_process_groups", node.get("children", []))
+    children_raw = node.get("children") or node.get("child_process_groups") or []
     out = dict(node)
     out.pop("children", None)
     out["child_process_groups"] = []
@@ -506,7 +517,7 @@ async def _get_process_group_hierarchy_with_timeout(
         if child_groups_list:
             child_tasks = []
             for child_group_entity in child_groups_list:
-                child_id = child_group_entity.get('id')
+                child_id = _process_group_entity_id(child_group_entity)
                 child_component = child_group_entity.get('component', {})
                 child_name = child_component.get('name', f"Unnamed PG ({child_id})")
 
@@ -661,7 +672,11 @@ async def list_nifi_objects(
 ) -> Union[List[Dict], Dict]:
     """
     Lists NiFi objects or provides a hierarchy view for process groups within a specified scope.
-    
+
+    For a recursive process-group tree, this overlaps conceptually with get_flow_outline; pick one
+    for a map pass. Recursive calls with timeout_seconds can be heavy—avoid parallelizing with other
+    large readers for the same goal; resume with continuation_token if partial.
+
     Enhanced with timeout management, parallel processing, and partial results for large recursive operations.
     
     Performance Improvements:
@@ -753,7 +768,7 @@ async def list_nifi_objects(
                 results = []
                 if child_groups_response:
                     for child_group_entity in child_groups_response:
-                        child_id = child_group_entity.get('id')
+                        child_id = _process_group_entity_id(child_group_entity)
                         child_component = child_group_entity.get('component', {})
                         child_name = child_component.get('name', f"Unnamed PG ({child_id})")
                         if child_id:
@@ -1689,7 +1704,7 @@ async def _document_child_groups_recursive(
     children = await nifi_client.get_process_groups(pg_id)
     child_groups = []
     for child_entity in (children or []):
-        child_id = child_entity.get("id")
+        child_id = _process_group_entity_id(child_entity)
         if not child_id:
             continue
         child_doc = await _document_single_pg(child_id, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id)
@@ -1711,6 +1726,12 @@ async def document_nifi_flow(
     include_child_groups: bool = False,
 ) -> Dict[str, Any]:
     """
+    Primary tool for hierarchical flow documentation: processors, connections, and optional flow_summary.
+
+    For a whole subtree, use include_child_groups=True with max_depth set to your flow depth. Do not
+    invoke this in parallel with other heavy readers (e.g. get_flow_outline, get_process_group_status)
+    for the same sweep—prefer one heavy read per user goal.
+
     Analyzes and documents a NiFi flow starting from a given process group or processor.
 
     This tool extracts processor information with embedded connection details, providing
@@ -1938,7 +1959,8 @@ async def _enrich_outline_node(
     """Enrich a hierarchy node with depth, counts, and optionally boundary ports. Recurses into children."""
     node_id = node.get("id")
     node_name = node.get("name", "Unknown")
-    children_raw = node.get("children", node.get("child_process_groups", []))
+    # Prefer non-empty branch: hierarchy uses "children" for nested PGs; root uses "child_process_groups"
+    children_raw = node.get("children") or node.get("child_process_groups") or []
     out: Dict[str, Any] = {
         "id": node_id,
         "name": node_name,
@@ -1950,6 +1972,12 @@ async def _enrich_outline_node(
         out["counts"] = counts
     except Exception:
         out["counts"] = {}
+    # NiFi /flow sometimes omits child processGroups (e.g. root canvas) while hierarchy has them.
+    if not out.get("counts"):
+        out["counts"] = {}
+    _c = out["counts"]
+    if _c.get("process_groups", 0) == 0 and len(children_raw) > 0:
+        _c["process_groups"] = len(children_raw)
     if include_boundary_ports and depth <= max_depth_for_ports:
         try:
             input_ports = await nifi_client.get_input_ports(node_id)
@@ -1985,6 +2013,8 @@ async def get_flow_outline(
     Use this for outline-first exploration of large, deep flows: one call returns the PG hierarchy
     with component counts (and optionally input/output port names for the first levels). The LLM
     can then choose which PGs to document in detail via document_nifi_flow or get_process_group_status.
+    Do not combine with document_nifi_flow and get_process_group_status in the same assistant turn
+    for the same goal (sequential calls are fine).
 
     Args:
         process_group_id: The root process group ID. Defaults to root if None.
@@ -2265,7 +2295,7 @@ async def _add_child_groups_recursive(
     children = await nifi_client.get_process_groups(pg_id)
     child_groups = []
     for child_entity in (children or []):
-        child_id = child_entity.get("id")
+        child_id = _process_group_entity_id(child_entity)
         if not child_id:
             continue
         child_status = await _get_single_pg_status(nifi_client, child_id, include_bulletins, bulletin_limit, user_request_id, action_id)
@@ -2286,6 +2316,9 @@ async def get_process_group_status(
 ) -> Dict[str, Any]:
     """
     Provides a consolidated status overview of a process group.
+
+    Heavy when include_child_groups=True (many NiFi API calls). Prefer a separate step from full
+    documentation unless the user wants health, queues, and bulletins together with structure.
 
     Includes component state summaries, validation issues, connection queue sizes,
     a health verdict (healthy / errors / degraded), optional bulletin summary, and

@@ -67,40 +67,59 @@ For the latest updates and release notes, see the [GitHub Releases page](https:/
    Use the config.example.yaml as your guide for format and structure
    Note that the LLM API keys are only needed if you are using the built-in client
 
-## Using the NiFi MCP Server in Cursor IDE or other MCP clients
+## Using the NiFi MCP server (stdio, any MCP client)
 
-You can use the same NiFi MCP tools directly in Cursor (or other MCP clients) over **stdio**, without running the REST server or chat UI. The project includes a stdio entrypoint and a Cursor MCP config.
+You can use the NiFi MCP tools from **any MCP-capable client** over **stdio**, without running the REST server or chat UI. Configure your host to run the server from the **repository root** with at least one NiFi server in `config.yaml`.
 
-- **Setup**: Open this project in Cursor; the `.cursor/mcp.json` config will start the NiFi MCP server when Cursor connects. Ensure at least one NiFi server is configured in `config.yaml`.
-- **Server selection**: Set the `NIFI_SERVER_ID` environment variable in the MCP config to a server id from `config.yaml`, or leave it unset to use the first configured server.
-- **Details**: See [Cursor MCP Setup](./docs/Cursor-MCP-Setup.md).  
+**Portable entrypoint** (after `uv sync`):
+
+```json
+{
+  "command": "uv",
+  "args": ["run", "python", "-m", "nifi_mcp_server.stdio_server"],
+  "env": {}
+}
+```
+
+Optional: set `NIFI_SERVER_ID` in `env` to an `id` from `config.yaml`; if omitted, the first server in that file is used.
+
+- **Full setup** (working directory, `python` without `uv`, JSON examples): [MCP stdio setup](./docs/MCP-stdio-setup.md)
+- **Agent / LLM behavior** (any client): [MCP Agent Guide](./docs/MCP-Agent-Guide.md)
+- **Cursor only** (`.cursor/mcp.json`, reload): [Cursor MCP Setup](./docs/Cursor-MCP-Setup.md)
 
 
 ## Using the Built-In Chat Bot
 
-**Run the MCP Server:**
-   Start the MCP server with:
+You need **two separate terminal processes** (two different Python apps). The **browser** is the only “client”—open the chat URL once; do **not** start a second copy of `api.main` on the same port.
+
+| Process | App | Port (example) | Role |
+|--------|-----|----------------|------|
+| 1 | `nifi_mcp_server.server:app` | **8000** or **8001** | MCP / NiFi backend (REST + tools the UI calls) |
+| 2 | `api.main:app` | **3000** or **3001** | Serves the chat web UI and talks to process 1 |
+
+`MCP_SERVER_PORT` must match the port process **1** listens on (it tells process **2** where to find the MCP server).
+
+**1. MCP backend (run first):**
    ```bash
    uvicorn nifi_mcp_server.server:app --reload --port 8000
    ```
-   If port 8000 is in use, set `MCP_SERVER_PORT` and use the same value for `--port` (and for the chat UI, see step 7):
+   If port 8000 is in use, pick another port and set `MCP_SERVER_PORT` to the same value:
    ```bash
    MCP_SERVER_PORT=8001 uvicorn nifi_mcp_server.server:app --reload --port 8001
    ```
 
-
-**Run the FastAPI Client:**
-   Start the FastAPI client with:
+**2. Chat UI web server (second terminal):**
    ```bash
    uvicorn api.main:app --reload --port 3000
    ```
-   If you ran the MCP server on a different port (e.g. 8001), set the same port for the chat UI so it can reach the API:
+   If the MCP server uses 8001, point the UI at it:
    ```bash
    MCP_SERVER_PORT=8001 uvicorn api.main:app --reload --port 3000
    ```
+   You may use another UI port (e.g. `--port 3001`) if 3000 is busy; **only one** `api.main` process may use that port.
 
-**Access the Application:**
-   Open your browser and navigate to: `http://localhost:3000`
+**3. Open in a browser:**  
+   `http://localhost:3000` (or whatever port you chose for `api.main`, e.g. `http://localhost:3001`).
 
 
 ## Usage Tips

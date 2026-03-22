@@ -1,6 +1,7 @@
 import sys
 import json
 import re
+import logging
 from pathlib import Path
 from loguru import logger
 from contextvars import ContextVar
@@ -361,6 +362,23 @@ Progress: {extra[progress_message]}
                     backtrace=False,  # Disable backtrace for cleaner logs
                     diagnose=False # Disable traceback to avoid recursion issues
                 )
+
+    # stdlib loggers (not controlled by Loguru): httpx, MCP SDK, etc.
+    # Cursor MCP often shows these on the [error] channel regardless of level.
+    _stdlib_noisy = (
+        "httpx",
+        "httpcore",
+        "httpcore.connection",
+        "httpcore.http11",
+        "httpcore.http2",
+        "mcp",
+        "mcp.server",
+        "mcp.server.lowlevel",
+        "mcp.server.stdio",
+        "mcp.server.fastmcp",
+    )
+    for _name in _stdlib_noisy:
+        logging.getLogger(_name).setLevel(logging.WARNING)
 
     # Log configuration completion only if context was provided
     if context:
