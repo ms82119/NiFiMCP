@@ -7,6 +7,10 @@ nifi:
       username: "" # Optional: Username for NiFi basic auth
       password: "" # Optional: Password for NiFi basic auth - DO NOT COMMIT REAL PASSWORDS
       tls_verify: false # Set to true for valid certs, false for self-signed (dev only)
+      # mTLS client-cert auth (no token/browser; for cert-secured NiFi). Uncomment to use:
+      # client_cert: "certs/nifi-mcp-client.crt"  # PEM client certificate
+      # client_key: "certs/nifi-mcp-client.key"   # PEM private key
+      # host_header: "nifi.internal.example.com"  # only needed via localhost/port-forward (SNI/Host override)
     # Add more NiFi server configurations here as needed
     # - id: "nifi-dev-example"
     #   name: "Development NiFi Example"
