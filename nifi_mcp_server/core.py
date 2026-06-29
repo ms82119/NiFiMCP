@@ -108,7 +108,10 @@ async def get_nifi_client(server_id: str, bound_logger = logger) -> NiFiClient:
         username=server_conf.get('username'),  # May be None
         password=server_conf.get('password'),  # May be None
         tls_verify=server_conf.get('tls_verify', True),
-        credential_callback=credential_callback
+        credential_callback=credential_callback,
+        client_cert=server_conf.get('client_cert'),
+        client_key=server_conf.get('client_key'),
+        host_header=server_conf.get('host_header'),
     )
     bound_logger.debug(f"Instantiated NiFiClient for {server_conf.get('url')}")
 
@@ -154,6 +157,9 @@ async def create_nifi_client(server_id: str, bound_logger = logger) -> NiFiClien
         tls_verify=server_conf.get("tls_verify", True),
         credential_callback=credential_callback,
         server_id=server_id,
+        client_cert=server_conf.get("client_cert"),
+        client_key=server_conf.get("client_key"),
+        host_header=server_conf.get("host_header"),
     )
     bound_logger.debug(f"Instantiated un-authenticated NiFiClient for {server_conf.get('url')}")
     return client

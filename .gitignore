@@ -13,6 +13,7 @@ docs/plans/
 docs/libdocs/
 chat_history.db
 nifi_tokens.json
+certs/
 nifi_chat_ui/system_prompt copy 2.md
 .cursor/plans/
 .pytest_cache/

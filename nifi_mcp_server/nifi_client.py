@@ -55,9 +55,11 @@ class AuthParams:
 class NiFiClient:
     """A simple asynchronous client for the NiFi REST API."""
 
-    def __init__(self, base_url: str, username: Optional[str] = None, password: Optional[str] = None, 
+    def __init__(self, base_url: str, username: Optional[str] = None, password: Optional[str] = None,
                  tls_verify: bool = True, credential_callback: Optional[Callable[[str], Awaitable[Tuple[str, str]]]] = None,
-                 server_id: Optional[str] = None):
+                 server_id: Optional[str] = None,
+                 client_cert: Optional[str] = None, client_key: Optional[str] = None,
+                 host_header: Optional[str] = None):
         """Initializes the NiFiClient.
 
         Args:
@@ -74,6 +76,13 @@ class NiFiClient:
         self.username = username
         self.password = password
         self.tls_verify = tls_verify
+        # mTLS client-cert auth: when both are set, identity comes from the TLS cert
+        # (no token/login). host_header overrides the Host header when connecting via
+        # localhost/port-forward so NiFi's proxy-host whitelist is satisfied.
+        self.client_cert = client_cert
+        self.client_key = client_key
+        self.host_header = host_header
+        self._cert_mode = bool(client_cert and client_key)
         self.credential_callback = credential_callback
         self._client = None
         self._token = None
@@ -88,8 +97,8 @@ class NiFiClient:
 
     @property
     def is_authenticated(self) -> bool:
-        """Checks if the client currently holds an authentication token."""
-        return self._token is not None
+        """Cert-mode needs no token; otherwise a bearer token must be present."""
+        return self._cert_mode or self._token is not None
 
     async def _ensure_authenticated(self) -> None:
         """Authenticate on-demand when the token is missing.
@@ -97,6 +106,8 @@ class NiFiClient:
         This allows the MCP stdio server to start without making any network calls,
         and only connect/authenticate on the first actual NiFi API operation.
         """
+        if self._cert_mode:
+            return  # TLS client cert is the identity; no token needed
         if self._token is not None:
             return
         await self.authenticate(server_id=self._server_id)
@@ -112,7 +123,11 @@ class NiFiClient:
 
         headers = {}
         cookies = {}
-        if self._token:
+        if self._cert_mode:
+            # Identity is the TLS client cert — no Authorization header / cookie.
+            if self.host_header:
+                headers["Host"] = self.host_header
+        elif self._token:
             headers["Authorization"] = f"Bearer {self._token}"
             # Only send cookie for OIDC tokens. NiFi 1.x username/password auth uses /access/token;
             # sending __Secure-Authorization-Bearer can cause 403 on mutate operations when NiFi
@@ -120,13 +135,17 @@ class NiFiClient:
             if self._token_from_oidc:
                 cookies["__Secure-Authorization-Bearer"] = self._token
 
-        self._client = httpx.AsyncClient(
+        client_kwargs = dict(
             base_url=self.base_url,
             verify=self.tls_verify,
             headers=headers,
             cookies=cookies if cookies else None,
-            timeout=30.0 # Keep timeout
+            timeout=30.0,  # Keep timeout
         )
+        if self._cert_mode:
+            client_kwargs["cert"] = (self.client_cert, self.client_key)
+
+        self._client = httpx.AsyncClient(**client_kwargs)
         return self._client
 
     async def get_authentication_config(self) -> Dict[str, Any]:
@@ -296,6 +315,32 @@ class NiFiClient:
         Args:
             server_id: Optional server ID for credential callback context.
         """
+        # Prefer an explicitly provided access token (e.g. a JWT placed in the
+        # token store) when no username/password is configured. This lets a bearer
+        # token work even when the server does not advertise externalLoginRequired
+        # (e.g. cert-secured / mTLS servers), without overriding an explicit
+        # username/password config, which keeps its prior precedence (the OIDC
+        # branch below still handles stored tokens for externalLoginRequired servers).
+        username_password_configured = bool((self.username or "").strip() and (self.password or ""))
+        if server_id and not username_password_configured:
+            from nifi_mcp_server.token_store import get_token
+            stored_token = get_token(server_id)
+            if stored_token:
+                token = stored_token.strip()
+                if len(token.split('.')) != 3:
+                    logger.warning(
+                        f"Stored token for {server_id} is not JWT-shaped; using as-is"
+                    )
+                self._token = token
+                self._token_from_oidc = True
+                if self._client:
+                    await self._client.aclose()
+                self._client = None
+                logger.info(
+                    f"Using stored access token for server {server_id} (length: {len(token)})"
+                )
+                return
+
         # Get authentication configuration
         auth_config = await self.get_authentication_config()
         auth_config_data = auth_config.get("authenticationConfiguration", {})
