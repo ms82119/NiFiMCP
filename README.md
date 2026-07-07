@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/ms82119-nifimcp-badge.png)](https://mseep.ai/app/ms82119-nifimcp)
+
 ## NiFi MCP (Model Context Protocol)
 
 This repository contains the NiFi MCP project. It can be used in two ways, either:
