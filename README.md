@@ -131,3 +131,7 @@ For detailed usage information, tips, and UI features, see the [Usage Guide](./d
 ## Running Automated Tests
 
 For comprehensive testing information and examples, see the [Testing Guide](./tests/README.md).
+
+## License
+
+This project is licensed under the [Apache License 2.0](./LICENSE).
