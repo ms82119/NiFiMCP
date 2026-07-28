@@ -7,7 +7,7 @@ from loguru import logger
 from ..core import mcp, handle_nifi_errors, _get_component_details_direct
 # Removed nifi_api_client import
 # Import context variables
-from ..request_context import current_nifi_client, current_request_logger # Added
+from ..request_context import current_nifi_client, current_request_logger, current_user_request_id, current_action_id # Added
 from config import settings as mcp_settings # Corrected import
 
 from .utils import (
@@ -2243,5 +2243,75 @@ async def layout_nifi_process_group(
         "updated": updated,
         "errors": errors if errors else None,
     }
+
+
+@mcp.tool()
+@tool_phases(["Modify", "Build"])
+async def set_nifi_process_group_parameter_context(
+    process_group_id: str,
+    parameter_context_id: Optional[str] = None,
+    parameter_context_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Assign a parameter context to a process group, or clear the assignment.
+
+    Provide either parameter_context_id or parameter_context_name (must be unique).
+    Pass neither (both null) to clear the process group's parameter context.
+
+    Useful after creating controller services that reference #{PARAM} values so the
+    process group can resolve them (e.g. #{ES_PASSWORD}).
+    """
+    nifi_client: Optional[NiFiClient] = current_nifi_client.get()
+    local_logger = current_request_logger.get() or logger
+    if not nifi_client:
+        raise ToolError("NiFi client not found in context.")
+
+    user_request_id = current_user_request_id.get() or "-"
+    action_id = current_action_id.get() or "-"
+
+    if parameter_context_id and parameter_context_name:
+        raise ToolError(
+            "Provide either parameter_context_id or parameter_context_name, not both."
+        )
+
+    target_id = parameter_context_id
+    if parameter_context_name:
+        contexts = await nifi_client.list_parameter_contexts(
+            user_request_id=user_request_id, action_id=action_id
+        )
+        matches = [c for c in contexts if c.get("name") == parameter_context_name]
+        if not matches:
+            names = sorted(c.get("name") for c in contexts if c.get("name"))
+            raise ToolError(
+                f"Parameter context '{parameter_context_name}' not found. "
+                f"Available: {names[:30]}{'...' if len(names) > 30 else ''}"
+            )
+        if len(matches) > 1:
+            raise ToolError(
+                f"Ambiguous parameter context name '{parameter_context_name}'. "
+                "Use parameter_context_id instead."
+            )
+        target_id = matches[0].get("id")
+        if not target_id:
+            raise ToolError(
+                f"Parameter context '{parameter_context_name}' has no id."
+            )
+
+    try:
+        result = await nifi_client.set_process_group_parameter_context(
+            process_group_id=process_group_id,
+            parameter_context_id=target_id,
+            user_request_id=user_request_id,
+            action_id=action_id,
+        )
+        local_logger.info(
+            f"Set parameter context of PG {process_group_id} to {target_id!r}"
+        )
+        return {"status": "success", **result}
+    except ToolError:
+        raise
+    except Exception as e:
+        local_logger.error(f"set_nifi_process_group_parameter_context failed: {e}")
+        raise ToolError(str(e)) from e
 
 

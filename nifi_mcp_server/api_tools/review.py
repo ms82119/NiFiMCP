@@ -32,6 +32,8 @@ from nifi_mcp_server.flow_documenter_improved import (
     identify_flow_paths,
     resolve_port_connections,
     build_cross_pg_flow_map,
+    apply_profile_to_documentation,
+    OUTPUT_PROFILES,
 )
 
 # Import context variables
@@ -1558,9 +1560,12 @@ async def _document_single_pg(
     include_descriptions: bool,
     user_request_id: str,
     action_id: str,
+    output_profile: str = "doc_optimized",
 ) -> Dict[str, Any]:
     """Document one process group: fetch components, run simplified doc, optionally add flow_summary. Returns dict with process_group_id, process_group_name, documentation."""
     local_logger = current_request_logger.get() or logger
+    profile = OUTPUT_PROFILES.get(output_profile, OUTPUT_PROFILES["doc_optimized"])
+    effective_include_properties = include_properties and profile.get("include_properties", True)
     processors_list = await nifi_client.list_processors(pg_id, user_request_id=user_request_id, action_id=action_id)
     connections_list = await nifi_client.list_connections(pg_id, user_request_id=user_request_id, action_id=action_id)
     input_ports_list = await nifi_client.get_input_ports(pg_id)
@@ -1570,12 +1575,13 @@ async def _document_single_pg(
         connections=connections_list or [],
         input_ports=input_ports_list or [],
         output_ports=output_ports_list or [],
-        include_properties=include_properties,
+        include_properties=effective_include_properties,
         include_descriptions=include_descriptions,
         nifi_client=nifi_client,
         user_request_id=user_request_id,
         action_id=action_id,
     )
+    documentation = apply_profile_to_documentation(documentation, output_profile)
     if include_flow_summary:
         processors_list = processors_list or []
         connections_list = connections_list or []
@@ -1694,6 +1700,7 @@ async def _document_child_groups_recursive(
     user_request_id: str,
     action_id: str,
     depth_left: int,
+    output_profile: str = "doc_optimized",
 ) -> Dict[str, Any]:
     """Add child_groups to a document result by recursing into child PGs up to depth_left."""
     if depth_left <= 0:
@@ -1707,8 +1714,15 @@ async def _document_child_groups_recursive(
         child_id = _process_group_entity_id(child_entity)
         if not child_id:
             continue
-        child_doc = await _document_single_pg(child_id, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id)
-        child_doc = await _document_child_groups_recursive(child_doc, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id, depth_left - 1)
+        child_doc = await _document_single_pg(
+            child_id, nifi_client, include_flow_summary, include_properties,
+            include_descriptions, user_request_id, action_id, output_profile=output_profile,
+        )
+        child_doc = await _document_child_groups_recursive(
+            child_doc, nifi_client, include_flow_summary, include_properties,
+            include_descriptions, user_request_id, action_id, depth_left - 1,
+            output_profile=output_profile,
+        )
         child_groups.append(child_doc)
     doc_dict["child_groups"] = child_groups
     return doc_dict
@@ -1724,6 +1738,7 @@ async def document_nifi_flow(
     include_descriptions: bool = True,
     include_flow_summary: bool = True,
     include_child_groups: bool = False,
+    output_profile: Literal["full", "summary", "doc_optimized"] = "doc_optimized",
 ) -> Dict[str, Any]:
     """
     Primary tool for hierarchical flow documentation: processors, connections, and optional flow_summary.
@@ -1751,7 +1766,8 @@ async def document_nifi_flow(
     max_depth : int, optional
         When include_child_groups is True, maximum depth of child process groups to document (default 10). Ignored when include_child_groups is False.
     include_properties : bool, optional
-        Whether to include important processor properties in the documentation. Defaults to True.
+        Whether to include processor properties in the documentation. Defaults to True.
+        May still be suppressed by output_profile=summary.
     include_descriptions : bool, optional
         Whether to include processor and connection descriptions/comments (if available). Defaults to True.
     include_flow_summary : bool, optional
@@ -1759,6 +1775,9 @@ async def document_nifi_flow(
         decision_branches, flow_paths, boundary_ports, cross_pg_connections, cross_pg_flow_map.
     include_child_groups : bool, optional
         When True, document descendant process groups and attach as child_groups (nested). Default False.
+    output_profile : Literal["full", "summary", "doc_optimized"], optional
+        Token/verbosity profile. Default doc_optimized truncates long property values (scripts, queries)
+        and omits status noise. Use full only when debugging a specific processor; summary omits properties.
 
     Returns
     -------
@@ -1789,7 +1808,10 @@ async def document_nifi_flow(
     user_request_id = current_user_request_id.get() or "-"
     action_id = current_action_id.get() or "-"
     
-    local_logger.info(f"Starting NiFi flow documentation. PG: {process_group_id}, Start Proc: {starting_processor_id}, include_child_groups: {include_child_groups}, max_depth: {max_depth}")
+    local_logger.info(
+        f"Starting NiFi flow documentation. PG: {process_group_id}, Start Proc: {starting_processor_id}, "
+        f"include_child_groups: {include_child_groups}, max_depth: {max_depth}, output_profile: {output_profile}"
+    )
 
     try:
         pg_id = process_group_id
@@ -1809,9 +1831,15 @@ async def document_nifi_flow(
         if not pg_id:
             raise ToolError("Failed to determine a target process group ID for documentation.")
 
-        root = await _document_single_pg(pg_id, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id)
+        root = await _document_single_pg(
+            pg_id, nifi_client, include_flow_summary, include_properties, include_descriptions,
+            user_request_id, action_id, output_profile=output_profile,
+        )
         if include_child_groups and max_depth > 0:
-            root = await _document_child_groups_recursive(root, nifi_client, include_flow_summary, include_properties, include_descriptions, user_request_id, action_id, max_depth)
+            root = await _document_child_groups_recursive(
+                root, nifi_client, include_flow_summary, include_properties, include_descriptions,
+                user_request_id, action_id, max_depth, output_profile=output_profile,
+            )
 
         local_logger.info("Flow documentation analysis complete.")
         return {
@@ -1820,6 +1848,7 @@ async def document_nifi_flow(
             "process_group_name": root["process_group_name"],
             "documentation": root["documentation"],
             "child_groups": root.get("child_groups", []),
+            "output_profile": output_profile,
         }
 
     except NiFiAuthenticationError as e:
@@ -3098,3 +3127,54 @@ async def get_processor_event_diff(
         "component_name": chosen_event.get("componentName"),
         "event_details": event_details,
     }
+
+
+@mcp.tool()
+@tool_phases(["Review", "Build", "Modify", "Operate"])
+async def list_nifi_parameter_contexts() -> Dict[str, Any]:
+    """
+    List all NiFi parameter contexts (id, name, inherited context names, parameter counts).
+
+    Does not return parameter values (including sensitive ones). Use
+    get_nifi_process_group_parameter_context for a redacted view of one PG's assigned context.
+    """
+    nifi_client: Optional[NiFiClient] = current_nifi_client.get()
+    local_logger = current_request_logger.get() or logger
+    if not nifi_client:
+        raise ToolError("NiFi client not found in context.")
+    user_request_id = current_user_request_id.get() or "-"
+    action_id = current_action_id.get() or "-"
+    contexts = await nifi_client.list_parameter_contexts(
+        user_request_id=user_request_id, action_id=action_id
+    )
+    local_logger.info(f"list_nifi_parameter_contexts returned {len(contexts)} contexts")
+    return {"status": "success", "parameter_contexts": contexts}
+
+
+@mcp.tool()
+@tool_phases(["Review", "Build", "Modify", "Operate"])
+async def get_nifi_process_group_parameter_context(
+    process_group_id: str,
+) -> Dict[str, Any]:
+    """
+    Get the parameter context assigned to a process group.
+
+    Sensitive parameter values are redacted (value=null, sensitive=true).
+    Returns parameter_context=null when the process group has no context assigned.
+    """
+    nifi_client: Optional[NiFiClient] = current_nifi_client.get()
+    local_logger = current_request_logger.get() or logger
+    if not nifi_client:
+        raise ToolError("NiFi client not found in context.")
+    user_request_id = current_user_request_id.get() or "-"
+    action_id = current_action_id.get() or "-"
+    try:
+        summary = await nifi_client.get_process_group_parameter_context_summary(
+            process_group_id,
+            user_request_id=user_request_id,
+            action_id=action_id,
+        )
+        return {"status": "success", **summary}
+    except (ToolError, ValueError, ConnectionError) as e:
+        local_logger.error(f"get_nifi_process_group_parameter_context failed: {e}")
+        raise ToolError(str(e)) from e

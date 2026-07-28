@@ -1130,6 +1130,172 @@ class NiFiClient:
             local_logger.error(f"An unexpected error occurred getting parameter context for PG {process_group_id}: {_http_error_detail(e)}", exc_info=True)
             raise ToolError(f"An unexpected error occurred getting parameter context: {_http_error_detail(e)}") from e
 
+    async def list_parameter_contexts(self, user_request_id: str = "-", action_id: str = "-") -> list:
+        """List all parameter contexts (id, name, inherited context names). Does not return parameter values."""
+        local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
+        if not self._token:
+            await self._ensure_authenticated()
+        client = await self._get_client()
+        endpoint = "/flow/parameter-contexts"
+        local_logger.info(f"Listing parameter contexts from {self.base_url}{endpoint}")
+        try:
+            response = await client.get(endpoint)
+            response.raise_for_status()
+            data = response.json()
+            results = []
+            for pc in data.get("parameterContexts", []):
+                component = pc.get("component") or {}
+                inherited = []
+                for inh in component.get("inheritedParameterContexts") or []:
+                    inh_comp = inh.get("component") or {}
+                    inherited.append({
+                        "id": inh.get("id") or inh_comp.get("id"),
+                        "name": inh_comp.get("name") or inh.get("name"),
+                    })
+                results.append({
+                    "id": pc.get("id") or component.get("id"),
+                    "name": component.get("name"),
+                    "inherited_parameter_contexts": inherited,
+                    "parameter_count": len(component.get("parameters") or []),
+                })
+            local_logger.info(f"Found {len(results)} parameter contexts")
+            return results
+        except NiFiAuthenticationError as e:
+            raise ToolError(f"Authentication error listing parameter contexts.") from e
+        except httpx.HTTPStatusError as e:
+            local_logger.error(f"Failed to list parameter contexts: {e.response.status_code} - {e.response.text}")
+            raise ToolError(f"Failed to list parameter contexts: {e.response.status_code}") from e
+        except Exception as e:
+            local_logger.error(f"Error listing parameter contexts: {_http_error_detail(e)}", exc_info=True)
+            raise ToolError(f"Error listing parameter contexts: {_http_error_detail(e)}") from e
+
+    async def get_process_group_parameter_context_summary(
+        self, process_group_id: str, user_request_id: str = "-", action_id: str = "-"
+    ) -> dict:
+        """
+        Return the parameter context assigned to a process group, with sensitive values redacted.
+        """
+        local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
+        pg_details = await self.get_process_group_details(
+            process_group_id, user_request_id=user_request_id, action_id=action_id
+        )
+        pc_ref = (pg_details.get("component") or {}).get("parameterContext")
+        if not pc_ref or not pc_ref.get("id"):
+            return {
+                "process_group_id": process_group_id,
+                "process_group_name": (pg_details.get("component") or {}).get("name"),
+                "parameter_context": None,
+                "parameters": [],
+            }
+
+        param_context_id = pc_ref["id"]
+        client = await self._get_client()
+        endpoint = f"/parameter-contexts/{param_context_id}?includeInheritedParameters=true"
+        response = await client.get(endpoint)
+        response.raise_for_status()
+        data = response.json()
+        component = data.get("component") or {}
+        parameters = []
+        for item in component.get("parameters") or []:
+            param = item.get("parameter") or item
+            sensitive = bool(param.get("sensitive"))
+            parameters.append({
+                "name": param.get("name"),
+                "sensitive": sensitive,
+                "value": None if sensitive else param.get("value"),
+                "provided": param.get("provided"),
+                "description": param.get("description"),
+            })
+        inherited = []
+        for inh in component.get("inheritedParameterContexts") or []:
+            inh_comp = inh.get("component") or {}
+            inherited.append({
+                "id": inh.get("id") or inh_comp.get("id"),
+                "name": inh_comp.get("name") or inh.get("name"),
+            })
+        local_logger.info(
+            f"Parameter context {param_context_id} for PG {process_group_id}: {len(parameters)} params (sensitive redacted)"
+        )
+        return {
+            "process_group_id": process_group_id,
+            "process_group_name": (pg_details.get("component") or {}).get("name"),
+            "parameter_context": {
+                "id": param_context_id,
+                "name": component.get("name") or (pc_ref.get("component") or {}).get("name"),
+                "inherited_parameter_contexts": inherited,
+            },
+            "parameters": parameters,
+        }
+
+    async def set_process_group_parameter_context(
+        self,
+        process_group_id: str,
+        parameter_context_id: Optional[str] = None,
+        user_request_id: str = "-",
+        action_id: str = "-",
+    ) -> dict:
+        """
+        Assign a parameter context to a process group, or clear it when parameter_context_id is None.
+        """
+        local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
+        if not self._token:
+            await self._ensure_authenticated()
+        pg = await self.get_process_group_details(
+            process_group_id, user_request_id=user_request_id, action_id=action_id
+        )
+        component = pg.get("component") or {}
+        payload = {
+            "revision": pg.get("revision"),
+            "disconnectedNodeAcknowledged": True,
+            "component": {
+                "id": component.get("id") or process_group_id,
+                "name": component.get("name"),
+                "position": component.get("position"),
+                "parameterContext": (
+                    {"id": parameter_context_id} if parameter_context_id else None
+                ),
+            },
+        }
+        client = await self._get_client()
+        endpoint = f"/process-groups/{process_group_id}"
+        local_logger.info(
+            f"Setting parameter context of PG {process_group_id} to {parameter_context_id!r}"
+        )
+        try:
+            response = await client.put(endpoint, json=payload)
+            response.raise_for_status()
+            updated = response.json()
+            assigned = (updated.get("component") or {}).get("parameterContext")
+            return {
+                "process_group_id": process_group_id,
+                "process_group_name": (updated.get("component") or {}).get("name"),
+                "parameter_context": (
+                    {
+                        "id": assigned.get("id"),
+                        "name": (assigned.get("component") or {}).get("name"),
+                    }
+                    if assigned
+                    else None
+                ),
+                "revision": updated.get("revision"),
+            }
+        except httpx.HTTPStatusError as e:
+            local_logger.error(
+                f"Failed to set parameter context for PG {process_group_id}: "
+                f"{e.response.status_code} - {e.response.text}"
+            )
+            raise ToolError(
+                f"Failed to set parameter context: {e.response.status_code}"
+            ) from e
+        except Exception as e:
+            local_logger.error(
+                f"Error setting parameter context for PG {process_group_id}: {_http_error_detail(e)}",
+                exc_info=True,
+            )
+            raise ToolError(
+                f"Error setting parameter context: {_http_error_detail(e)}"
+            ) from e
+
     async def get_input_ports(self, process_group_id: str) -> list[dict]:
         """Lists input ports within a specified process group."""
         if not self._token:
@@ -2825,3 +2991,267 @@ class NiFiClient:
         except Exception as e:
             local_logger.error(f"An unexpected error occurred getting controller service types: {_http_error_detail(e)}", exc_info=True)
             raise ConnectionError(f"An unexpected error occurred getting controller service types: {_http_error_detail(e)}") from e
+
+    async def upload_process_group_from_flow_definition(
+        self,
+        parent_process_group_id: str,
+        flow_definition: Union[Dict[str, Any], bytes, str],
+        group_name: str,
+        position_x: float = 0.0,
+        position_y: float = 0.0,
+        user_request_id: str = "-",
+        action_id: str = "-",
+    ) -> dict:
+        """Upload a versioned flow definition JSON as a new child process group (UI 'Upload flow definition').
+
+        POST /process-groups/{parent}/process-groups/upload (multipart/form-data).
+        """
+        local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
+        if not self._token:
+            await self._ensure_authenticated()
+
+        if isinstance(flow_definition, dict):
+            file_bytes = json.dumps(flow_definition).encode("utf-8")
+        elif isinstance(flow_definition, str):
+            file_bytes = flow_definition.encode("utf-8")
+        else:
+            file_bytes = flow_definition
+
+        client = await self._get_client()
+        endpoint = f"/process-groups/{parent_process_group_id}/process-groups/upload"
+        data = {
+            "groupName": group_name,
+            "positionX": str(position_x),
+            "positionY": str(position_y),
+            "clientId": self._client_id,
+            "disconnectedNodeAcknowledged": "false",
+        }
+        files = {"file": ("flow.json", file_bytes, "application/json")}
+        try:
+            local_logger.info(
+                f"Uploading flow definition as process group '{group_name}' under parent {parent_process_group_id}"
+            )
+            response = await client.post(endpoint, data=data, files=files)
+            response.raise_for_status()
+            created = response.json()
+            local_logger.info(f"Uploaded process group '{group_name}' with ID: {created.get('id')}")
+            return created
+        except httpx.HTTPStatusError as e:
+            local_logger.error(
+                f"Failed to upload flow definition: {e.response.status_code} - {e.response.text}"
+            )
+            raise ConnectionError(
+                f"Failed to upload flow definition: {e.response.status_code}, {e.response.text}"
+            ) from e
+        except (httpx.RequestError, ValueError) as e:
+            local_logger.error(f"Error uploading flow definition: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error uploading flow definition: {_http_error_detail(e)}") from e
+        except Exception as e:
+            local_logger.error(
+                f"An unexpected error uploading flow definition: {_http_error_detail(e)}",
+                exc_info=True,
+            )
+            raise ConnectionError(
+                f"An unexpected error uploading flow definition: {_http_error_detail(e)}"
+            ) from e
+
+    async def initiate_process_group_replace(
+        self,
+        process_group_id: str,
+        versioned_flow_snapshot: Dict[str, Any],
+        process_group_revision: Optional[Dict[str, Any]] = None,
+        user_request_id: str = "-",
+        action_id: str = "-",
+    ) -> dict:
+        """Start an async replace of a process group's contents with a versioned flow snapshot.
+
+        POST /process-groups/{id}/replace-requests
+        Returns ProcessGroupReplaceRequestEntity (poll via get_process_group_replace_request).
+        """
+        local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
+        if not self._token:
+            await self._ensure_authenticated()
+
+        if process_group_revision is None:
+            details = await self.get_process_group_details(
+                process_group_id, user_request_id=user_request_id, action_id=action_id
+            )
+            process_group_revision = details.get("revision") or {}
+
+        revision = {
+            "clientId": process_group_revision.get("clientId") or self._client_id,
+            "version": process_group_revision.get("version", 0),
+        }
+        body = {
+            "processGroupRevision": revision,
+            "disconnectedNodeAcknowledged": False,
+            "versionedFlowSnapshot": versioned_flow_snapshot,
+        }
+        client = await self._get_client()
+        endpoint = f"/process-groups/{process_group_id}/replace-requests"
+        try:
+            local_logger.info(f"Initiating replace request for process group {process_group_id}")
+            response = await client.post(endpoint, json=body)
+            response.raise_for_status()
+            result = response.json()
+            req = (result or {}).get("request") or {}
+            local_logger.info(
+                f"Replace request started: requestId={req.get('requestId')} state={req.get('state')}"
+            )
+            return result
+        except httpx.HTTPStatusError as e:
+            local_logger.error(
+                f"Failed to initiate process group replace: {e.response.status_code} - {e.response.text}"
+            )
+            raise ConnectionError(
+                f"Failed to initiate process group replace: {e.response.status_code}, {e.response.text}"
+            ) from e
+        except (httpx.RequestError, ValueError) as e:
+            local_logger.error(f"Error initiating process group replace: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error initiating process group replace: {_http_error_detail(e)}") from e
+        except Exception as e:
+            local_logger.error(
+                f"An unexpected error initiating process group replace: {_http_error_detail(e)}",
+                exc_info=True,
+            )
+            raise ConnectionError(
+                f"An unexpected error initiating process group replace: {_http_error_detail(e)}"
+            ) from e
+
+    async def get_process_group_replace_request(
+        self,
+        request_id: str,
+        user_request_id: str = "-",
+        action_id: str = "-",
+    ) -> dict:
+        """GET /process-groups/replace-requests/{requestId}."""
+        local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
+        if not self._token:
+            await self._ensure_authenticated()
+        client = await self._get_client()
+        endpoint = f"/process-groups/replace-requests/{request_id}"
+        try:
+            response = await client.get(endpoint)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            local_logger.error(
+                f"Failed to get replace request {request_id}: {e.response.status_code} - {e.response.text}"
+            )
+            raise ConnectionError(
+                f"Failed to get replace request: {e.response.status_code}, {e.response.text}"
+            ) from e
+        except (httpx.RequestError, ValueError) as e:
+            local_logger.error(f"Error getting replace request {request_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error getting replace request: {_http_error_detail(e)}") from e
+
+    async def delete_process_group_replace_request(
+        self,
+        request_id: str,
+        user_request_id: str = "-",
+        action_id: str = "-",
+    ) -> dict:
+        """DELETE /process-groups/replace-requests/{requestId} (cleanup after complete)."""
+        local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
+        if not self._token:
+            await self._ensure_authenticated()
+        client = await self._get_client()
+        endpoint = f"/process-groups/replace-requests/{request_id}"
+        params = {"disconnectedNodeAcknowledged": "false"}
+        try:
+            response = await client.delete(endpoint, params=params)
+            response.raise_for_status()
+            # Some NiFi versions return empty body
+            if response.content:
+                return response.json()
+            return {"requestId": request_id, "deleted": True}
+        except httpx.HTTPStatusError as e:
+            local_logger.error(
+                f"Failed to delete replace request {request_id}: {e.response.status_code} - {e.response.text}"
+            )
+            raise ConnectionError(
+                f"Failed to delete replace request: {e.response.status_code}, {e.response.text}"
+            ) from e
+        except (httpx.RequestError, ValueError) as e:
+            local_logger.error(f"Error deleting replace request {request_id}: {_http_error_detail(e)}")
+            raise ConnectionError(f"Error deleting replace request: {_http_error_detail(e)}") from e
+
+    async def replace_process_group_from_flow_definition(
+        self,
+        process_group_id: str,
+        versioned_flow_snapshot: Dict[str, Any],
+        *,
+        poll_interval_seconds: float = 1.0,
+        timeout_seconds: float = 300.0,
+        cleanup_request: bool = True,
+        user_request_id: str = "-",
+        action_id: str = "-",
+    ) -> dict:
+        """Replace a process group's contents and wait for the async request to finish.
+
+        Uses NiFi replace-requests API (stops processors / disables services as needed).
+        """
+        local_logger = logger.bind(user_request_id=user_request_id, action_id=action_id)
+        started = await self.initiate_process_group_replace(
+            process_group_id,
+            versioned_flow_snapshot,
+            user_request_id=user_request_id,
+            action_id=action_id,
+        )
+        request = (started or {}).get("request") or {}
+        request_id = request.get("requestId")
+        if not request_id:
+            raise ConnectionError(
+                f"Replace request did not return a requestId. Response: {started}"
+            )
+
+        deadline = time.time() + max(1.0, float(timeout_seconds))
+        last: dict = started
+        while True:
+            req = (last or {}).get("request") or {}
+            if req.get("complete"):
+                break
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"Replace request {request_id} did not complete within {timeout_seconds}s "
+                    f"(state={req.get('state')}, percent={req.get('percentCompleted')})"
+                )
+            await asyncio.sleep(max(0.1, float(poll_interval_seconds)))
+            last = await self.get_process_group_replace_request(
+                request_id, user_request_id=user_request_id, action_id=action_id
+            )
+
+        req = (last or {}).get("request") or {}
+        failure = req.get("failureReason")
+        if failure:
+            local_logger.error(f"Replace request {request_id} failed: {failure}")
+            if cleanup_request:
+                try:
+                    await self.delete_process_group_replace_request(
+                        request_id, user_request_id=user_request_id, action_id=action_id
+                    )
+                except Exception as cleanup_err:
+                    local_logger.warning(
+                        f"Failed to clean up replace request {request_id}: {cleanup_err}"
+                    )
+            raise ConnectionError(f"Process group replace failed: {failure}")
+
+        if cleanup_request:
+            try:
+                await self.delete_process_group_replace_request(
+                    request_id, user_request_id=user_request_id, action_id=action_id
+                )
+            except Exception as cleanup_err:
+                local_logger.warning(
+                    f"Replace completed but cleanup of request {request_id} failed: {cleanup_err}"
+                )
+
+        local_logger.info(f"Replace request {request_id} completed successfully")
+        return {
+            "process_group_id": process_group_id,
+            "request_id": request_id,
+            "state": req.get("state"),
+            "percent_completed": req.get("percentCompleted"),
+            "complete": True,
+            "process_group_revision": (last or {}).get("processGroupRevision"),
+        }

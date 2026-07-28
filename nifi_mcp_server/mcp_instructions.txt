@@ -3,12 +3,19 @@ You are using the NiFi MCP server to interact with Apache NiFi via tools. Follow
 ORCHESTRATION
 - When documenting an unknown flow: one call to get_flow_outline to see structure, then document_nifi_flow on the chosen root.
 - Full hierarchical documentation: use document_nifi_flow with include_child_groups=true and max_depth set for the flow depth (often 5–10). That is the primary path for "document this process group and everything under it."
+- Prefer document_nifi_flow output_profile=doc_optimized (default) to limit token use; use output_profile=full only when debugging a specific processor; use summary when you only need topology.
 - If a tool returns continuation_token or completed=false, resume with the SAME tool and the token—do not parallelize retries.
 - Prefer ONE heavy read tool per user goal per turn. Do not call get_flow_outline, document_nifi_flow, and get_process_group_status in parallel for the same sweep; NiFi may hit transient connection/read errors under concurrent load.
 - get_process_group_status is heavy when include_child_groups=true. Use it when the user wants health, queues, or bulletins—typically as a separate step after documentation, unless they explicitly want both.
 
 STRATEGY
 - For large flows, you may document one subtree (one branch of the tree) before moving to sibling process groups to limit output size and stay coherent.
+- After creating controller services that use #{PARAM}, call set_nifi_process_group_parameter_context so the PG can resolve parameters (list_nifi_parameter_contexts first if needed).
+
+FLOW-AS-CODE
+- Export to a named path for git: export_flow_to_path (prefer over timestamped save_nifi_flow_export when JSON is source of truth).
+- Apply: import_flow_definition creates a new child PG; replace_process_group_from_file overwrites an existing PG. Prefer sandbox PGs; replace is destructive.
+- Compare two JSON files offline with diff_flow_json before applying (layout noise ignored by default).
 
 LONG-FORM HELP
 - Repository docs: docs/MCP-Agent-Guide.md (agent orchestration; same ideas as this block in more detail).

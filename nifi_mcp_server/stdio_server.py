@@ -48,6 +48,7 @@ from nifi_mcp_server.api_tools import modification  # noqa: F401
 from nifi_mcp_server.api_tools import operation  # noqa: F401
 from nifi_mcp_server.api_tools import helpers  # noqa: F401
 from nifi_mcp_server.api_tools import control  # noqa: F401 - MCP-only server/phase tools
+from nifi_mcp_server.api_tools import flow_as_code  # noqa: F401 - export/import/replace/diff flow JSON
 
 from nifi_mcp_server.request_context import (
     current_action_id,

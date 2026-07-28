@@ -604,11 +604,39 @@ def apply_output_profile(
         if key == "comments" and not profile["include_comments"]:
             continue
         
-        # Truncate long string values
+        # Truncate long string values (top-level and nested property maps)
         max_len = profile.get("max_property_value_length")
-        if max_len and isinstance(value, str) and len(value) > max_len:
+        if key == "properties" and isinstance(value, dict) and max_len:
+            truncated = {}
+            for prop_name, prop_value in value.items():
+                if isinstance(prop_value, str) and len(prop_value) > max_len:
+                    truncated[prop_name] = (
+                        prop_value[:max_len]
+                        + f"... [truncated, {len(prop_value)} chars total]"
+                    )
+                else:
+                    truncated[prop_name] = prop_value
+            value = truncated
+        elif max_len and isinstance(value, str) and len(value) > max_len:
             value = value[:max_len] + f"... [truncated, {len(value)} chars total]"
         
         result[key] = value
     
     return result
+
+
+def apply_profile_to_documentation(
+    documentation: Dict[str, Any],
+    profile_name: str = "full",
+) -> Dict[str, Any]:
+    """Apply an output profile to each processor (and port) in a documentation dict."""
+    if profile_name == "full" or profile_name not in OUTPUT_PROFILES:
+        return documentation
+    components = documentation.get("components") or {}
+    processors = components.get("processors") or {}
+    profiled_processors = {
+        pid: apply_output_profile(proc_info, profile_name)
+        for pid, proc_info in processors.items()
+    }
+    components = {**components, "processors": profiled_processors}
+    return {**documentation, "components": components}

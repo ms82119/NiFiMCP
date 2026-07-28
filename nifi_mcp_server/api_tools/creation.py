@@ -280,6 +280,33 @@ async def _create_nifi_connection_single(
             # Validate relationships for processors
             if not relationships:
                 raise ToolError("The 'relationships' list cannot be empty for processor connections.")
+            available_rels = (
+                source_entity.get("component") or {}
+            ).get("relationships") or []
+            available_names = {
+                rel.get("name")
+                for rel in available_rels
+                if isinstance(rel, dict) and rel.get("name")
+            }
+            auto_terminated = sorted(
+                rel.get("name")
+                for rel in available_rels
+                if isinstance(rel, dict) and rel.get("name") and rel.get("autoTerminate")
+            )
+            unknown = [name for name in relationships if name not in available_names]
+            if unknown:
+                available_sorted = sorted(available_names)
+                raise ToolError(
+                    f"Invalid relationship(s) for processor "
+                    f"'{((source_entity.get('component') or {}).get('name')) or source_id}': "
+                    f"{unknown}. Available: {available_sorted}"
+                    + (f". Auto-terminated: {auto_terminated}" if auto_terminated else "")
+                    + ". Hint: NiFi may omit relationships that appear only when a property "
+                    "enables them (e.g. Output No Hits); check the processor's current relationships."
+                )
+            local_logger.info(
+                f"Validated relationships {relationships} against available {sorted(available_names)}"
+            )
         except ValueError:
             try:
                 source_entity = await nifi_client.get_input_port_details(source_id)

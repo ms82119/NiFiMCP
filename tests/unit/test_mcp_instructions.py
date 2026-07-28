@@ -12,6 +12,9 @@ def test_mcp_instructions_file_exists_and_has_playbook():
     text = path.read_text(encoding="utf-8")
     assert len(text.strip()) > 50
     assert "document_nifi_flow" in text or "parallel" in text.lower()
+    assert "doc_optimized" in text
+    assert "set_nifi_process_group_parameter_context" in text
+    assert "export_flow_to_path" in text
 
 
 def test_core_fastmcp_receives_non_empty_instructions():

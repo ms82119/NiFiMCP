@@ -136,15 +136,39 @@ async def operate_nifi_object(
                             local_logger.warning(f"[Start flow] Could not enable controller services in PG {pg_id}: {e}")
 
                     if validation_status != "VALID":
+                        if not validation_errors:
+                            # Ports/processors sometimes omit errors on the first read; re-fetch
+                            try:
+                                refreshed = await nifi_client.get_processor_details(object_id)
+                                validation_errors = (
+                                    refreshed.get("component") or {}
+                                ).get("validationErrors") or []
+                                validation_status = (
+                                    refreshed.get("component") or {}
+                                ).get("validationStatus") or validation_status
+                            except Exception:
+                                pass
                         error_list_str = ", ".join(validation_errors) if validation_errors else "No specific errors listed."
                         error_msg = f"Processor '{name}' cannot be started. Validation status: {validation_status}. Errors: [{error_list_str}]"
                         local_logger.warning(error_msg)
-                        return {"status": "error", "message": error_msg, "entity": None}
+                        return {
+                            "status": "error",
+                            "message": error_msg,
+                            "entity": None,
+                            "validation_status": validation_status,
+                            "validation_errors": validation_errors or [],
+                        }
 
                     if current_state == "DISABLED":
                         error_msg = f"Processor '{name}' cannot be started because it is DISABLED. Enable it first."
                         local_logger.warning(error_msg)
-                        return {"status": "error", "message": error_msg, "entity": None}
+                        return {
+                            "status": "error",
+                            "message": error_msg,
+                            "entity": None,
+                            "validation_status": validation_status,
+                            "validation_errors": validation_errors or [],
+                        }
 
                     local_logger.info(f"Processor pre-checks passed (Validation: {validation_status}, State: {current_state}). Proceeding with start.")
 
@@ -189,13 +213,26 @@ async def operate_nifi_object(
                  return {"status": "success", "message": f"{object_type.capitalize()} '{name}' {action} successfully.", "entity": filtered_entity}
             else:
                 # Check for specific error cases if start failed despite pre-check
+                post_errors = component.get("validationErrors") or []
                 if operation_type == "start" and (current_state == "DISABLED" or validation_status != "VALID"):
                     local_logger.warning(f"{object_type.capitalize()} '{name}' could not be started. State: {current_state}, Validation: {validation_status}.")
-                    return {"status": "warning", "message": f"{object_type.capitalize()} '{name}' could not be started (State: {current_state}, Validation: {validation_status}). Check config.", "entity": filtered_entity}
+                    return {
+                        "status": "warning",
+                        "message": f"{object_type.capitalize()} '{name}' could not be started (State: {current_state}, Validation: {validation_status}). Check config.",
+                        "entity": filtered_entity,
+                        "validation_status": validation_status,
+                        "validation_errors": post_errors,
+                    }
                 else:
                      action = "start" if operation_type == "start" else "stop"
                      local_logger.warning(f"{object_type.capitalize()} '{name}' state is {current_state} after {action} request. Expected {target_state}.")
-                     return {"status": "warning", "message": f"{object_type.capitalize()} '{name}' is {current_state} after {action} request. Check NiFi UI.", "entity": filtered_entity}
+                     return {
+                         "status": "warning",
+                         "message": f"{object_type.capitalize()} '{name}' is {current_state} after {action} request. Check NiFi UI.",
+                         "entity": filtered_entity,
+                         "validation_status": validation_status,
+                         "validation_errors": post_errors,
+                     }
 
         # --- Port Logic ---
         elif object_type == "port":
@@ -232,15 +269,41 @@ async def operate_nifi_object(
                     name = component.get("name", object_id)
 
                     if validation_status != "VALID":
+                        if not validation_errors:
+                            try:
+                                if port_type_found == "input":
+                                    refreshed = await nifi_client.get_input_port_details(object_id)
+                                else:
+                                    refreshed = await nifi_client.get_output_port_details(object_id)
+                                validation_errors = (
+                                    refreshed.get("component") or {}
+                                ).get("validationErrors") or []
+                                validation_status = (
+                                    refreshed.get("component") or {}
+                                ).get("validationStatus") or validation_status
+                            except Exception:
+                                pass
                         error_list_str = ", ".join(validation_errors) if validation_errors else "No specific errors listed."
                         error_msg = f"Port '{name}' cannot be started. Validation status: {validation_status}. Errors: [{error_list_str}]"
                         local_logger.warning(error_msg)
-                        return {"status": "error", "message": error_msg, "entity": None}
+                        return {
+                            "status": "error",
+                            "message": error_msg,
+                            "entity": None,
+                            "validation_status": validation_status,
+                            "validation_errors": validation_errors or [],
+                        }
 
                     if current_state == "DISABLED":
                         error_msg = f"Port '{name}' cannot be started because it is DISABLED. Enable it first."
                         local_logger.warning(error_msg)
-                        return {"status": "error", "message": error_msg, "entity": None}
+                        return {
+                            "status": "error",
+                            "message": error_msg,
+                            "entity": None,
+                            "validation_status": validation_status,
+                            "validation_errors": validation_errors or [],
+                        }
 
                     # Idempotency: already RUNNING is success
                     if current_state == "RUNNING":
@@ -316,13 +379,26 @@ async def operate_nifi_object(
                  return {"status": "success", "message": f"{object_type.capitalize()} '{name}' {action} successfully.", "entity": filtered_entity}
             else:
                 # Check for specific error cases if start failed despite pre-check
+                post_errors = component.get("validationErrors") or []
                 if operation_type == "start" and (current_state == "DISABLED" or validation_status != "VALID"):
                     local_logger.warning(f"{object_type.capitalize()} '{name}' could not be started. State: {current_state}, Validation: {validation_status}.")
-                    return {"status": "warning", "message": f"{object_type.capitalize()} '{name}' could not be started (State: {current_state}, Validation: {validation_status}). Check config.", "entity": filtered_entity}
+                    return {
+                        "status": "warning",
+                        "message": f"{object_type.capitalize()} '{name}' could not be started (State: {current_state}, Validation: {validation_status}). Check config.",
+                        "entity": filtered_entity,
+                        "validation_status": validation_status,
+                        "validation_errors": post_errors,
+                    }
                 else:
                      action = "start" if operation_type == "start" else "stop"
                      local_logger.warning(f"{object_type.capitalize()} '{name}' state is {current_state} after {action} request. Expected {target_state}.")
-                     return {"status": "warning", "message": f"{object_type.capitalize()} '{name}' is {current_state} after {action} request. Check NiFi UI.", "entity": filtered_entity}
+                     return {
+                         "status": "warning",
+                         "message": f"{object_type.capitalize()} '{name}' is {current_state} after {action} request. Check NiFi UI.",
+                         "entity": filtered_entity,
+                         "validation_status": validation_status,
+                         "validation_errors": post_errors,
+                     }
 
         # --- Process Group Logic ---
         elif object_type == "process_group":
