@@ -15,6 +15,7 @@ chat_history.db
 nifi_tokens.json
 nifi_chat_ui/system_prompt copy 2.md
 .cursor/plans/
+.cursor/mcp.json
 .pytest_cache/
 flow_exports/
 .nifimcp_launcher_sync
