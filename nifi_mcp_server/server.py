@@ -80,6 +80,7 @@ from .api_tools import creation
 from .api_tools import modification
 from .api_tools import operation
 from .api_tools import helpers
+from .api_tools import labels
 from .api_tools import control  # MCP-only server/phase tools (hidden from web via get_tools filter)
 from .api_tools import flow_as_code  # export/import/replace/diff flow JSON (flow-as-code)
 # Add other tool module imports here as they are created

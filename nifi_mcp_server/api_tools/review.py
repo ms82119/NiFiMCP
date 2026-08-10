@@ -1059,6 +1059,8 @@ async def _fetch_single_object_details(
             except ValueError as e_out:
                 local_logger.error(f"Could not find port with ID '{object_id}' as either input or output port.")
                 raise ToolError(f"Port with ID '{object_id}' not found.") from e_out
+    elif object_type == "label":
+        details = await nifi_client.get_label_details(object_id)
     else:
         raise ToolError(f"Invalid object_type specified: {object_type}")
     return details
@@ -1425,7 +1427,7 @@ def _format_output(
 @mcp.tool()
 @tool_phases(["Review", "Build", "Modify", "Operate"])
 async def get_nifi_object_details(
-    object_type: Literal["processor", "connection", "port", "process_group", "controller_service"],
+    object_type: Literal["processor", "connection", "port", "process_group", "controller_service", "label"],
     object_id: str | None = None,
     object_ids: List[str] | None = None,
     output_format: Literal["full", "summary", "doc_optimized"] = "full",

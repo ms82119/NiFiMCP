@@ -1151,7 +1151,7 @@ async def delete_nifi_objects(
     objects: List[Dict[str, Any]]
 ) -> List[Dict]:
     """
-    Deletes multiple NiFi objects (processors, connections, ports, process groups, or controller services) in batch.
+    Deletes multiple NiFi objects (processors, connections, ports, process groups, controller services, or labels) in batch.
     Attempts Auto-Stop for running processors if enabled.
     Attempts Auto-Delete for processors with connections if enabled.
     Attempts Auto-Purge for connections with queued data if enabled.
@@ -1159,7 +1159,7 @@ async def delete_nifi_objects(
 
     Args:
         objects: A list of deletion request dictionaries, each containing:
-            - object_type: The type of the object to delete ('processor', 'connection', 'port', 'process_group', 'controller_service')
+            - object_type: The type of the object to delete ('processor', 'connection', 'port', 'process_group', 'controller_service', 'label')
             - object_id: The UUID of the object to delete
             - name (optional): A descriptive name for the object (used in logging/results)
 
@@ -1204,8 +1204,8 @@ async def delete_nifi_objects(
             raise ToolError(f"Deletion request {i} is not a dictionary.")
         if "object_type" not in req or "object_id" not in req:
             raise ToolError(f"Deletion request {i} missing required fields 'object_type' and/or 'object_id'.")
-        if req["object_type"] not in ["processor", "connection", "port", "process_group", "controller_service"]:
-            raise ToolError(f"Deletion request {i} has invalid object_type '{req['object_type']}'. Must be one of: processor, connection, port, process_group, controller_service.")
+        if req["object_type"] not in ["processor", "connection", "port", "process_group", "controller_service", "label"]:
+            raise ToolError(f"Deletion request {i} has invalid object_type '{req['object_type']}'. Must be one of: processor, connection, port, process_group, controller_service, label.")
 
     local_logger.info(f"Executing delete_nifi_objects for {len(objects)} objects")
     
@@ -1706,6 +1706,8 @@ async def _delete_single_nifi_object(
                 deleted = await nifi_client.delete_process_group(object_id, current_version)
             elif object_type == "controller_service":
                 deleted = await nifi_client.delete_controller_service(object_id, current_version)
+            elif object_type == "label":
+                deleted = await nifi_client.delete_label(object_id, current_version)
             else:
                 raise ToolError(f"Unsupported object type for deletion: {object_type}")
         except ValueError as e:

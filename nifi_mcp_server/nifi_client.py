@@ -1878,6 +1878,135 @@ class NiFiClient:
             logger.error(f"An unexpected error occurred creating output port '{name}': {_http_error_detail(e)}", exc_info=True)
             raise ConnectionError(f"An unexpected error occurred creating output port: {_http_error_detail(e)}") from e
 
+    async def list_labels(self, pg_id: str) -> List[dict]:
+        """Lists canvas labels in a process group."""
+        if not self._token:
+            await self._ensure_authenticated()
+
+        client = await self._get_client()
+        endpoint = f"/process-groups/{pg_id}/labels"
+        try:
+            response = await client.get(endpoint)
+            response.raise_for_status()
+            return response.json().get("labels", [])
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to list labels for PG {pg_id}: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to list labels: {e.response.status_code}, {e.response.text}") from e
+
+    async def get_label_details(self, label_id: str) -> dict:
+        """Gets details for a single canvas label."""
+        if not self._token:
+            await self._ensure_authenticated()
+
+        client = await self._get_client()
+        endpoint = f"/labels/{label_id}"
+        try:
+            response = await client.get(endpoint)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise ValueError(f"Label {label_id} not found") from e
+            logger.error(f"Failed to get label {label_id}: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to get label: {e.response.status_code}, {e.response.text}") from e
+
+    async def create_label(
+        self,
+        pg_id: str,
+        text: str,
+        position: Dict[str, float],
+        width: float = 400.0,
+        height: float = 80.0,
+        style: Optional[Dict[str, str]] = None,
+    ) -> dict:
+        """Creates a canvas label in the specified process group."""
+        if not self._token:
+            await self._ensure_authenticated()
+
+        from .label_utils import default_label_style, normalize_label_style
+
+        client = await self._get_client()
+        endpoint = f"/process-groups/{pg_id}/labels"
+        request_body = {
+            "revision": {"clientId": self._client_id, "version": 0},
+            "component": {
+                "label": text,
+                "position": position,
+                "width": width,
+                "height": height,
+                "style": normalize_label_style(style or default_label_style()),
+            },
+        }
+        try:
+            logger.info(f"Creating label in PG {pg_id} at {position}")
+            response = await client.post(endpoint, json=request_body)
+            response.raise_for_status()
+            created = response.json()
+            logger.info(f"Created label {created.get('id')}")
+            return created
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to create label: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to create label: {e.response.status_code}, {e.response.text}") from e
+
+    async def update_label(
+        self,
+        label_id: str,
+        *,
+        text: Optional[str] = None,
+        position: Optional[Dict[str, float]] = None,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+        style: Optional[Dict[str, str]] = None,
+    ) -> dict:
+        """Updates an existing canvas label."""
+        if not self._token:
+            await self._ensure_authenticated()
+
+        from .label_utils import normalize_label_style
+
+        current = await self.get_label_details(label_id)
+        component = dict(current.get("component") or {})
+        if text is not None:
+            component["label"] = text
+        if position is not None:
+            component["position"] = position
+        if width is not None:
+            component["width"] = width
+        if height is not None:
+            component["height"] = height
+        if style is not None:
+            component["style"] = normalize_label_style(style)
+
+        client = await self._get_client()
+        payload = {
+            "revision": current["revision"],
+            "component": {"id": label_id, **component},
+        }
+        try:
+            response = await client.put(f"/labels/{label_id}", json=payload)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to update label {label_id}: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to update label: {e.response.status_code}, {e.response.text}") from e
+
+    async def delete_label(self, label_id: str, version: int) -> bool:
+        """Deletes a canvas label."""
+        if not self._token:
+            await self._ensure_authenticated()
+
+        client = await self._get_client()
+        endpoint = f"/labels/{label_id}?version={version}&clientId={self._client_id}"
+        try:
+            response = await client.delete(endpoint)
+            response.raise_for_status()
+            return response.status_code == 200
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return False
+            logger.error(f"Failed to delete label {label_id}: {e.response.status_code} - {e.response.text}")
+            raise ConnectionError(f"Failed to delete label: {e.response.status_code}, {e.response.text}") from e
+
     async def create_process_group(self, parent_pg_id: str, name: str, position: Dict[str, float]) -> dict:
         """Creates a new process group within the specified parent process group."""
         if not self._token:
