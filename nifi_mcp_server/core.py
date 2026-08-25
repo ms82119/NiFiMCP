@@ -108,7 +108,8 @@ async def get_nifi_client(server_id: str, bound_logger = logger) -> NiFiClient:
         username=server_conf.get('username'),  # May be None
         password=server_conf.get('password'),  # May be None
         tls_verify=server_conf.get('tls_verify', True),
-        credential_callback=credential_callback
+        credential_callback=credential_callback,
+        server_id=server_id
     )
     bound_logger.debug(f"Instantiated NiFiClient for {server_conf.get('url')}")
 

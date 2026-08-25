@@ -101,6 +101,37 @@ class NiFiClient:
             return
         await self.authenticate(server_id=self._server_id)
 
+    async def _handle_http_status_error(self, e: httpx.HTTPStatusError, context: str) -> None:
+        """Clears the cached token when NiFi reports an expired/unauthorized session.
+
+        Called as the first action of every ``except httpx.HTTPStatusError`` handler in this
+        client. For anything other than a 401 whose body looks like an expired or unauthorized
+        session this is a no-op, so the caller's existing (non-401) error handling runs
+        unchanged. For that 401 case the in-memory token is dropped and the httpx client is
+        torn down, so the next call falls back through ``_ensure_authenticated`` and re-reads
+        the token store from disk (which is how a freshly-written token gets picked up without
+        restarting the server).
+        """
+        if e.response.status_code != 401:
+            return
+        error_text = e.response.text or ""
+        if not ("Session Expired" in error_text or "expired" in error_text.lower() or "unauthorized" in error_text.lower()):
+            return
+
+        logger.warning(
+            f"Token appears to be expired (401 Unauthorized) during {context}. "
+            f"Clearing token for potential re-authentication."
+        )
+        self._token = None
+        # Force client recreation on next use
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+        raise NiFiAuthenticationError(
+            f"Authentication token has expired. Please provide a new access token. "
+            f"Original error: {e.response.status_code} - {error_text}"
+        ) from e
+
     async def _get_client(self):
         """Returns an httpx client instance, configuring auth if token exists."""
         # Always create a new client instance to ensure headers are fresh,
@@ -421,6 +452,7 @@ class NiFiClient:
             return root_id
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to get root process group ID: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_root_process_group_id")
             raise ConnectionError(f"Failed to get root process group ID: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
             local_logger.error(f"Error getting root process group ID: {_http_error_detail(e)}")
@@ -444,6 +476,7 @@ class NiFiClient:
             return response.json()
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to download flow definition: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "download_flow_definition")
             raise ConnectionError(f"Failed to download flow definition: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error downloading flow definition: {_http_error_detail(e)}")
@@ -473,6 +506,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to list processors for group {process_group_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "list_processors")
             raise ConnectionError(f"Failed to list processors: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
             local_logger.error(f"Error listing processors for group {process_group_id}: {_http_error_detail(e)}")
@@ -522,6 +556,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to create processor '{name}': {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "create_processor")
             raise ConnectionError(f"Failed to create processor: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error creating processor '{name}': {_http_error_detail(e)}")
@@ -585,6 +620,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to create connection: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "create_connection")
             raise ConnectionError(f"Failed to create connection: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error creating connection: {_http_error_detail(e)}")
@@ -610,6 +646,7 @@ class NiFiClient:
             return processor_details
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "get_processor_details")
             # Handle 404 Not Found specifically
             if e.response.status_code == 404:
                 logger.warning(f"Processor with ID {processor_id} not found.")
@@ -649,6 +686,7 @@ class NiFiClient:
                  return False
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "delete_processor")
             # Handle specific errors like 404 (Not Found) or 409 (Conflict - likely wrong version)
             if e.response.status_code == 404:
                  logger.warning(f"Processor {processor_id} not found for deletion.")
@@ -683,6 +721,7 @@ class NiFiClient:
             return connection_details
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "get_connection")
             if e.response.status_code == 404:
                 logger.warning(f"Connection with ID {connection_id} not found.")
                 raise ValueError(f"Connection with ID {connection_id} not found.") from e
@@ -729,6 +768,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Error listing connections: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "list_connections")
             raise ConnectionError(f"Failed to list connections: {e.response.status_code}, {e.response.text}") from e
         except httpx.RequestError as e:
             error_msg = str(e) or repr(e) or "Unknown request error"
@@ -770,6 +810,7 @@ class NiFiClient:
                 return False
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "delete_connection")
             if e.response.status_code == 404:
                 logger.warning(f"Connection {connection_id} not found for deletion.")
                 return False
@@ -810,6 +851,7 @@ class NiFiClient:
             return updated_entity
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "update_connection")
             if e.response.status_code == 404:
                 logger.warning(f"Connection {connection_id} not found for update.")
                 raise ValueError(f"Connection with ID {connection_id} not found.") from e
@@ -941,6 +983,7 @@ class NiFiClient:
             return updated_entity
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "update_processor_config")
             # Handle 409 Conflict (likely stale revision)
             if e.response.status_code == 409:
                 logger.error(f"NiFiClient.update_processor_config: Conflict. Endpoint: {e.request.url}, Method: {e.request.method}, Sent Payload: {update_payload}, Response Status: {e.response.status_code}, Response Body: {e.response.text}") # Added log
@@ -996,6 +1039,7 @@ class NiFiClient:
             return updated_entity
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "update_processor_state")
             if e.response.status_code == 409:
                 logger.error(f"Conflict changing state for processor {processor_id}. Revision ({current_revision.get('version')}) likely stale. Response: {e.response.text}")
                 raise ValueError(f"Conflict changing processor state for {processor_id}. Revision mismatch.") from e
@@ -1033,6 +1077,7 @@ class NiFiClient:
             return status_data.get("processGroupStatus", {}) # Return the main status part
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "get_process_group_status_snapshot")
             if e.response.status_code == 404:
                 logger.warning(f"Process group {process_group_id} not found when fetching status snapshot.")
                 raise ValueError(f"Process group with ID {process_group_id} not found.") from e
@@ -1083,6 +1128,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get bulletins: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_bulletin_board")
             raise ConnectionError(f"Failed to get bulletins: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error getting bulletins: {_http_error_detail(e)}")
@@ -1122,6 +1168,7 @@ class NiFiClient:
              raise ToolError(f"Authentication error accessing parameter context for PG {process_group_id}.") from e
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to get parameter context for PG {process_group_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_parameter_context")
             raise ToolError(f"Failed to get parameter context: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError, ConnectionError) as e:
             local_logger.error(f"Error getting parameter context for PG {process_group_id}: {_http_error_detail(e)}")
@@ -1314,6 +1361,7 @@ class NiFiClient:
             return ports
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to list input ports for group {process_group_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_input_ports")
             raise ConnectionError(f"Failed to list input ports: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error listing input ports for group {process_group_id}: {_http_error_detail(e)}")
@@ -1340,6 +1388,7 @@ class NiFiClient:
             return ports
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to list output ports for group {process_group_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_output_ports")
             raise ConnectionError(f"Failed to list output ports: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error listing output ports for group {process_group_id}: {_http_error_detail(e)}")
@@ -1371,17 +1420,7 @@ class NiFiClient:
                 logger.error(f"Failed to list process groups for group {process_group_id}: {e.response.status_code} - {error_text}")
 
                 # Handle token expiration (401 with "Session Expired" or similar)
-                if e.response.status_code == 401 and ("Session Expired" in error_text or "expired" in error_text.lower() or "unauthorized" in error_text.lower()):
-                    logger.warning(f"Token appears to be expired (401 Unauthorized). Clearing token for potential re-authentication.")
-                    self._token = None
-                    # Force client recreation on next use
-                    if self._client:
-                        await self._client.aclose()
-                        self._client = None
-                    raise NiFiAuthenticationError(
-                        f"Authentication token has expired. Please provide a new access token. "
-                        f"Original error: {e.response.status_code} - {error_text}"
-                    ) from e
+                await self._handle_http_status_error(e, "get_process_groups")
 
                 raise ConnectionError(
                     f"Failed to list process groups: HTTP {e.response.status_code} {error_text[:800]}"
@@ -1424,6 +1463,7 @@ class NiFiClient:
             return group_details
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "get_process_group_details")
             if e.response.status_code == 404:
                 local_logger.warning(f"Process group with ID {process_group_id} not found.")
                 raise ValueError(f"Process group with ID {process_group_id} not found.") from e
@@ -1458,6 +1498,7 @@ class NiFiClient:
             return response.json()
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to update process group {process_group_id} position: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "update_process_group_position")
             raise ConnectionError(f"Failed to update process group position: {e.response.status_code}, {e.response.text}") from e
 
     async def get_process_group_flow(self, process_group_id: str, ui_only: bool = False) -> dict:
@@ -1483,6 +1524,7 @@ class NiFiClient:
             return flow_details
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "get_process_group_flow")
             if e.response.status_code == 404:
                 logger.warning(f"Process group flow with ID {process_group_id} not found.")
                 raise ValueError(f"Process group flow with ID {process_group_id} not found.") from e
@@ -1512,6 +1554,7 @@ class NiFiClient:
             return port_details
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "get_input_port_details")
             if e.response.status_code == 404:
                 logger.warning(f"Input port with ID {port_id} not found.")
                 raise ValueError(f"Input port with ID {port_id} not found.") from e
@@ -1541,6 +1584,7 @@ class NiFiClient:
             return port_details
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "get_output_port_details")
             if e.response.status_code == 404:
                 logger.warning(f"Output port with ID {port_id} not found.")
                 raise ValueError(f"Output port with ID {port_id} not found.") from e
@@ -1575,6 +1619,7 @@ class NiFiClient:
                  return False
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "delete_input_port")
             if e.response.status_code == 404:
                  logger.warning(f"Input port {port_id} not found for deletion.")
                  return False
@@ -1612,6 +1657,7 @@ class NiFiClient:
                  return False
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "delete_output_port")
             if e.response.status_code == 404:
                  logger.warning(f"Output port {port_id} not found for deletion.")
                  return False
@@ -1650,6 +1696,7 @@ class NiFiClient:
                  return False
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "delete_process_group")
             if e.response.status_code == 404:
                  logger.warning(f"Process group {pg_id} not found for deletion.")
                  return False
@@ -1703,6 +1750,7 @@ class NiFiClient:
             logger.info(f"Successfully set input port {port_id} state to {updated_entity.get('component',{}).get('state', 'UNKNOWN')}.")
             return updated_entity
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "update_input_port_state")
             if e.response.status_code == 409:
                 logger.error(f"Conflict changing state for input port {port_id}. Revision ({current_revision.get('version')}) likely stale or state invalid. Response: {e.response.text}")
                 raise ValueError(f"Conflict changing input port state for {port_id}. Revision mismatch or invalid state.") from e
@@ -1752,6 +1800,7 @@ class NiFiClient:
             logger.info(f"Successfully set output port {port_id} state to {updated_entity.get('component',{}).get('state', 'UNKNOWN')}.")
             return updated_entity
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "update_output_port_state")
             if e.response.status_code == 409:
                 logger.error(f"Conflict changing state for output port {port_id}. Revision ({current_revision.get('version')}) likely stale or state invalid. Response: {e.response.text}")
                 raise ValueError(f"Conflict changing output port state for {port_id}. Revision mismatch or invalid state.") from e
@@ -1786,6 +1835,7 @@ class NiFiClient:
             return response.json()
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to update input port {port_id} position: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "update_input_port_position")
             raise ConnectionError(f"Failed to update input port position: {e.response.status_code}, {e.response.text}") from e
 
     async def update_output_port_position(self, port_id: str, x: float, y: float) -> dict:
@@ -1809,6 +1859,7 @@ class NiFiClient:
             return response.json()
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to update output port {port_id} position: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "update_output_port_position")
             raise ConnectionError(f"Failed to update output port position: {e.response.status_code}, {e.response.text}") from e
 
     async def create_input_port(self, pg_id: str, name: str, position: Dict[str, float]) -> dict:
@@ -1837,6 +1888,7 @@ class NiFiClient:
             return created_port_data
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to create input port '{name}': {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "create_input_port")
             raise ConnectionError(f"Failed to create input port: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error creating input port '{name}': {_http_error_detail(e)}")
@@ -1870,6 +1922,7 @@ class NiFiClient:
             return created_port_data
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to create output port '{name}': {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "create_output_port")
             raise ConnectionError(f"Failed to create output port: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error creating output port '{name}': {_http_error_detail(e)}")
@@ -2033,6 +2086,7 @@ class NiFiClient:
             return created_pg_data
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to create process group '{name}': {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "create_process_group")
             raise ConnectionError(f"Failed to create process group: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error creating process group '{name}': {_http_error_detail(e)}")
@@ -2061,6 +2115,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get processor types: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_processor_types")
             raise ConnectionError(f"Failed to get processor types: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error getting processor types: {_http_error_detail(e)}")
@@ -2090,6 +2145,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to perform flow search for query '{query}': {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "search_flow")
             # Don't raise ValueError for 404, search simply might not find anything or endpoint might differ
             raise ConnectionError(f"Failed to perform flow search: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e: # Include ValueError for potential JSON parsing issues
@@ -2133,6 +2189,7 @@ class NiFiClient:
             return updated_entity
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "update_process_group_state")
             # Status code (e.g. 403) is from NiFi's REST API, not from this server
             resp = e.response
             logger.error(
@@ -2232,6 +2289,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to create drop request for connection {connection_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "create_drop_request")
             raise ConnectionError(f"Failed to create drop request: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
             logger.error(f"Error creating drop request for connection {connection_id}: {_http_error_detail(e)}")
@@ -2262,6 +2320,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get drop request status for {request_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_drop_request")
             raise ConnectionError(f"Failed to get drop request status: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
             logger.error(f"Error getting drop request status for {request_id}: {_http_error_detail(e)}")
@@ -2282,6 +2341,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.warning(f"Failed to delete drop request {request_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "delete_drop_request")
             # Don't raise an error here as this is cleanup
         except Exception as e:
             logger.warning(f"Error deleting drop request {request_id}: {_http_error_detail(e)}")
@@ -2356,6 +2416,7 @@ class NiFiClient:
                     results[connection_id]["message"] = f"Unexpected response status: {response.status_code}"
                 
             except httpx.HTTPStatusError as e:
+                await self._handle_http_status_error(e, "delete_connections_batch")
                 error_msg = ""
                 # Classify common error conditions
                 if e.response.status_code == 404:
@@ -2487,6 +2548,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to create flowfile listing request for connection {connection_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "create_flowfile_listing_request")
             raise ConnectionError(f"Failed to create flowfile listing request: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
             logger.error(f"Error creating flowfile listing request for connection {connection_id}: {_http_error_detail(e)}")
@@ -2517,6 +2579,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get flowfile listing request status for {request_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_flowfile_listing_request")
             raise ConnectionError(f"Failed to get flowfile listing request status: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
             logger.error(f"Error getting flowfile listing request status for {request_id}: {_http_error_detail(e)}")
@@ -2542,6 +2605,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.warning(f"Failed to delete flowfile listing request {request_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "delete_flowfile_listing_request")
             # Don't raise an error here as this is cleanup
         except Exception as e:
             logger.warning(f"Error deleting flowfile listing request {request_id}: {_http_error_detail(e)}")
@@ -2626,6 +2690,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to submit provenance query: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "submit_provenance_query")
             raise ConnectionError(f"Failed to submit provenance query: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
             logger.error(f"Error submitting provenance query: {_http_error_detail(e)}")
@@ -2655,6 +2720,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get provenance query status for {query_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_provenance_query")
             raise ConnectionError(f"Failed to get provenance query status: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
             logger.error(f"Error getting provenance query status for {query_id}: {_http_error_detail(e)}")
@@ -2689,6 +2755,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get provenance query results for {query_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_provenance_results")
             raise ConnectionError(f"Failed to get provenance query results: {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
             logger.error(f"Error getting provenance query results for {query_id}: {_http_error_detail(e)}")
@@ -2713,6 +2780,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.warning(f"Failed to delete provenance query {query_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "delete_provenance_query")
             # Don't raise an error here as this is cleanup
         except Exception as e:
             logger.warning(f"Error deleting provenance query {query_id}: {_http_error_detail(e)}")
@@ -2744,6 +2812,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get provenance event {event_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_provenance_event")
             if e.response.status_code == 404:
                 raise ValueError(f"Provenance event {event_id} not found") from e
             raise ConnectionError(f"Failed to get provenance event: {e.response.status_code}, {e.response.text}") from e
@@ -2776,6 +2845,7 @@ class NiFiClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get {direction} content for provenance event {event_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_provenance_event_content")
             if e.response.status_code == 404:
                 raise ValueError(f"Content not available for provenance event {event_id} ({direction})") from e
             raise ConnectionError(f"Failed to get provenance event content: {e.response.status_code}, {e.response.text}") from e
@@ -2808,6 +2878,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to list controller services for group {process_group_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "list_controller_services")
             raise ConnectionError(f"Failed to list controller services: {e.response.status_code}") from e
         except (httpx.RequestError, ValueError) as e:
             local_logger.error(f"Error listing controller services for group {process_group_id}: {_http_error_detail(e)}")
@@ -2835,6 +2906,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to get controller service details for {controller_service_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_controller_service_details")
             if e.response.status_code == 404:
                 raise ValueError(f"Controller service {controller_service_id} not found") from e
             raise ConnectionError(f"Failed to get controller service details: {e.response.status_code}") from e
@@ -2893,6 +2965,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to create controller service '{name}': {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "create_controller_service")
             raise ConnectionError(f"Failed to create controller service: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             local_logger.error(f"Error creating controller service '{name}': {_http_error_detail(e)}")
@@ -2940,6 +3013,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to update controller service properties for {controller_service_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "update_controller_service_properties")
             if e.response.status_code == 404:
                 raise ValueError(f"Controller service {controller_service_id} not found") from e
             elif e.response.status_code == 409:
@@ -2976,6 +3050,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to delete controller service {controller_service_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "delete_controller_service")
             if e.response.status_code == 404:
                 local_logger.warning(f"Controller service {controller_service_id} not found, considering it already deleted")
                 return True  # Consider it successful if already gone
@@ -3025,6 +3100,7 @@ class NiFiClient:
             return updated_entity
 
         except httpx.HTTPStatusError as e:
+            await self._handle_http_status_error(e, "enable_controller_service")
             # Status code (e.g. 403) is from NiFi's REST API, not from this server
             resp = e.response
             local_logger.error(
@@ -3078,6 +3154,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to disable controller service {controller_service_id}: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "disable_controller_service")
             if e.response.status_code == 404:
                 raise ValueError(f"Controller service {controller_service_id} not found") from e
             elif e.response.status_code == 409:
@@ -3113,6 +3190,7 @@ class NiFiClient:
 
         except httpx.HTTPStatusError as e:
             local_logger.error(f"Failed to get controller service types: {e.response.status_code} - {e.response.text}")
+            await self._handle_http_status_error(e, "get_controller_service_types")
             raise ConnectionError(f"Failed to get controller service types: {e.response.status_code}, {e.response.text}") from e
         except (httpx.RequestError, ValueError) as e:
             local_logger.error(f"Error getting controller service types: {_http_error_detail(e)}")

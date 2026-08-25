@@ -19,3 +19,4 @@ nifi_chat_ui/system_prompt copy 2.md
 .pytest_cache/
 flow_exports/
 .nifimcp_launcher_sync
+CLAUDE.md
